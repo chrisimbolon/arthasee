@@ -1,0 +1,28 @@
+# ── Backend (Django) ─────────────────────────
+backend/venv/
+backend/.venv/
+backend/.env
+backend/staticfiles/
+backend/media/
+backend/db.sqlite3
+
+# ── Python (anywhere in project) ─────────────
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# ── General ──────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+*.log
+.env
+.env.local
+
+# ── Editor ───────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
