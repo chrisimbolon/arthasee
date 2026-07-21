@@ -156,14 +156,21 @@ jobs:
             echo "=== Pulling latest code ==="
             git pull origin main
 
+            # Combines the self-contained base file with the
+            # droplet-only caddy-net wiring — every real docker
+            # compose call below uses this exact variable, so there's
+            # no risk of one invocation silently using a different,
+            # inconsistent set of files than the others.
+            COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+
             echo "=== Clearing Docker build cache ==="
             docker builder prune -f
 
             echo "=== Building backend image ==="
-            docker compose build --no-cache --pull arthasee_backend
+            $COMPOSE build --no-cache --pull arthasee_backend
 
             echo "=== Starting DB ==="
-            docker compose up -d arthasee_db
+            $COMPOSE up -d arthasee_db
 
             echo "=== Waiting for DB to be healthy ==="
             for i in $(seq 1 30); do
@@ -176,17 +183,17 @@ jobs:
             done
 
             echo "=== Running migrations ==="
-            docker compose run --rm arthasee_backend \
+            $COMPOSE run --rm arthasee_backend \
               python manage.py migrate --noinput
 
             echo "=== Collecting static files ==="
-            docker compose run --rm arthasee_backend \
+            $COMPOSE run --rm arthasee_backend \
               python manage.py collectstatic --noinput
 
             echo "=== Restarting backend ==="
             docker stop arthasee_backend 2>/dev/null || true
             docker rm   arthasee_backend 2>/dev/null || true
-            docker compose up -d --no-deps arthasee_backend
+            $COMPOSE up -d --no-deps arthasee_backend
 
             echo "=== Verifying container actually persisted ==="
             # Everything before this point has looked successful
@@ -198,17 +205,20 @@ jobs:
             sleep 2
             if docker ps -a --format '{{.Names}}' | grep -q '^arthasee_backend$'; then
               echo "✅ Container exists: $(docker ps -a --filter name=arthasee_backend --format '{{.Status}}')"
+              echo "=== Networks this container actually joined ==="
+              docker inspect arthasee_backend --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'
               echo "=== Last 40 lines of backend logs ==="
               docker logs arthasee_backend --tail 40 2>&1 || true
             else
               echo "❌ Container does not exist immediately after 'docker compose up -d' — the real failure is here, not in the later health check."
               echo "=== docker compose up output, run again in foreground for full detail ==="
-              docker compose up --no-deps arthasee_backend 2>&1 | head -60 || true
+              $COMPOSE up --no-deps arthasee_backend 2>&1 | head -60 || true
               exit 1
             fi
 
             echo "=== Backend restarted ==="
           ENDSSH
+
 
       # Steps 9-10 from the original DevelopIndo pattern are gone
       # entirely here — "pull code for frontend-only deploy" and
@@ -227,6 +237,7 @@ jobs:
               CODE=$(docker exec arthasee_backend \
                 curl -s -o /dev/null -w "%{http_code}" \
                 -H "Authorization: Bearer skip" \
+                -H "X-Forwarded-Proto: https" \
                 -H "Host: arthasee.com" \
                 http://localhost:8000/api/organizations/mine/ \
                 2>/dev/null || echo "000")

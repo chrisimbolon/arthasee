@@ -1,9 +1,11 @@
 # =============================================================================
 # === docker-compose.yml ===
-# Local dev stack — matches the same shape as DevelopIndo's own
-# compose setup, adapted for Arthasee's actual service names and env
-# vars (config/settings/local.py's individual DB_* vars, not a
-# DATABASE_URL — same distinction that mattered for ci.yml).
+# Self-contained on purpose — runs anywhere (your Mac, a fresh
+# droplet, anywhere) with zero external dependencies. caddy-net
+# wiring lives in docker-compose.prod.yml instead, since caddy-net
+# only exists on the actual droplet — including it here would break
+# local dev the moment anyone tried `docker compose up` on a machine
+# that's never heard of that network.
 # =============================================================================
 services:
   arthasee_db:
@@ -18,9 +20,8 @@ services:
       - arthasee_pgdata:/var/lib/postgresql/data
     ports:
       - "5433:5432"
-      # 5433, not 5432 — avoids colliding with a local Postgres
-      # already running on the default port (same situation as your
-      # local psql setup from earlier).
+    networks:
+      - arthasee-internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U arthasee -d arthasee_db"]
       interval: 5s
@@ -33,58 +34,20 @@ services:
       dockerfile: Dockerfile
     container_name: arthasee_backend
     restart: unless-stopped
-    # No command override — uses the Dockerfile's own CMD (plain
-    # gunicorn, no --reload). --reload is dev-only: it watches /app
-    # for file changes, and collectstatic writing 150+ files into a
-    # bind-mounted /app moments before startup was very plausibly
-    # triggering a self-inflicted restart loop right as the health
-    # check polled it. Confirmed nowhere in isolated manual testing
-    # because that never ran collectstatic and startup back-to-back
-    # the way the automated deploy does.
     env_file:
       - .env
-      # Real production values (DJANGO_SETTINGS_MODULE, DEBUG,
-      # ALLOWED_HOSTS, etc.) come from here now — deploy.yml's
-      # uploaded .env actually takes effect. Previously these were
-      # hardcoded literal strings below, which .env substitution can
-      # never override since they were never ${VARIABLES} at all.
     environment:
-      # Only container-networking values stay hardcoded — these are
-      # always true regardless of environment, never configurable.
       DB_HOST: arthasee_db
       DB_PORT: "5432"
-    # No volumes bind-mount — production runs the image's own COPY'd
-    # code, not a live view of the host filesystem. Local dev convenience
-    # lives in docker-compose.override.yml instead (gitignored, never
-    # reaches the droplet).
-    # No "ports:" mapping — same as developindo_backend. Caddy
-    # reaches this container by service name over Docker's internal
-    # network; publishing 8000 to the public internet was a real
-    # mistake, confirmed the hard way when a scanner bot found it
-    # and started probing within minutes of the container starting.
+    networks:
+      - arthasee-internal
     depends_on:
       arthasee_db:
         condition: service_healthy
 
-  arthasee_frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
-    container_name: arthasee_frontend
-    restart: unless-stopped
-    environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      # Anonymous volume on node_modules — without this, the bind
-      # mount above would shadow the container's own installed
-      # packages with your host's (likely empty or missing) folder.
-      - /app/.next
-    ports:
-      - "3000:3000"
-    depends_on:
-      - arthasee_backend
-
 volumes:
   arthasee_pgdata:
+
+networks:
+  arthasee-internal:
+    name: arthasee-internal

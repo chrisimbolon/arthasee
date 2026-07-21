@@ -1,0 +1,27 @@
+# =============================================================================
+# === docker-compose.prod.yml ===
+# Droplet-only addition, combined with the base file via explicit
+# -f flags in deploy.yml (docker compose -f docker-compose.yml
+# -f docker-compose.prod.yml ...). Never used for local dev — this
+# is the ONLY place caddy-net gets referenced, since it only exists
+# on the real droplet.
+# =============================================================================
+services:
+  arthasee_backend:
+    networks:
+      - caddy-net
+      # The actual fix, confirmed via `docker network inspect
+      # caddy-net` — every container Caddy successfully reverse-
+      # proxies to (developindo_backend, rtmudah_api,
+      # portfolio-container, etc.) is a real member of this network.
+      # Without it, Caddy has no path to this container at all,
+      # regardless of how healthy it is internally.
+
+networks:
+  caddy-net:
+    external: true
+    name: caddy-net
+    # Must already exist on the droplet, created outside this repo.
+    # external: true tells Compose "don't create this, just join
+    # it" — removing that would make Compose try to create a second,
+    # different network sharing the same name, and fail.
