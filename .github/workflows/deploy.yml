@@ -188,6 +188,25 @@ jobs:
             docker rm   arthasee_backend 2>/dev/null || true
             docker compose up -d --no-deps arthasee_backend
 
+            echo "=== Verifying container actually persisted ==="
+            # Everything before this point has looked successful
+            # multiple times while the container still didn't exist
+            # by the time a LATER, separate SSH session checked — so
+            # verify right here, same session, same moment, instead
+            # of inferring it two steps later through a health check
+            # timeout that can't say WHY.
+            sleep 2
+            if docker ps -a --format '{{.Names}}' | grep -q '^arthasee_backend$'; then
+              echo "✅ Container exists: $(docker ps -a --filter name=arthasee_backend --format '{{.Status}}')"
+              echo "=== Last 40 lines of backend logs ==="
+              docker logs arthasee_backend --tail 40 2>&1 || true
+            else
+              echo "❌ Container does not exist immediately after 'docker compose up -d' — the real failure is here, not in the later health check."
+              echo "=== docker compose up output, run again in foreground for full detail ==="
+              docker compose up --no-deps arthasee_backend 2>&1 | head -60 || true
+              exit 1
+            fi
+
             echo "=== Backend restarted ==="
           ENDSSH
 
