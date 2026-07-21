@@ -190,31 +190,63 @@ jobs:
             $COMPOSE run --rm arthasee_backend \
               python manage.py collectstatic --noinput
 
-            echo "=== Restarting backend ==="
-            docker stop arthasee_backend 2>/dev/null || true
-            docker rm   arthasee_backend 2>/dev/null || true
-            $COMPOSE up -d --no-deps arthasee_backend
+            # ── Recreate backend ──────────────────────────────
+            # Replaced the old stop/rm/up dance entirely.
+            # --force-recreate is unconditional: Compose does not
+            # get to "decide" the existing container already
+            # satisfies the desired state, which is exactly the
+            # ambiguity that let a 9-hour-old container survive
+            # a "successful" deploy on 2026-07-21. One command,
+            # one guaranteed outcome, nothing left implicit.
+            echo "=== Force-recreating backend ==="
+            $COMPOSE up -d --no-deps --force-recreate arthasee_backend
 
+            # ── Verify: existence, freshness, AND network ─────
+            # Existence alone was the old check, and it's exactly
+            # what passed while a stale container sat there. Age
+            # and network membership are the two properties that
+            # actually distinguish "really redeployed" from
+            # "silently unchanged" — so both are now hard gates
+            # that fail the deploy loudly instead of reporting
+            # green over a lie.
             echo "=== Verifying container actually persisted ==="
-            # Everything before this point has looked successful
-            # multiple times while the container still didn't exist
-            # by the time a LATER, separate SSH session checked — so
-            # verify right here, same session, same moment, instead
-            # of inferring it two steps later through a health check
-            # timeout that can't say WHY.
             sleep 2
-            if docker ps -a --format '{{.Names}}' | grep -q '^arthasee_backend$'; then
-              echo "✅ Container exists: $(docker ps -a --filter name=arthasee_backend --format '{{.Status}}')"
-              echo "=== Networks this container actually joined ==="
-              docker inspect arthasee_backend --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'
-              echo "=== Last 40 lines of backend logs ==="
-              docker logs arthasee_backend --tail 40 2>&1 || true
-            else
-              echo "❌ Container does not exist immediately after 'docker compose up -d' — the real failure is here, not in the later health check."
+
+            if ! docker ps -a --format '{{.Names}}' | grep -q '^arthasee_backend$'; then
+              echo "❌ Container does not exist immediately after 'docker compose up -d'."
               echo "=== docker compose up output, run again in foreground for full detail ==="
               $COMPOSE up --no-deps arthasee_backend 2>&1 | head -60 || true
               exit 1
             fi
+            echo "✅ Container exists: $(docker ps -a --filter name=arthasee_backend --format '{{.Status}}')"
+
+            echo "=== Verifying container is actually fresh ==="
+            CREATED=$(docker inspect arthasee_backend --format '{{.Created}}')
+            CREATED_EPOCH=$(date -u -d "$CREATED" +%s)
+            NOW_EPOCH=$(date -u +%s)
+            AGE=$((NOW_EPOCH - CREATED_EPOCH))
+            echo "Container created: $CREATED ($AGE seconds ago)"
+
+            if [ "$AGE" -gt 60 ]; then
+              echo "❌ Container is ${AGE}s old — this is a STALE container, not a fresh recreate!"
+              echo "❌ force-recreate silently failed to actually recreate it — investigate before trusting this deploy."
+              exit 1
+            fi
+            echo "✅ Container genuinely recreated $AGE seconds ago"
+
+            echo "=== Verifying container joined caddy-net ==="
+            NETWORKS=$(docker inspect arthasee_backend \
+              --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}')
+            echo "Networks joined: $NETWORKS"
+
+            if ! echo "$NETWORKS" | grep -q "caddy-net"; then
+              echo "❌ Container is NOT on caddy-net — Caddy cannot reach it, deploy is broken."
+              exit 1
+            fi
+            echo "✅ caddy-net confirmed"
+
+            echo "=== Last 40 lines of backend logs ==="
+            docker logs arthasee_backend --tail 40 2>&1 || true
 
             echo "=== Backend restarted ==="
           ENDSSH
