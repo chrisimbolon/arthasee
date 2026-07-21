@@ -69,7 +69,12 @@ jobs:
             echo "⏭️  Frontend unchanged — skipping Next.js rebuild"
           fi
 
-      # ── 3. Build Next.js standalone (only if frontend changed)
+      # ── 3. Build Next.js static export (only if frontend changed)
+      # No longer building a "standalone" server bundle — output:
+      # 'export' in next.config.ts produces pure static files (out/),
+      # served directly by Caddy with zero running Node process. See
+      # the kla_backend precedent already on this droplet: no
+      # kla_frontend container exists at all, same idea applied here.
       - name: Setup Node
         if: steps.changes.outputs.frontend == 'true'
         uses: actions/setup-node@v4
@@ -82,7 +87,7 @@ jobs:
         if: steps.changes.outputs.frontend == 'true'
         run: cd frontend && npm ci
 
-      - name: Build Next.js standalone
+      - name: Build Next.js static export
         if: steps.changes.outputs.frontend == 'true'
         run: cd frontend && npm run build
         env:
@@ -128,25 +133,17 @@ jobs:
           rsync -avz .env \
             ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/.env
 
-      # ── 7. Upload Next.js standalone (only if frontend changed)
-      - name: Upload Next.js standalone build
+      # ── 7. Upload static export (only if frontend changed) ────
+      # One folder, one destination — static export has no separate
+      # standalone/static/public split to manage. Caddy needs to be
+      # pointed at this path directly (root * /home/apps/arthasee/frontend/out
+      # in the Caddyfile) — not yet confirmed against the real config.
+      - name: Upload static export build
         if: steps.changes.outputs.frontend == 'true'
         run: |
           rsync -avz --delete \
-            frontend/.next/standalone/ \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/frontend/.next/standalone/
-
-          rsync -avz --delete \
-            frontend/.next/static/ \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/frontend/.next/static/
-
-          if [ -d "frontend/public" ] && [ "$(ls -A frontend/public)" ]; then
-            rsync -avz --delete \
-              frontend/public/ \
-              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/frontend/public/
-          else
-            echo "frontend/public empty — skipping"
-          fi
+            frontend/out/ \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/frontend/out/
 
       # ── 8. Deploy backend (only if backend changed) ───────────
       - name: Deploy backend
@@ -194,38 +191,15 @@ jobs:
             echo "=== Backend restarted ==="
           ENDSSH
 
-      # ── 9. Pull code if only frontend changed ─────────────────
-      - name: Pull latest code (frontend-only deploy)
-        if: >
-          steps.changes.outputs.backend == 'false' &&
-          steps.changes.outputs.frontend == 'true'
-        run: |
-          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
-            set -e
-            cd /home/apps/arthasee
-            echo "=== Pulling latest code ==="
-            git pull origin main
-          ENDSSH
+      # Steps 9-10 from the original DevelopIndo pattern are gone
+      # entirely here — "pull code for frontend-only deploy" and
+      # "restart frontend container" both assumed a running frontend
+      # container that no longer exists. The rsync in step 7 already
+      # put the new static files on disk; Caddy's file_server reads
+      # straight from disk on every request, so nothing needs
+      # restarting for a content-only change to take effect.
 
-      # ── 10. Deploy frontend (only if frontend changed) ────────
-      - name: Deploy frontend
-        if: steps.changes.outputs.frontend == 'true'
-        run: |
-          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
-            set -e
-            cd /home/apps/arthasee
-
-            echo "=== Restarting frontend with new build ==="
-            docker stop arthasee_frontend 2>/dev/null || true
-            docker rm   arthasee_frontend 2>/dev/null || true
-            docker compose up -d --no-deps arthasee_frontend
-
-            echo "=== Frontend restarted ==="
-            sleep 5
-            docker ps | grep arthasee
-          ENDSSH
-
-      # ── 11. Health check + Caddy reload (always) ──────────────
+      # ── 9. Health check + Caddy reload (always) ───────────────
       - name: Health check and Caddy reload
         run: |
           ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
