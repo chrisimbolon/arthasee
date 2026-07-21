@@ -49,8 +49,11 @@ services:
       ALLOWED_HOSTS: "localhost,127.0.0.1,arthasee_backend"
     volumes:
       - ./backend:/app
-    ports:
-      - "8000:8000"
+    # No "ports:" mapping — same as developindo_backend. Caddy
+    # reaches this container by service name over Docker's internal
+    # network; publishing 8000 to the public internet was a real
+    # mistake, confirmed the hard way when a scanner bot found it
+    # and started probing within minutes of the container starting.
     depends_on:
       arthasee_db:
         condition: service_healthy
