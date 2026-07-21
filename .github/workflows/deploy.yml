@@ -1,0 +1,258 @@
+# .github/workflows/deploy.yml
+# Build on GitHub runner → upload → deploy on Droplet
+# Smart rebuild rules:
+#   - push:              only rebuild what changed (backend/ or frontend/)
+#   - workflow_dispatch: always rebuild EVERYTHING (emergency full deploy)
+#
+# Adapted from DevelopIndo's own deploy.yml — NOT a straight copy.
+# One deliberate removal: DevelopIndo's version had its own inline
+# pre-deploy test step (sqlite-backed). Arthasee's settings don't
+# support sqlite at all (postgresql-only ENGINE, no DATABASE_URL
+# reader), and duplicating a test gate that ci.yml already runs
+# correctly — with a real Postgres service and the right test scope —
+# is redundant at best. ci.yml is the single source of truth for
+# "is this safe to deploy" here; this file only builds and ships.
+#
+name: Deploy Arthasee to Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ── 1. Checkout ─────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # need HEAD~1 for diff check
+
+      # ── 2. Detect what changed ───────────────────────────────
+      - name: Detect changed paths
+        id: changes
+        run: |
+          # ── Manual trigger → always rebuild everything ───────
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "backend=true"  >> $GITHUB_OUTPUT
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "🔧 Manual trigger — deploying EVERYTHING"
+            exit 0
+          fi
+
+          # ── Push → check what actually changed ───────────────
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          echo "=== Changed files ==="
+          echo "$CHANGED"
+          echo "====================="
+
+          # Backend changed if backend/ OR docker-compose.yml changed
+          if echo "$CHANGED" | grep -qE "^backend/|^docker-compose\.yml$"; then
+            echo "backend=true"  >> $GITHUB_OUTPUT
+            echo "✅ Backend/compose changed — will rebuild Django"
+          else
+            echo "backend=false" >> $GITHUB_OUTPUT
+            echo "⏭️  Backend unchanged — skipping Django rebuild"
+          fi
+
+          # Frontend changed if frontend/ OR docker-compose.yml changed
+          if echo "$CHANGED" | grep -qE "^frontend/|^docker-compose\.yml$"; then
+            echo "frontend=true"  >> $GITHUB_OUTPUT
+            echo "✅ Frontend/compose changed — will rebuild Next.js"
+          else
+            echo "frontend=false" >> $GITHUB_OUTPUT
+            echo "⏭️  Frontend unchanged — skipping Next.js rebuild"
+          fi
+
+      # ── 3. Build Next.js standalone (only if frontend changed)
+      - name: Setup Node
+        if: steps.changes.outputs.frontend == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        if: steps.changes.outputs.frontend == 'true'
+        run: cd frontend && npm ci
+
+      - name: Build Next.js standalone
+        if: steps.changes.outputs.frontend == 'true'
+        run: cd frontend && npm run build
+        env:
+          NEXT_PUBLIC_API_URL: https://arthasee.com
+
+      # ── 4. Write production .env (always) ────────────────────
+      - name: Write .env file
+        env:
+          SECRET_KEY:            ${{ secrets.SECRET_KEY }}
+          DB_NAME:               ${{ secrets.DB_NAME }}
+          DB_USER:               ${{ secrets.DB_USER }}
+          DB_PASSWORD:           ${{ secrets.DB_PASSWORD }}
+          ALLOWED_HOSTS:         ${{ secrets.ALLOWED_HOSTS }}
+          CORS_ALLOWED_ORIGINS:  ${{ secrets.CORS_ALLOWED_ORIGINS }}
+          CSRF_TRUSTED_ORIGINS:  ${{ secrets.CSRF_TRUSTED_ORIGINS }}
+        run: |
+          printf '%s\n' \
+            "SECRET_KEY=${SECRET_KEY}" \
+            "DEBUG=False" \
+            "DJANGO_SETTINGS_MODULE=config.settings.production" \
+            "ALLOWED_HOSTS=${ALLOWED_HOSTS}" \
+            "CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}" \
+            "CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}" \
+            "DB_NAME=${DB_NAME}" \
+            "DB_USER=${DB_USER}" \
+            "DB_PASSWORD=${DB_PASSWORD}" \
+            "DB_HOST=arthasee_db" \
+            "DB_PORT=5432" \
+            "NEXT_PUBLIC_API_URL=https://arthasee.com" \
+            > .env
+
+      # ── 5. Set up SSH (always) ────────────────────────────────
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      # ── 6. Upload .env (always) ───────────────────────────────
+      - name: Upload .env file
+        run: |
+          rsync -avz .env \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/.env
+
+      # ── 7. Upload Next.js standalone (only if frontend changed)
+      - name: Upload Next.js standalone build
+        if: steps.changes.outputs.frontend == 'true'
+        run: |
+          rsync -avz --delete \
+            frontend/.next/standalone/ \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/frontend/.next/standalone/
+
+          rsync -avz --delete \
+            frontend/.next/static/ \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/frontend/.next/static/
+
+          if [ -d "frontend/public" ] && [ "$(ls -A frontend/public)" ]; then
+            rsync -avz --delete \
+              frontend/public/ \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/frontend/public/
+          else
+            echo "frontend/public empty — skipping"
+          fi
+
+      # ── 8. Deploy backend (only if backend changed) ───────────
+      - name: Deploy backend
+        if: steps.changes.outputs.backend == 'true'
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
+            set -e
+            cd /home/apps/arthasee
+
+            echo "=== Pulling latest code ==="
+            git pull origin main
+
+            echo "=== Clearing Docker build cache ==="
+            docker builder prune -f
+
+            echo "=== Building backend image ==="
+            docker compose build --no-cache --pull arthasee_backend
+
+            echo "=== Starting DB ==="
+            docker compose up -d arthasee_db
+
+            echo "=== Waiting for DB to be healthy ==="
+            for i in $(seq 1 30); do
+              STATUS=$(docker inspect arthasee_db \
+                --format='{{.State.Health.Status}}' 2>/dev/null || echo "starting")
+              echo "DB: $STATUS ($i/30)"
+              [ "$STATUS" = "healthy" ] && echo "✅ DB ready!" && break
+              [ "$i" -eq 30 ] && echo "❌ DB timeout!" && exit 1
+              sleep 3
+            done
+
+            echo "=== Running migrations ==="
+            docker compose run --rm arthasee_backend \
+              python manage.py migrate --noinput
+
+            echo "=== Collecting static files ==="
+            docker compose run --rm arthasee_backend \
+              python manage.py collectstatic --noinput
+
+            echo "=== Restarting backend ==="
+            docker stop arthasee_backend 2>/dev/null || true
+            docker rm   arthasee_backend 2>/dev/null || true
+            docker compose up -d --no-deps arthasee_backend
+
+            echo "=== Backend restarted ==="
+          ENDSSH
+
+      # ── 9. Pull code if only frontend changed ─────────────────
+      - name: Pull latest code (frontend-only deploy)
+        if: >
+          steps.changes.outputs.backend == 'false' &&
+          steps.changes.outputs.frontend == 'true'
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
+            set -e
+            cd /home/apps/arthasee
+            echo "=== Pulling latest code ==="
+            git pull origin main
+          ENDSSH
+
+      # ── 10. Deploy frontend (only if frontend changed) ────────
+      - name: Deploy frontend
+        if: steps.changes.outputs.frontend == 'true'
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
+            set -e
+            cd /home/apps/arthasee
+
+            echo "=== Restarting frontend with new build ==="
+            docker stop arthasee_frontend 2>/dev/null || true
+            docker rm   arthasee_frontend 2>/dev/null || true
+            docker compose up -d --no-deps arthasee_frontend
+
+            echo "=== Frontend restarted ==="
+            sleep 5
+            docker ps | grep arthasee
+          ENDSSH
+
+      # ── 11. Health check + Caddy reload (always) ──────────────
+      - name: Health check and Caddy reload
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
+            echo "=== Waiting for backend health ==="
+            for i in $(seq 1 30); do
+              CODE=$(docker exec arthasee_backend \
+                curl -s -o /dev/null -w "%{http_code}" \
+                -H "Authorization: Bearer skip" \
+                -H "Host: arthasee.com" \
+                http://localhost:8000/api/organizations/mine/ \
+                2>/dev/null || echo "000")
+              echo "Backend response: $CODE ($i/30)"
+              [ "$CODE" = "401" ] || [ "$CODE" = "200" ] \
+                && echo "✅ Backend healthy!" && break
+              [ "$i" -eq 30 ] && echo "❌ Backend timeout!" && exit 1
+              sleep 3
+            done
+
+            echo "=== Reloading Caddy ==="
+            CADDY=$(docker ps -qf "name=caddy")
+            [ -n "$CADDY" ] && docker exec $CADDY \
+              caddy reload --config /etc/caddy/Caddyfile 2>/dev/null \
+              && echo "✅ Caddy reloaded!" \
+              || echo "⚠️  Caddy reload skipped"
+
+            echo "=== Deploy complete! ==="
+            cd /home/apps/arthasee
+            echo "$(date) | $(git rev-parse --short HEAD) | OK" >> deploy.log
+            docker ps | grep arthasee
+          ENDSSH
