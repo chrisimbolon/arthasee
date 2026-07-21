@@ -1,0 +1,79 @@
+# =============================================================================
+# === docker-compose.yml ===
+# Local dev stack — matches the same shape as DevelopIndo's own
+# compose setup, adapted for Arthasee's actual service names and env
+# vars (config/settings/local.py's individual DB_* vars, not a
+# DATABASE_URL — same distinction that mattered for ci.yml).
+# =============================================================================
+services:
+  arthasee_db:
+    image: postgres:16-alpine
+    container_name: arthasee_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       arthasee_db
+      POSTGRES_USER:     arthasee
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-arthasee_dev_password}
+    volumes:
+      - arthasee_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+      # 5433, not 5432 — avoids colliding with a local Postgres
+      # already running on the default port (same situation as your
+      # local psql setup from earlier).
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arthasee -d arthasee_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  arthasee_backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: arthasee_backend
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --reload"
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      SECRET_KEY:              ${SECRET_KEY:-dev-secret-key-not-for-production}
+      DEBUG:                   "True"
+      DB_NAME:     arthasee_db
+      DB_USER:     arthasee
+      DB_PASSWORD: ${DB_PASSWORD:-arthasee_dev_password}
+      DB_HOST:     arthasee_db
+      DB_PORT:     "5432"
+      CORS_ALLOWED_ORIGINS: "http://localhost:3000"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,arthasee_backend"
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      arthasee_db:
+        condition: service_healthy
+
+  arthasee_frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: arthasee_frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      # Anonymous volume on node_modules — without this, the bind
+      # mount above would shadow the container's own installed
+      # packages with your host's (likely empty or missing) folder.
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - arthasee_backend
+
+volumes:
+  arthasee_pgdata:
