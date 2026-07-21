@@ -43,6 +43,14 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # WhiteNoise must sit directly after SecurityMiddleware, before
+    # everything else — this is WhiteNoise's own documented
+    # requirement, not an arbitrary choice. Without this, gunicorn
+    # has no way to serve /static/ in production (DEBUG=False means
+    # Django's own dev-only static serving is disabled) — Caddy
+    # proxies /static/* straight to this container, same pattern
+    # already proven on kla_backend.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -87,6 +95,11 @@ USE_TZ        = True
 
 STATIC_URL  = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 MEDIA_URL   = "/media/"
 MEDIA_ROOT  = BASE_DIR / "media"
 
