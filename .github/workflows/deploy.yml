@@ -222,24 +222,20 @@ jobs:
               python manage.py migrate --noinput
 
             echo "=== Verifying migrations actually applied ==="
-            # The exact gap that let Sprint 1's migration silently
-            # never reach the droplet: the migrate command above ran
-            # and reported success, on a green Actions run, while a
-            # skipped "Deploy backend" step on an earlier bad push
-            # meant this step never even executed that time. Running
-            # showmigrations here — against the container that's
-            # about to go live — means an unapplied migration shows
-            # up right here in the Actions log immediately, instead
-            # of only being discoverable later by manually SSHing in
-            # and running the same command by hand.
+            # Extended to inventory alongside service — the Sprint 1
+            # gate only checked apps.service, and this refactor moved
+            # real models (and a real migration) into apps.inventory.
+            # A future unapplied migration there deserves the exact
+            # same loud, in-log failure as one in service — not a
+            # narrower net just because this app is newer.
             MIGRATION_STATUS=$($COMPOSE run --rm arthasee_backend \
-              python manage.py showmigrations service)
+              python manage.py showmigrations service inventory)
             echo "$MIGRATION_STATUS"
             if echo "$MIGRATION_STATUS" | grep -q "\[ \]"; then
-              echo "❌ Unapplied migration(s) detected in apps.service — deploy is not actually complete."
+              echo "❌ Unapplied migration(s) detected in apps.service or apps.inventory — deploy is not actually complete."
               exit 1
             fi
-            echo "✅ All service migrations applied"
+            echo "✅ All service and inventory migrations applied"
 
             echo "=== Collecting static files ==="
             $COMPOSE run --rm arthasee_backend \
