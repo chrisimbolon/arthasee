@@ -14,7 +14,7 @@ export default function DashboardOverviewPage() {
   const [loading, setLoading]     = useState(true);
 
   useEffect(() => {
-    Promise.all([customersApi.list(), vehiclesApi.list(), vehiclesApi.list(true)])
+    Promise.all([customersApi.list(), vehiclesApi.list(), vehiclesApi.list({ dueForService: true })])
       .then(([c, v, due]) => { setCustomers(c); setVehicles(v); setDueVehicles(due); })
       .finally(() => setLoading(false));
   }, []);
