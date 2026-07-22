@@ -31,7 +31,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2   # need HEAD~1 for diff check
+          fetch-depth: 0   # full history — a push can carry more than 1 commit,
+                            # and step 2 now diffs against the real pre-push SHA
+                            # (github.event.before), which fetch-depth: 2 could
+                            # leave missing on the runner entirely.
 
       # ── 2. Detect what changed ───────────────────────────────
       - name: Detect changed paths
@@ -46,8 +49,34 @@ jobs:
           fi
 
           # ── Push → check what actually changed ───────────────
-          CHANGED=$(git diff --name-only HEAD~1 HEAD)
-          echo "=== Changed files ==="
+          # github.event.before, NOT HEAD~1. HEAD~1 only diffs the
+          # single most recent commit against its own parent — if a
+          # push carries multiple commits (e.g. a feature commit +
+          # a follow-up fix, pushed together), any change sitting in
+          # an earlier commit of that same push is invisible to it.
+          # A push that ends on a frontend-only commit would report
+          # backend=false and skip the backend deploy entirely, even
+          # though an earlier commit in the same push touched
+          # backend/ — exactly the bug that let Sprint 1's migration
+          # never reach the droplet. github.event.before is the real
+          # pre-push SHA GitHub itself provides, so this now diffs
+          # the entire push, not just its last commit.
+          BASE_SHA="${{ github.event.before }}"
+
+          # Defensive fallback: on an unusual event where `before` is
+          # all-zeros (e.g. a brand-new branch's first push) or
+          # missing, fall back to treating everything as changed
+          # rather than risk silently comparing against nothing and
+          # under-deploying.
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "backend=true"  >> $GITHUB_OUTPUT
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "⚠️  No valid base SHA from github.event.before — deploying EVERYTHING to be safe"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD)
+          echo "=== Changed files (entire push, $BASE_SHA..HEAD) ==="
           echo "$CHANGED"
           echo "====================="
 
@@ -185,6 +214,26 @@ jobs:
             echo "=== Running migrations ==="
             $COMPOSE run --rm arthasee_backend \
               python manage.py migrate --noinput
+
+            echo "=== Verifying migrations actually applied ==="
+            # The exact gap that let Sprint 1's migration silently
+            # never reach the droplet: the migrate command above ran
+            # and reported success, on a green Actions run, while a
+            # skipped "Deploy backend" step on an earlier bad push
+            # meant this step never even executed that time. Running
+            # showmigrations here — against the container that's
+            # about to go live — means an unapplied migration shows
+            # up right here in the Actions log immediately, instead
+            # of only being discoverable later by manually SSHing in
+            # and running the same command by hand.
+            MIGRATION_STATUS=$($COMPOSE run --rm arthasee_backend \
+              python manage.py showmigrations service)
+            echo "$MIGRATION_STATUS"
+            if echo "$MIGRATION_STATUS" | grep -q "\[ \]"; then
+              echo "❌ Unapplied migration(s) detected in apps.service — deploy is not actually complete."
+              exit 1
+            fi
+            echo "✅ All service migrations applied"
 
             echo "=== Collecting static files ==="
             $COMPOSE run --rm arthasee_backend \
