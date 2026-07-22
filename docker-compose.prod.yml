@@ -16,6 +16,25 @@ services:
       # portfolio-container, etc.) is a real member of this network.
       # Without it, Caddy has no path to this container at all,
       # regardless of how healthy it is internally.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+      # Scoped, temporary workaround for the droplet's Docker-embedded
+      # DNS resolver (127.0.0.11) intermittently returning "server
+      # misbehaving" against this container's own name — confirmed in
+      # Caddy's logs as the actual cause of the /api/parts/ POST 502s,
+      # and the same signature that hit randomdots-app earlier. Root
+      # cause is host-level (systemd-resolved's 127.0.0.53 stub isn't
+      # reachable from inside Docker's network namespace) and affects
+      # every container on this droplet, not just this one — the real
+      # fix is a daemon-wide /etc/docker/daemon.json change, deliberately
+      # NOT done here tonight because it requires recreating all 13
+      # containers on this shared droplet, not just Arthasee's. This
+      # override only changes what arthasee_backend uses for outbound
+      # DNS lookups — it has no effect on how OTHER containers resolve
+      # names, so it can't make anything else on the droplet worse.
+      # Revisit/remove once the daemon-wide fix lands in its own
+      # dedicated maintenance window.
 
 networks:
   caddy-net:

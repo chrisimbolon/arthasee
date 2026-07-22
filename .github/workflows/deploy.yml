@@ -80,8 +80,14 @@ jobs:
           echo "$CHANGED"
           echo "====================="
 
-          # Backend changed if backend/ OR docker-compose.yml changed
-          if echo "$CHANGED" | grep -qE "^backend/|^docker-compose\.yml$"; then
+          # Backend changed if backend/ OR either compose file changed.
+          # docker-compose.prod.yml specifically was missing from this
+          # check — a droplet-only config change there (like the DNS
+          # override) would report backend=false and skip the deploy
+          # step entirely, on a green run, with nothing in the log
+          # calling it out. Same class of silent-skip bug as the
+          # HEAD~1 fix earlier tonight, different specific trigger.
+          if echo "$CHANGED" | grep -qE "^backend/|^docker-compose\.yml$|^docker-compose\.prod\.yml$"; then
             echo "backend=true"  >> $GITHUB_OUTPUT
             echo "✅ Backend/compose changed — will rebuild Django"
           else
