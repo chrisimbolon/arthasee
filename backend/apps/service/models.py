@@ -153,11 +153,20 @@ class Vehicle(TenantScopedModel):
         subsystem assumed. Kept as a property rather than a stored
         field so it's always accurate against today's date without
         needing a scheduled job to keep it in sync.
+
+        Deliberately has no lower bound — an ALREADY-expired
+        registration must still evaluate True here, not fall through
+        to False. An STNK that expired yesterday is at least as
+        urgent as one expiring in three weeks, not a separate,
+        unflagged state. (Caught via
+        test_expiring_soon_true_when_already_expired in tests.py —
+        the original version used a `date.today() <= expiry` lower
+        bound that silently excluded exactly this case.)
         """
         if self.registration_expiry is None:
             return False
         from datetime import date, timedelta
-        return date.today() <= self.registration_expiry <= (date.today() + timedelta(days=30))
+        return self.registration_expiry <= (date.today() + timedelta(days=30))
 
 
 class ServiceRecord(TenantScopedModel):
