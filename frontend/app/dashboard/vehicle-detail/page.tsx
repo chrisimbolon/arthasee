@@ -481,8 +481,8 @@ function VehicleDetailContent() {
   );
 }
 
-// useSearchParams() requires a Suspense boundary on statically
-// exported/prerendered pages — without this, the build fails.
+// useSearchParams() requires a Suspense boundary on statically  exported/prerendered pages — without this, the build fails.
+
 export default function VehicleDetailPage() {
   return (
     <Suspense fallback={
