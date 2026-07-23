@@ -36,7 +36,7 @@ jobs:
                             # (github.event.before), which fetch-depth: 2 could
                             # leave missing on the runner entirely.
 
-      # ── 2. Detect what changed ───────────────────────────────
+      # ── 3. Detect what changed ───────────────────────────────
       - name: Detect changed paths
         id: changes
         run: |
@@ -162,13 +162,36 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
 
-      # ── 6. Upload .env (always) ───────────────────────────────
+      # ── 6. Pull latest code on the droplet (always) ───────────
+      # Deliberately its own unconditional step, not buried inside
+      # "Deploy backend" — that step only runs when backend/ changed,
+      # which meant a commit touching only scripts/, docs, or CI
+      # config left the droplet's git checkout silently frozen at
+      # whatever commit last touched backend/. git pull costs almost
+      # nothing to run every time; there's no good reason for it to
+      # be conditional on what else changed in the same push.
+      #
+      # Must come AFTER "Set up SSH" — this is the actual bug in the
+      # first version of this fix: placing it before SSH is
+      # configured meant the very first SSH connection of the whole
+      # run had no known_hosts entry yet, failing with "Host key
+      # verification failed" before ssh-keyscan ever ran.
+      - name: Pull latest code on droplet
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
+            set -e
+            cd /home/apps/arthasee
+            echo "=== Pulling latest code ==="
+            git pull origin main
+          ENDSSH
+
+      # ── 7. Upload .env (always) ───────────────────────────────
       - name: Upload .env file
         run: |
           rsync -avz .env \
             ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/apps/arthasee/.env
 
-      # ── 7. Upload static export (only if frontend changed) ────
+      # ── 8. Upload static export (only if frontend changed) ────
       # One folder, one destination — static export has no separate
       # standalone/static/public split to manage. Caddy needs to be
       # pointed at this path directly (root * /home/apps/arthasee/frontend/out
@@ -188,9 +211,8 @@ jobs:
             set -e
             cd /home/apps/arthasee
 
-            echo "=== Pulling latest code ==="
-            git pull origin main
-
+            # Code is already current — step 2 pulled it unconditionally,
+            # regardless of whether this step ends up running at all.
             # Combines the self-contained base file with the
             # droplet-only caddy-net wiring — every real docker
             # compose call below uses this exact variable, so there's
