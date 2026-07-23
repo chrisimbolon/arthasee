@@ -32,8 +32,8 @@ export interface ServiceRecord {
   notes:             string;
   part_usages:       PartUsageSummary[];
   // Set once an Invoice exists for this record (OneToOneField on the
-  // backend) — null until then. Drives whether the UI shows "Buat
-  // Invoice" or "Lihat Invoice" per record.
+  // backend) — null until then. Drives whether the UI shows "Buat Invoice" or "Lihat Invoice" per record.
+
   invoice_id:        string | null;
   created_by:        string | null;
   created_by_name:   string | null;
