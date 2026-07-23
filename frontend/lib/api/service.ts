@@ -31,6 +31,10 @@ export interface ServiceRecord {
   parts_replaced:    string;
   notes:             string;
   part_usages:       PartUsageSummary[];
+  // Set once an Invoice exists for this record (OneToOneField on the
+  // backend) — null until then. Drives whether the UI shows "Buat
+  // Invoice" or "Lihat Invoice" per record.
+  invoice_id:        string | null;
   created_by:        string | null;
   created_by_name:   string | null;
   created_at:        string;
@@ -65,7 +69,7 @@ export interface Part {
   name:          string;
   sku:           string;
   unit:          string;
-  current_stock: string;   // DecimalField serializes as string — do not coerce to number for display without parseFloat
+  current_stock: string;
   unit_price:    string;
   created_at:    string;
   updated_at:    string;
@@ -123,9 +127,6 @@ export const customersApi = {
 export interface VehicleCreatePayload {
   customer: string; plate_number: string; manufacture_year: number;
   vehicle_type: string; model: string; current_odometer_km?: number;
-  // Sprint 1 additions — all optional, matching the backend's
-  // blank=True fields, since STNK data fills in over time rather
-  // than being required at creation.
   body_style?: string; chassis_number?: string; engine_number?: string;
   bpkb_number?: string; color?: string; registration_expiry?: string;
 }
@@ -169,10 +170,6 @@ export const serviceRecordsApi = {
   },
 };
 
-// =============================================================================
-// === Sprint 1: Inventory ===
-// =============================================================================
-
 export const partsApi = {
   async list(opts?: { search?: string; lowStock?: boolean }): Promise<Part[]> {
     const params: Record<string, string> = {};
@@ -199,9 +196,6 @@ export const partUsagesApi = {
     const { data } = await api.get(`/api/service-records/${serviceRecordId}/part-usages/`);
     return data.results;
   },
-  // Returns both the created usage AND any soft warnings (e.g.
-  // resulting stock going negative) — caller decides how to surface
-  // those, this layer doesn't swallow them.
   async create(serviceRecordId: string, payload: { part: string; quantity: number }):
     Promise<{ usage: PartUsage; warnings: string[] }> {
     const { data } = await api.post(`/api/service-records/${serviceRecordId}/part-usages/`, payload);
