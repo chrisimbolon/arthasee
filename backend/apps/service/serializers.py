@@ -24,22 +24,19 @@ class CustomerSerializer(serializers.ModelSerializer):
 class ServiceRecordSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
     part_usages      = serializers.SerializerMethodField()
+    invoice_id        = serializers.SerializerMethodField()
 
     class Meta:
         model  = ServiceRecord
         fields = [
             "id", "vehicle", "service_date", "odometer_km",
             "issue_description", "parts_replaced", "notes", "part_usages",
+            "invoice_id",
             "created_by", "created_by_name", "created_at",
         ]
-        read_only_fields = ["id", "created_by", "created_by_name", "created_at", "part_usages"]
+        read_only_fields = ["id", "created_by", "created_by_name", "created_at", "part_usages", "invoice_id"]
 
     def get_part_usages(self, obj):
-        # part_usages is PartUsage's related_name — that model now
-        # lives in apps.inventory, but the related accessor works
-        # identically regardless of which app defines the model on
-        # the other end of the FK. No change needed here beyond this
-        # comment reflecting where it actually lives now.
         return [
             {
                 "id": pu.id, "part": pu.part_id, "part_name": pu.part.name,
@@ -48,6 +45,16 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
             }
             for pu in obj.part_usages.select_related("part").all()
         ]
+
+    def get_invoice_id(self, obj):
+        # apps.invoicing.Invoice's OneToOneField reverse accessor —
+        # getattr with a default is the correct, idiomatic way to
+        # check a reverse OneToOne without a try/except: Django's
+        # RelatedObjectDoesNotExist is deliberately a subclass of
+        # both the target model's DoesNotExist AND AttributeError,
+        # specifically so getattr(obj, 'invoice', None) works.
+        invoice = getattr(obj, "invoice", None)
+        return invoice.id if invoice else None
 
     def validate_vehicle(self, vehicle):
         request = self.context.get("request")
