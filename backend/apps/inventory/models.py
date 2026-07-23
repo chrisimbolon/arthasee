@@ -19,9 +19,8 @@ relabel plus a table rename, not a drop-and-recreate.
 """
 import uuid
 
-from django.db import models
-
 from apps.core.models import TenantScopedModel
+from django.db import models
 
 
 class Part(TenantScopedModel):
@@ -149,6 +148,7 @@ class StockAdjustment(TenantScopedModel):
         ("restock",    "Restock / Pembelian"),
         ("correction", "Koreksi Stok"),
         ("damage",     "Rusak / Hilang"),
+        ("work_order_cancelled", "Pembatalan Work Order"),
     ]
 
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
