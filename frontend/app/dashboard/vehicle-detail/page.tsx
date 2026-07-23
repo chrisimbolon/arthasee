@@ -11,7 +11,8 @@
 // =============================================================================
 import { invoicesApi, LaborLinePayload } from "@/lib/api/invoicing";
 import { Part, partsApi, partUsagesApi, ServiceRecord, serviceRecordsApi, Vehicle, vehiclesApi } from "@/lib/api/service";
-import { AlertTriangle, ArrowLeft, Calendar, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
+import { workOrdersApi, WorkOrderStatus, WorkOrderSummary } from "@/lib/api/workorders";
+import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -341,6 +342,63 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
   );
 }
 
+const WO_STATUS_LABEL: Record<WorkOrderStatus, string> = {
+  OPEN: "Terbuka", IN_PROGRESS: "Dikerjakan", QC: "Pemeriksaan Kualitas", DONE: "Selesai", CANCELLED: "Dibatalkan",
+};
+const WO_STATUS_COLOR: Record<WorkOrderStatus, string> = {
+  OPEN: "var(--steel)", IN_PROGRESS: "var(--rust)", QC: "#b5860b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
+};
+
+function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
+  const router = useRouter();
+  const [orders, setOrders] = useState<WorkOrderSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  const load = () => workOrdersApi.list(vehicleId).then(setOrders).finally(() => setLoading(false));
+  useEffect(() => { load(); }, [vehicleId]);
+
+  const createAndOpen = async () => {
+    setCreating(true);
+    try {
+      const wo = await workOrdersApi.create(vehicleId);
+      router.push(`/dashboard/work-order-detail?id=${wo.id}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h2 style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          <ClipboardList size={16} /> Work Order
+        </h2>
+        <button className="btn-rust" onClick={createAndOpen} disabled={creating}>
+          {creating ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <><Plus size={16} /> Buat Work Order</>}
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ color: "var(--steel)", fontSize: 13.5 }}><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /></div>
+      ) : orders.length === 0 ? (
+        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>Belum ada work order untuk kendaraan ini.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {orders.map((wo) => (
+            <Link key={wo.id} href={`/dashboard/work-order-detail?id=${wo.id}`} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
+              <span className="mono" style={{ fontSize: 13.5, fontWeight: 600 }}>WO #{wo.number}</span>
+              <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: WO_STATUS_COLOR[wo.status] }}>
+                {WO_STATUS_LABEL[wo.status]}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VehicleDetailContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -431,6 +489,8 @@ function VehicleDetailContent() {
         </div>
       )}
 
+      <WorkOrdersSection vehicleId={vehicle.id} />
+
       <div style={{ marginBottom: 16 }}>
         <AddServiceRecordForm vehicleId={vehicle.id} catalog={catalog} onAdded={handleAdded} />
       </div>
@@ -481,8 +541,8 @@ function VehicleDetailContent() {
   );
 }
 
-// useSearchParams() requires a Suspense boundary on statically  exported/prerendered pages — without this, the build fails.
-
+// useSearchParams() requires a Suspense boundary on statically
+// exported/prerendered pages — without this, the build fails.
 export default function VehicleDetailPage() {
   return (
     <Suspense fallback={
