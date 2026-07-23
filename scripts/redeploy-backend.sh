@@ -88,13 +88,19 @@ fi
 echo "✅ caddy-net confirmed"
 
 echo "=== Verifying migrations actually applied ==="
-MIGRATION_STATUS=$($COMPOSE run --rm arthasee_backend python manage.py showmigrations service)
+# Extended to inventory alongside service, matching deploy.yml's gate
+# exactly — this script exists specifically as the break-glass
+# fallback for when the pipeline can't be trusted, so it needs the
+# SAME safety net, not a narrower one. This exact gap (checking only
+# service, missing inventory) went unnoticed through several runs on
+# 2026-07-23 before being caught here.
+MIGRATION_STATUS=$($COMPOSE run --rm arthasee_backend python manage.py showmigrations service inventory)
 echo "$MIGRATION_STATUS"
 if echo "$MIGRATION_STATUS" | grep -q "\[ \]"; then
-  echo "❌ Unapplied migration(s) detected in apps.service."
+  echo "❌ Unapplied migration(s) detected in apps.service or apps.inventory."
   exit 1
 fi
-echo "✅ All service migrations applied"
+echo "✅ All service and inventory migrations applied"
 
 echo "=== Reloading Caddy ==="
 CADDY=$(docker ps -qf "name=caddy")
