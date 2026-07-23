@@ -17,6 +17,15 @@ class Organization(models.Model):
     name       = models.CharField(max_length=200, verbose_name="Nama Bengkel")
     plan       = models.CharField(max_length=50, default="free", verbose_name="Paket")
     is_active  = models.BooleanField(default=True, verbose_name="Aktif")
+    invoice_code = models.CharField(
+        max_length=10, blank=True, default="", verbose_name="Kode Invoice",
+        help_text=(
+            "Kode singkat untuk penomoran invoice, mis. 'AM' untuk Arya Motor "
+            "(menghasilkan INV/REG/AM/0001/2026). Harus diisi sebelum bengkel "
+            "ini bisa membuat invoice — lihat apps.invoicing.models.Invoice.save() "
+            "untuk pesan error jika kosong."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
