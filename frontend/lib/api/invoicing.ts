@@ -19,6 +19,7 @@ export type InvoiceStatus = "DRAFT" | "ISSUED" | "PAID" | "CANCELLED";
 export interface Invoice {
   id:                     string;
   service_record:         string;
+  vehicle_id:             string;
   number:                 string;
   sequence_number:        number;
   year:                   number;
