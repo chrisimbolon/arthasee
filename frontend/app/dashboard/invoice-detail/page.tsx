@@ -5,8 +5,8 @@
 // every route's HTML identical regardless of ?id= value, since real
 // invoice UUIDs don't exist at build time.
 // =============================================================================
-import { organizationsApi } from "@/lib/api/organizations";
 import { Invoice, InvoiceStatus, invoicesApi } from "@/lib/api/invoicing";
+import { organizationsApi } from "@/lib/api/organizations";
 import { ArrowLeft, Loader2, Printer } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -75,7 +75,7 @@ function InvoiceDetailContent() {
       `}</style>
 
       <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-        <Link href={`/dashboard/vehicle-detail?id=${invoice.service_record}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)" }}>
+        <Link href={`/dashboard/vehicle-detail?id=${invoice.vehicle_id}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)" }}>
           <ArrowLeft size={14} /> Kembali
         </Link>
         <button className="btn-rust" onClick={() => window.print()}>
