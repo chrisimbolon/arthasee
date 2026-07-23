@@ -75,6 +75,23 @@ jobs:
             exit 0
           fi
 
+          # Second, different failure mode from the one above: BASE_SHA
+          # can be non-empty, look like a real SHA, and STILL not exist
+          # in this checkout — e.g. after `git commit --amend` +
+          # force-push, github.event.before points at the pre-amend
+          # commit, which is now unreachable from any ref and was
+          # never fetched at all. `git diff` against a genuinely
+          # missing object fails hard ("fatal: bad object"), which is
+          # exactly what happened here. Checking existence explicitly
+          # before diffing means this degrades to the same safe
+          # "deploy everything" fallback instead of failing the job.
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "backend=true"  >> $GITHUB_OUTPUT
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "⚠️  BASE_SHA $BASE_SHA not found in this checkout (likely a rewritten/force-pushed commit) — deploying EVERYTHING to be safe"
+            exit 0
+          fi
+
           CHANGED=$(git diff --name-only "$BASE_SHA" HEAD)
           echo "=== Changed files (entire push, $BASE_SHA..HEAD) ==="
           echo "$CHANGED"
