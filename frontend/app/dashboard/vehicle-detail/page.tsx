@@ -9,16 +9,24 @@
 // that problem — the served HTML is identical regardless of ?id=
 // value, and the client-side JS reads it once loaded.
 // =============================================================================
+import { invoicesApi, LaborLinePayload } from "@/lib/api/invoicing";
 import { Part, partsApi, partUsagesApi, ServiceRecord, serviceRecordsApi, Vehicle, vehiclesApi } from "@/lib/api/service";
-import { AlertTriangle, ArrowLeft, Calendar, Loader2, Plus, Trash2, Wrench } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Calendar, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
 interface PartLine {
-  key:      string;   // local-only React key, never sent to the API
+  key:      string;
   part:     string;
   quantity: string;
+}
+
+interface LaborLine {
+  key:         string;
+  description: string;
+  quantity:    string;
+  unit_price:  string;
 }
 
 function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
@@ -28,10 +36,6 @@ function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
     service_date: new Date().toISOString().slice(0, 10),
     odometer_km: "", issue_description: "", parts_replaced: "", notes: "",
   });
-  // Optional catalog-linked lines, submitted right after the service
-  // record itself. Kept as a separate array (not folded into `form`)
-  // since these become N separate PartUsage API calls, not one field
-  // on the ServiceRecord payload.
   const [partLines, setPartLines] = useState<PartLine[]>([]);
   const [saving, setSaving]   = useState(false);
   const [error, setError]     = useState<string | null>(null);
@@ -68,12 +72,6 @@ function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
       return;
     }
 
-    // The service record above is now saved, full stop — everything
-    // from here on is best-effort. Using allSettled (not a plain
-    // await-in-a-loop that stops at the first failure) so one bad
-    // catalog line can't silently swallow the others: every filled-in
-    // line gets attempted, and we report exactly which ones failed
-    // rather than leaving the mechanic guessing.
     const filledLines = partLines.filter((l) => l.part && l.quantity);
     const results = await Promise.allSettled(
       filledLines.map((l) => partUsagesApi.create(record.id, { part: l.part, quantity: Number(l.quantity) }))
@@ -94,12 +92,6 @@ function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
     onAdded(record, Number(form.odometer_km));
 
     if (failedLines.length > 0) {
-      // Deliberately do NOT close the form here — the service record
-      // itself is safely saved (it'll already show up in Riwayat
-      // Servis below by the time this renders), but leaving the form
-      // open with a clear error means the mechanic can immediately
-      // retry just the part(s) that failed, right where they are,
-      // instead of hunting for the new record in the history list.
       setError(`Catatan servis tersimpan, tapi gagal mencatat: ${failedLines.join(", ")}. Coba lagi di bawah.`);
       setWarnings(allWarnings);
       setSaving(false);
@@ -107,8 +99,6 @@ function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
     }
 
     if (allWarnings.length > 0) {
-      // Everything succeeded, but e.g. stock went negative — worth
-      // surfacing, not worth blocking the form close over.
       setWarnings(allWarnings);
     }
 
@@ -148,12 +138,6 @@ function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
           <input className="input" value={form.parts_replaced} onChange={(e) => setForm({ ...form, parts_replaced: e.target.value })} placeholder="Filter oli, kampas rem" />
         </div>
 
-        {/* Optional, separate from the free-text field above — this
-            is specifically for parts that ARE in the catalog and
-            SHOULD deduct stock. Living in the same form as the free
-            text (not hidden behind a second button after saving)
-            means logging it is a natural next step in the same
-            motion, not a separate errand to remember later. */}
         <div style={{ marginBottom: 14 }}>
           <label className="label">Part dari Katalog <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional — otomatis kurangi stok)</span></label>
           {partLines.length > 0 && (
@@ -200,11 +184,6 @@ function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
   );
 }
 
-// Fallback for adding a part usage to a record AFTER it's already
-// saved — e.g. a mechanic realizes later they used something, or the
-// creation-time submission above had a failed line to retry. This is
-// now the secondary path, not the primary one; the form above covers
-// the common case of logging it in the same motion as the visit itself.
 function PartUsageRow({ record, catalog, onUsed }: {
   record: ServiceRecord; catalog: Part[]; onUsed: () => void;
 }) {
@@ -246,33 +225,130 @@ function PartUsageRow({ record, catalog, onUsed }: {
       {warning && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "6px 10px", borderRadius: 5, fontSize: 12, marginBottom: 8 }}>{warning}</div>}
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "6px 10px", borderRadius: 5, fontSize: 12, marginBottom: 8 }}>{error}</div>}
 
-      {adding ? (
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <select className="input" style={{ fontSize: 12.5, padding: "6px 8px" }} value={partId} onChange={(e) => setPartId(e.target.value)}>
-            <option value="">— Pilih Part —</option>
-            {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.current_stock} {p.unit})</option>)}
-          </select>
-          <input className="input" style={{ fontSize: 12.5, padding: "6px 8px", width: 80 }} type="number" min={0} step="0.01" placeholder="Jml" value={qty} onChange={(e) => setQty(e.target.value)} />
-          <button className="btn-rust" style={{ fontSize: 12, padding: "6px 10px" }} disabled={saving} onClick={handleAdd}>
-            {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
+      {record.invoice_id ? null : (
+        adding ? (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select className="input" style={{ fontSize: 12.5, padding: "6px 8px" }} value={partId} onChange={(e) => setPartId(e.target.value)}>
+              <option value="">— Pilih Part —</option>
+              {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.current_stock} {p.unit})</option>)}
+            </select>
+            <input className="input" style={{ fontSize: 12.5, padding: "6px 8px", width: 80 }} type="number" min={0} step="0.01" placeholder="Jml" value={qty} onChange={(e) => setQty(e.target.value)} />
+            <button className="btn-rust" style={{ fontSize: 12, padding: "6px 10px" }} disabled={saving} onClick={handleAdd}>
+              {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }} onClick={() => setAdding(false)}>Batal</button>
+          </div>
+        ) : (
+          <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 9px" }} onClick={() => setAdding(true)}>
+            <Plus size={12} /> Gunakan Part dari Katalog
           </button>
-          <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }} onClick={() => setAdding(false)}>Batal</button>
-        </div>
-      ) : (
-        <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 9px" }} onClick={() => setAdding(true)}>
-          <Plus size={12} /> Gunakan Part dari Katalog
-        </button>
+        )
       )}
+    </div>
+  );
+}
+
+function CreateInvoiceModal({ record, onClose, onCreated }: {
+  record: ServiceRecord; onClose: () => void; onCreated: (invoiceId: string) => void;
+}) {
+  const [laborLines, setLaborLines] = useState<LaborLine[]>([
+    { key: crypto.randomUUID(), description: "", quantity: "1", unit_price: "" },
+  ]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError]   = useState<string | null>(null);
+
+  const addLine = () => setLaborLines((prev) => [...prev, { key: crypto.randomUUID(), description: "", quantity: "1", unit_price: "" }]);
+  const removeLine = (key: string) => setLaborLines((prev) => prev.filter((l) => l.key !== key));
+  const updateLine = (key: string, field: keyof Omit<LaborLine, "key">, value: string) =>
+    setLaborLines((prev) => prev.map((l) => (l.key === key ? { ...l, [field]: value } : l)));
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true); setError(null);
+    const payload: LaborLinePayload[] = laborLines
+      .filter((l) => l.description && l.unit_price)
+      .map((l) => ({ description: l.description, quantity: Number(l.quantity) || 1, unit_price: Number(l.unit_price) }));
+    try {
+      const invoice = await invoicesApi.create(record.id, payload);
+      onCreated(invoice.id);
+    } catch (err) {
+      const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setError(apiMessage || "Gagal membuat invoice.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, overflowY: "auto", padding: "40px 0" }}>
+      <div className="card" style={{ width: 560, background: "var(--paper-3)" }}>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Buat Invoice</h2>
+        <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 16 }}>
+          {record.service_date} — {record.issue_description}
+        </p>
+
+        {/* Part usages are read-only here — they were already locked
+            in the moment a mechanic logged them, same reasoning as
+            everywhere else this sprint: an invoice snapshots what
+            already happened, it never re-decides it. */}
+        {record.part_usages.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div className="label" style={{ marginBottom: 6 }}>Part (dari catatan servis)</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {record.part_usages.map((pu) => (
+                <div key={pu.id} className="mono" style={{ fontSize: 13, display: "flex", justifyContent: "space-between", color: "var(--ink-soft)" }}>
+                  <span>{pu.part_name} × {pu.quantity} {pu.unit}</span>
+                  <span>Rp {(Number(pu.unit_price_at_time) * Number(pu.quantity)).toLocaleString("id-ID")}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
+
+        <form onSubmit={handleSubmit}>
+          <div className="label" style={{ marginBottom: 6 }}>Jasa</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+            {laborLines.map((line) => (
+              <div key={line.key} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input className="input" style={{ flex: 2 }} placeholder="Jasa Servis Rem" value={line.description} onChange={(e) => updateLine(line.key, "description", e.target.value)} />
+                <input className="input" style={{ width: 60 }} type="number" min={1} value={line.quantity} onChange={(e) => updateLine(line.key, "quantity", e.target.value)} />
+                <input className="input" style={{ flex: 1 }} type="number" min={0} placeholder="Harga" value={line.unit_price} onChange={(e) => updateLine(line.key, "unit_price", e.target.value)} />
+                <button type="button" onClick={() => removeLine(line.key)} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <button type="button" className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", marginBottom: 18 }} onClick={addLine}>
+            <Plus size={13} /> Tambah Jasa
+          </button>
+
+          <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 16 }}>
+            Invoice tidak bisa diedit setelah dibuat — periksa dulu sebelum menyimpan.
+          </p>
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="btn-rust" type="submit" disabled={saving}>
+              {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Buat Invoice"}
+            </button>
+            <button type="button" className="btn-ghost" onClick={onClose}>Batal</button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
 
 function VehicleDetailContent() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const vehicleId = searchParams.get("id") ?? "";
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [catalog, setCatalog] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
+  const [invoicingRecord, setInvoicingRecord] = useState<ServiceRecord | null>(null);
 
   const load = () => vehiclesApi.get(vehicleId).then(setVehicle).finally(() => setLoading(false));
   useEffect(() => {
@@ -377,9 +453,29 @@ function VehicleDetailContent() {
               {r.parts_replaced && <p style={{ fontSize: 13, color: "var(--steel)" }}>Part diganti (catatan bebas): {r.parts_replaced}</p>}
               {r.notes && <p style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>{r.notes}</p>}
               <PartUsageRow record={r} catalog={catalog} onUsed={handleAdded} />
+
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
+                {r.invoice_id ? (
+                  <Link href={`/dashboard/invoice-detail?id=${r.invoice_id}`} className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <Receipt size={13} /> Lihat Invoice
+                  </Link>
+                ) : (
+                  <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px" }} onClick={() => setInvoicingRecord(r)}>
+                    <FileText size={13} /> Buat Invoice
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </div>
+      )}
+
+      {invoicingRecord && (
+        <CreateInvoiceModal
+          record={invoicingRecord}
+          onClose={() => setInvoicingRecord(null)}
+          onCreated={(invoiceId) => router.push(`/dashboard/invoice-detail?id=${invoiceId}`)}
+        />
       )}
     </div>
   );
