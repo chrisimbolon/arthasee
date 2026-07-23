@@ -1,17 +1,15 @@
 # =============================================================================
 # === backend/apps/workorders/views.py ===
 # =============================================================================
+from apps.core.views import TenantScopedAPIView
+from apps.inventory.models import StockAdjustment
 from django.db import transaction
 from rest_framework import status
 from rest_framework.response import Response
 
-from apps.core.views import TenantScopedAPIView
-from apps.inventory.models import StockAdjustment
-
 from .models import WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine
-from .serializers import (
-    WorkOrderJobLineSerializer, WorkOrderListSerializer, WorkOrderMaterialLineSerializer, WorkOrderSerializer,
-)
+from .serializers import (WorkOrderJobLineSerializer, WorkOrderListSerializer,
+                          WorkOrderMaterialLineSerializer, WorkOrderSerializer)
 
 # Statuses a WorkOrder can still be actively edited in — once it's
 # DONE or CANCELLED, it's frozen, matching ServiceRecord's own
@@ -33,7 +31,19 @@ class WorkOrderListView(TenantScopedAPIView):
         payload["vehicle"] = vehicle_id
         serializer = WorkOrderSerializer(data=payload, context={"request": request})
         if serializer.is_valid():
-            order = serializer.save(created_by=request.user)
+            # WorkOrder.save() calls WorkOrderSequence.next_number(),
+            # which uses select_for_update() — that requires an
+            # active transaction to attach its row lock to. Every
+            # OTHER write path in this file either has no number-
+            # generation step at all, or (close()/cancel()) already
+            # owns its own atomic() block internally. This is the one
+            # spot that was missing it — caught in real usage, not by
+            # the test suite, since Django's TestCase wraps every test
+            # method in its own transaction automatically, which
+            # accidentally hid the exact gap a real HTTP request
+            # (running with no implicit transaction) exposed immediately.
+            with transaction.atomic():
+                order = serializer.save(created_by=request.user)
             return Response(
                 {"success": True, "work_order": WorkOrderSerializer(order).data},
                 status=status.HTTP_201_CREATED,

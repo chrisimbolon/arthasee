@@ -3,13 +3,12 @@
 # =============================================================================
 from decimal import Decimal
 
-from rest_framework import status
-from rest_framework.test import APITestCase
-
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
+from rest_framework import status
+from rest_framework.test import APITestCase, APITransactionTestCase
 
 from .models import WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine
 
@@ -320,3 +319,53 @@ class WorkOrderTenantIsolationTests(WorkOrderAPITestBase):
             {"part": str(other_part.id), "quantity": "1.00"}, format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class WorkOrderRealTransactionTests(APITransactionTestCase):
+    """
+    Deliberately APITransactionTestCase, not the usual APITestCase
+    used everywhere else in this file. APITestCase wraps every test
+    method in its own implicit transaction (a performance shortcut,
+    fast rollback instead of table truncation between tests) — which
+    accidentally gives select_for_update() a transaction to attach to
+    even when the actual view code never opened one itself. That
+    masking is exactly what let WorkOrderListView.post() ship without
+    its own transaction.atomic() wrapper: every APITestCase-based test
+    passed, and the very first real HTTP request against a running
+    server failed with 'select_for_update() cannot be used outside of
+    a transaction.'
+
+    APITransactionTestCase runs without that implicit wrapper — it's
+    slower (real commits + truncation instead of rollback), which is
+    exactly why it isn't used for every test in this file, only this
+    one class, specifically to catch this exact failure mode again if
+    it's ever reintroduced.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.wotransaction@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 9001 AA", manufacture_year=2022,
+            vehicle_type="Mobil", model="Test Car",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def test_create_work_order_via_real_http_request_without_implicit_transaction(self):
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["work_order"]["number"], "1")
+
+    def test_second_work_order_gets_next_sequence_via_real_http_requests(self):
+        first = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        second = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(first.data["work_order"]["sequence_number"], 1)
+        self.assertEqual(second.data["work_order"]["sequence_number"], 2)
