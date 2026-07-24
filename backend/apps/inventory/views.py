@@ -1,14 +1,15 @@
 # =============================================================================
 # === backend/apps/inventory/views.py ===
 # =============================================================================
+from apps.core.views import TenantScopedAPIView
+from apps.service.models import ServiceRecord
 from django.db.models import ProtectedError, Q
 from rest_framework import status
 from rest_framework.response import Response
 
-from apps.core.views import TenantScopedAPIView
-
 from .models import Part, PartUsage, StockAdjustment
-from .serializers import PartSerializer, PartUsageSerializer, StockAdjustmentSerializer
+from .serializers import (PartSerializer, PartUsageSerializer,
+                          StockAdjustmentSerializer)
 
 
 class PartListView(TenantScopedAPIView):
@@ -52,7 +53,12 @@ class PartListView(TenantScopedAPIView):
 
 
 class PartDetailView(TenantScopedAPIView):
-    """GET/PUT/DELETE /api/parts/<id>/"""
+    """
+    GET/PUT/DELETE /api/parts/<id>/
+    PUT deliberately cannot touch current_stock (read_only in the
+    serializer) — only name/sku/unit/unit_price are editable this
+    way. Stock only ever moves through PartUsage or StockAdjustment.
+    """
     model = Part
 
     def get(self, request, pk):
@@ -85,8 +91,13 @@ class PartDetailView(TenantScopedAPIView):
 class PartUsageListView(TenantScopedAPIView):
     """
     GET/POST /api/service-records/<service_record_id>/part-usages/
-    Nested under service record from apps.service — a cross-app
-    nesting, same as the model's own cross-app FK.
+    Nested under service record — mirrors ServiceRecordListView's own
+    nesting under vehicle, same "this only makes sense in context"
+    reasoning.
+
+    The 201 response includes a top-level `warnings` list (empty if
+    none) surfaced from the serializer's soft negative-stock check —
+    the frontend can display this without it being a hard failure.
     """
     model = PartUsage
 
@@ -96,6 +107,35 @@ class PartUsageListView(TenantScopedAPIView):
         return Response({"success": True, "count": usages.count(), "results": serializer.data})
 
     def post(self, request, service_record_id):
+        service_record = self._get_service_record(request, service_record_id)
+        if service_record is None:
+            return Response(
+                {"success": False, "message": "Catatan servis tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # A ServiceRecord that already has an Invoice is frozen — the
+        # Invoice already snapshotted whatever PartUsage existed at
+        # its own creation time. Letting more usage attach afterward
+        # would silently drift real stock and the invoice's own
+        # printed numbers apart — exactly the class of bug every
+        # snapshot in this codebase (PartUsage.unit_price_at_time,
+        # Invoice's customer_name_snapshot, etc.) exists to prevent.
+        # This was previously only enforced by the frontend hiding a
+        # button — a real gap, since the endpoint itself never
+        # checked. getattr() is the correct, idiomatic way to probe a
+        # reverse OneToOneField without a try/except: Django's
+        # RelatedObjectDoesNotExist is deliberately a subclass of
+        # AttributeError specifically so this works.
+        if getattr(service_record, "invoice", None) is not None:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Catatan servis ini sudah memiliki invoice — tidak bisa menambah part lagi.",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         payload = dict(request.data)
         payload["service_record"] = service_record_id
         context = {"request": request}
@@ -112,9 +152,28 @@ class PartUsageListView(TenantScopedAPIView):
             )
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
+    def _get_service_record(self, request, service_record_id):
+        # Deliberately not self.get_queryset() — that filters by
+        # self.model, which is PartUsage here, not ServiceRecord.
+        # Same tenant-scoping logic as TenantScopedAPIView, applied
+        # to the actual model this lookup needs — same pattern
+        # already used in apps.invoicing.views and apps.workorders.views
+        # for the same reason.
+        user = request.user
+        if user.role == "super_admin":
+            qs = ServiceRecord.objects.all()
+        else:
+            org_ids = user.memberships.filter(is_active=True).values_list("organization_id", flat=True)
+            qs = ServiceRecord.objects.filter(organization_id__in=org_ids)
+        return qs.filter(pk=service_record_id).first()
+
 
 class StockAdjustmentListView(TenantScopedAPIView):
-    """GET/POST /api/parts/<part_id>/adjustments/"""
+    """
+    GET/POST /api/parts/<part_id>/adjustments/
+    Nested under part — every adjustment only ever makes sense
+    against one specific part's running total.
+    """
     model = StockAdjustment
 
     def get(self, request, part_id):
