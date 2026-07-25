@@ -1,6 +1,8 @@
 # =============================================================================
 # === backend/apps/workorders/views.py ===
 # =============================================================================
+from datetime import date
+
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import StockAdjustment
 from django.db import transaction
@@ -110,13 +112,32 @@ class WorkOrderStatusUpdateView(TenantScopedAPIView):
 
 
 class WorkOrderCloseView(TenantScopedAPIView):
-    """POST /api/work-orders/<id>/close/ — freezes into a ServiceRecord."""
+    """
+    POST /api/work-orders/<id>/close/ — freezes into a ServiceRecord.
+
+    Accepts an optional service_date, so closing a Work Order can
+    genuinely replace the old free-text quick-entry flow entirely —
+    that flow's one real advantage was backdating a visit that
+    happened days ago (a forgotten live entry, or migrating old
+    paper records). WorkOrder.close() itself already accepted this
+    parameter; it was just never exposed through the API until now.
+    """
     model = WorkOrder
 
     def post(self, request, pk):
         order = self.get_object(pk)
+        service_date = None
+        raw_date = request.data.get("service_date")
+        if raw_date:
+            try:
+                service_date = date.fromisoformat(raw_date)
+            except ValueError:
+                return Response(
+                    {"success": False, "message": "Format tanggal tidak valid — gunakan YYYY-MM-DD."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         try:
-            order.close(closed_by=request.user)
+            order.close(service_date=service_date, closed_by=request.user)
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_409_CONFLICT)
         return Response({"success": True, "work_order": WorkOrderSerializer(order).data})
