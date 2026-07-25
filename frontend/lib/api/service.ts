@@ -32,9 +32,14 @@ export interface ServiceRecord {
   notes:             string;
   part_usages:       PartUsageSummary[];
   // Set once an Invoice exists for this record (OneToOneField on the
-  // backend) — null until then. Drives whether the UI shows "Buat Invoice" or "Lihat Invoice" per record.
-
+  // backend) — null until then. Drives whether the UI shows "Buat
+  // Invoice" or "Lihat Invoice" per record.
   invoice_id:        string | null;
+  // Set when this record traces back through a WorkOrder to an
+  // approved Estimate — null for plain records or ones that never
+  // went through the estimate flow. Purely a reference point at
+  // invoice-creation time, never enforced against the real invoice.
+  original_estimate_total: string | null;
   created_by:        string | null;
   created_by_name:   string | null;
   created_at:        string;
