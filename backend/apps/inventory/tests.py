@@ -3,12 +3,12 @@
 # =============================================================================
 from decimal import Decimal
 
-from rest_framework import status
-from rest_framework.test import APITestCase
-
 from apps.authentication.models import CustomUser
+from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from .models import Part, PartUsage, StockAdjustment
 
@@ -24,7 +24,7 @@ class InventoryAPITestBase(APITestCase):
     """
 
     def setUp(self):
-        self.org = Organization.objects.create(name="Arya Motor")
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         self.owner = CustomUser.objects.create_user(
             email="owner.inventory@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
@@ -274,3 +274,71 @@ class InventoryTenantIsolationTests(InventoryAPITestBase):
             format="json",
         )
         self.assertIn(resp.status_code, (status.HTTP_404_NOT_FOUND, status.HTTP_400_BAD_REQUEST))
+
+
+class PartUsageFrozenAfterInvoiceTests(InventoryAPITestBase):
+    """
+    Proves the actual gap Sansan's review surfaced: PartUsageListView
+    previously only checked tenant ownership, never whether an
+    Invoice already existed — meaning a direct API call (no UI bug
+    required) could still add usage to a ServiceRecord whose Invoice
+    had already snapshotted a different set of line items, silently
+    drifting stock and the invoice apart.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", unit="pcs", unit_price=Decimal("25000.00"),
+        )
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("20.00"), reason="restock",
+        )
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 7002 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        self.service_record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-24", odometer_km=10000,
+            issue_description="Ganti busi",
+        )
+
+    def test_can_add_part_usage_before_invoice_exists(self):
+        """Sanity check the guard doesn't over-block the normal case."""
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "2.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_cannot_add_part_usage_after_invoice_exists(self):
+        Invoice.objects.create(service_record=self.service_record, created_by=self.owner)
+
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "1.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_rejected_attempt_does_not_touch_stock(self):
+        """
+        Not just the status code — proves the actual side effect
+        (stock deduction) genuinely never happened, matching this
+        project's habit of verifying real state, not just HTTP codes.
+        """
+        Invoice.objects.create(service_record=self.service_record, created_by=self.owner)
+        self.part.refresh_from_db()
+        stock_before = self.part.current_stock
+
+        self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "5.00"},
+            format="json",
+        )
+
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, stock_before)
