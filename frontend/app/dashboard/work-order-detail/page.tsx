@@ -221,6 +221,7 @@ function WorkOrderDetailContent() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [closeDate, setCloseDate] = useState(new Date().toISOString().slice(0, 10));
 
   const load = () => workOrdersApi.get(workOrderId).then(setWo).finally(() => setLoading(false));
   useEffect(() => { if (workOrderId) load(); }, [workOrderId]);
@@ -241,7 +242,7 @@ function WorkOrderDetailContent() {
   const handleClose = async () => {
     setBusy(true); setError(null);
     try {
-      await workOrdersApi.close(workOrderId);
+      await workOrdersApi.close(workOrderId, closeDate);
       load();
     } catch (err) {
       const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
@@ -314,13 +315,24 @@ function WorkOrderDetailContent() {
       )}
 
       {OPEN_STATUSES.includes(wo.status) && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           {wo.status === "OPEN" && (
             <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("IN_PROGRESS")}>Mulai Dikerjakan</button>
           )}
           {wo.status === "IN_PROGRESS" && (
             <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("QC")}>Ajukan Pemeriksaan</button>
           )}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <label className="label" style={{ marginBottom: 0 }}>Tanggal Servis</label>
+            <input
+              className="input" type="date" style={{ padding: "6px 10px", fontSize: 13, width: 150 }}
+              value={closeDate} onChange={(e) => setCloseDate(e.target.value)}
+              // Defaults to today but editable — this is what lets a
+              // Work Order genuinely replace the old free-text quick
+              // entry: backdating a visit that happened days ago,
+              // not just logging one that just finished.
+            />
+          </div>
           <button className="btn-rust" disabled={busy} onClick={handleClose}>Selesaikan Work Order</button>
           <button className="btn-ghost" disabled={busy} onClick={handleCancel}>Batalkan</button>
         </div>
