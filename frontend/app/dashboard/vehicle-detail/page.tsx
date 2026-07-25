@@ -6,8 +6,8 @@
 // export. A dynamic route needs every possible URL known at build
 // time; real vehicle UUIDs only exist after a shop creates them, so
 // that's structurally impossible here. A query string doesn't have
-// that problem — the served HTML is identical regardless of ?id=value, and the client-side JS reads it once loaded.
-// 
+// that problem — the served HTML is identical regardless of ?id=
+// value, and the client-side JS reads it once loaded.
 //
 // RESTRUCTURED — confirmed with Made across several rounds of
 // follow-up calls:
@@ -28,10 +28,11 @@
 //     reason) but sit behind a toggle rather than cluttering the
 //     primary, actionable view.
 // =============================================================================
+import { EstimateStatus, EstimateSummary, estimatesApi } from "@/lib/api/estimates";
 import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
 import { ServiceRecord, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
-import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -95,6 +96,13 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
         <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 16 }}>
           {record.service_date} — {record.issue_description}
         </p>
+
+        {record.original_estimate_total && (
+          <div style={{ background: "var(--paper)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px 12px", marginBottom: 16, fontSize: 13 }}>
+            Awalnya diestimasi: <span className="mono" style={{ fontWeight: 600 }}>Rp {Number(record.original_estimate_total).toLocaleString("id-ID")}</span>
+            <span style={{ color: "var(--steel)" }}> — hanya referensi, pekerjaan bisa berubah selama perbaikan.</span>
+          </div>
+        )}
 
         {record.part_usages.length > 0 && (
           <div style={{ marginBottom: 16 }}>
@@ -220,6 +228,80 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
   );
 }
 
+const EST_STATUS_LABEL: Record<EstimateStatus, string> = {
+  PENDING: "Menunggu Persetujuan", APPROVED: "Disetujui", REJECTED: "Ditolak",
+};
+const EST_STATUS_COLOR: Record<EstimateStatus, string> = {
+  PENDING: "var(--rust)", APPROVED: "#2e7d4f", REJECTED: "var(--danger)",
+};
+
+function EstimatesSection({ vehicleId }: { vehicleId: string }) {
+  const router = useRouter();
+  const [estimates, setEstimates] = useState<EstimateSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const load = () => estimatesApi.list(vehicleId).then(setEstimates).finally(() => setLoading(false));
+  useEffect(() => { load(); }, [vehicleId]);
+
+  const createDraft = async () => {
+    setCreating(true);
+    try {
+      const est = await estimatesApi.create(vehicleId);
+      router.push(`/dashboard/estimate-detail?id=${est.id}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const pending = estimates.filter((e) => e.status === "PENDING");
+  const history = estimates.filter((e) => e.status !== "PENDING");
+  const visible = showHistory ? estimates : pending;
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h2 style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          <FileSearch size={16} /> Estimasi
+        </h2>
+        <button className="btn-rust" onClick={createDraft} disabled={creating}>
+          {creating ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <><Plus size={16} /> Buat Estimasi</>}
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ color: "var(--steel)", fontSize: 13.5 }}><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /></div>
+      ) : visible.length === 0 ? (
+        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>
+          {showHistory ? "Belum ada estimasi untuk kendaraan ini." : "Tidak ada estimasi yang menunggu persetujuan."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {visible.map((est) => (
+            <Link key={est.id} href={`/dashboard/estimate-detail?id=${est.id}`} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
+              <span className="mono" style={{ fontSize: 13.5, fontWeight: 600 }}>EST #{est.number}</span>
+              <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: EST_STATUS_COLOR[est.status] }}>
+                {EST_STATUS_LABEL[est.status]}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <button
+          className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", marginTop: 10 }}
+          onClick={() => setShowHistory((v) => !v)}
+        >
+          {showHistory ? "Sembunyikan Riwayat Estimasi" : `Lihat Riwayat Estimasi (${history.length})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+
 function VehicleDetailContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -306,6 +388,7 @@ function VehicleDetailContent() {
         </div>
       )}
 
+      <EstimatesSection vehicleId={vehicle.id} />
       <WorkOrdersSection vehicleId={vehicle.id} />
 
       <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
