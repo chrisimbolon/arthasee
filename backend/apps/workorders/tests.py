@@ -369,3 +369,48 @@ class WorkOrderRealTransactionTests(APITransactionTestCase):
         second = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
         self.assertEqual(first.data["work_order"]["sequence_number"], 1)
         self.assertEqual(second.data["work_order"]["sequence_number"], 2)
+
+
+class WorkOrderMaterialLineDeletionReasonTests(WorkOrderAPITestBase):
+    """
+    Confirmed directly with Made: a customer cancelling an already-
+    installed part mid-repair (a multi-day job, car stays overnight)
+    is a real, recurring, distinct scenario from a mechanic simply
+    correcting a data-entry mistake. Both still reverse stock the
+    same way — this only proves the audit trail records the right
+    reason for each.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_default_deletion_reason_is_correction(self):
+        create = self.client.post(
+            f"/api/work-orders/{self.wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "1.00"}, format="json",
+        )
+        line_id = create.data["material_line"]["id"]
+        self.client.delete(f"/api/work-orders/material-lines/{line_id}/")
+        adjustment = StockAdjustment.objects.filter(part=self.part, reason="correction").first()
+        self.assertIsNotNone(adjustment)
+
+    def test_can_record_customer_cancelled_reason_explicitly(self):
+        create = self.client.post(
+            f"/api/work-orders/{self.wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "1.00"}, format="json",
+        )
+        line_id = create.data["material_line"]["id"]
+        self.client.delete(f"/api/work-orders/material-lines/{line_id}/", {"reason": "customer_cancelled_part"}, format="json")
+        adjustment = StockAdjustment.objects.filter(part=self.part, reason="customer_cancelled_part").first()
+        self.assertIsNotNone(adjustment)
+
+    def test_invalid_reason_falls_back_to_correction(self):
+        create = self.client.post(
+            f"/api/work-orders/{self.wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "1.00"}, format="json",
+        )
+        line_id = create.data["material_line"]["id"]
+        self.client.delete(f"/api/work-orders/material-lines/{line_id}/", {"reason": "made_up_value"}, format="json")
+        adjustment = StockAdjustment.objects.filter(part=self.part).first()
+        self.assertEqual(adjustment.reason, "correction")

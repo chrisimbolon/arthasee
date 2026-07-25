@@ -149,6 +149,7 @@ class StockAdjustment(TenantScopedModel):
         ("correction", "Koreksi Stok"),
         ("damage",     "Rusak / Hilang"),
         ("work_order_cancelled", "Pembatalan Work Order"),
+        ("customer_cancelled_part", "Part Dibatalkan Pelanggan"),
     ]
 
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -157,7 +158,7 @@ class StockAdjustment(TenantScopedModel):
         verbose_name="Part",
     )
     quantity_change = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Perubahan Jumlah")
-    reason = models.CharField(max_length=20, choices=REASON_CHOICES, default="restock", verbose_name="Alasan")
+    reason = models.CharField(max_length=30, choices=REASON_CHOICES, default="restock", verbose_name="Alasan")
     notes  = models.TextField(blank=True, verbose_name="Catatan")
     created_by = models.ForeignKey(
         "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,

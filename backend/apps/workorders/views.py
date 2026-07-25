@@ -252,10 +252,23 @@ class WorkOrderMaterialLineDetailView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan — baris tidak bisa dihapus."},
                 status=status.HTTP_409_CONFLICT,
             )
+        # Two real, distinct reasons a material line gets removed —
+        # confirmed directly with Made: a customer cancelling an
+        # already-installed part mid-repair (his actual described
+        # scenario, e.g. a multi-day job where the car stays
+        # overnight) is a genuinely different event from a mechanic
+        # simply correcting a data-entry mistake, and deserves its
+        # own honest label in the audit trail rather than both being
+        # lumped under "correction". Defaults to "correction" if the
+        # caller doesn't specify — the safer, more conservative
+        # assumption when we don't actually know why.
+        reason = request.data.get("reason")
+        if reason not in ("correction", "customer_cancelled_part"):
+            reason = "correction"
         with transaction.atomic():
             StockAdjustment.objects.create(
                 organization=line.organization, part=line.part,
-                quantity_change=line.quantity, reason="correction",
+                quantity_change=line.quantity, reason=reason,
                 notes=f"Baris material dihapus dari WO {line.work_order.number}",
             )
             line.delete()
