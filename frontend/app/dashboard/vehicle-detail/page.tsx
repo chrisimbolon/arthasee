@@ -6,8 +6,8 @@
 // export. A dynamic route needs every possible URL known at build
 // time; real vehicle UUIDs only exist after a shop creates them, so
 // that's structurally impossible here. A query string doesn't have
-// that problem — the served HTML is identical regardless of ?id=
-// value, and the client-side JS reads it once loaded.
+// that problem — the served HTML is identical regardless of ?id=value, and the client-side JS reads it once loaded.
+// 
 //
 // RESTRUCTURED — confirmed with Made across several rounds of
 // follow-up calls:
