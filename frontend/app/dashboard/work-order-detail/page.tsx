@@ -166,7 +166,14 @@ function MaterialLinesSection({ wo, catalog, onUpdated }: { wo: WorkOrder; catal
   };
 
   const removeLine = async (lineId: string) => {
-    await workOrderMaterialLinesApi.remove(lineId);
+    // Simple, honest prompt rather than silently defaulting — Made
+    // specifically described customer-cancelled parts (already
+    // installed, then removed mid-repair on a multi-day job) as a
+    // real, recurring scenario distinct from a plain mistake.
+    const customerCancelled = window.confirm(
+      "Apakah pelanggan yang membatalkan part ini?\n\nOK = Ya, pelanggan membatalkan\nBatal = Tidak, ini koreksi kesalahan input"
+    );
+    await workOrderMaterialLinesApi.remove(lineId, customerCancelled ? "customer_cancelled_part" : "correction");
     onUpdated();
   };
 
