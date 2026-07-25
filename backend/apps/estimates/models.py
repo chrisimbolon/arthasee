@@ -39,10 +39,9 @@ Persetujuan Pelanggan -> Work Order. Confirmed with Chris/Made:
 """
 import uuid
 
-from django.db import models, transaction
-
 from apps.core.models import TenantScopedModel
 from apps.inventory.models import Part
+from django.db import models, transaction
 
 
 class EstimateSequence(TenantScopedModel):
@@ -159,7 +158,8 @@ class Estimate(TenantScopedModel):
         the job, rather than inventing a new priced-line concept on a
         model that's already proven and shouldn't be touched.
         """
-        from apps.workorders.models import WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine
+        from apps.workorders.models import (WorkOrder, WorkOrderJobLine,
+                                            WorkOrderMaterialLine)
 
         if self.status != "PENDING":
             raise ValueError("Hanya estimasi yang masih menunggu persetujuan yang bisa disetujui.")
@@ -167,6 +167,13 @@ class Estimate(TenantScopedModel):
         with transaction.atomic():
             work_order = WorkOrder.objects.create(
                 organization=self.organization, vehicle=self.vehicle, created_by=approved_by,
+                # Carries the diagnosis forward so whoever picks up
+                # the Work Order doesn't have to retype context
+                # already recorded at estimate time — still fully
+                # editable afterward via WorkOrder's own PUT endpoint,
+                # this is just a helpful starting point, not a link
+                # that stays synced.
+                notes=self.diagnosis_notes,
             )
             for line in self.line_items.all():
                 if line.kind == "labor":

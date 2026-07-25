@@ -3,14 +3,14 @@
 # =============================================================================
 from decimal import Decimal
 
-from rest_framework import status
-from rest_framework.test import APITestCase, APITransactionTestCase
-
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
-from apps.workorders.models import WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine
+from apps.workorders.models import (WorkOrder, WorkOrderJobLine,
+                                    WorkOrderMaterialLine)
+from rest_framework import status
+from rest_framework.test import APITestCase, APITransactionTestCase
 
 from .models import Estimate, EstimateLineItem
 
@@ -151,6 +151,10 @@ class EstimateApprovalTests(EstimateAPITestBase):
         self.estimate.refresh_from_db()
         self.assertEqual(self.estimate.status, "APPROVED")
         self.assertEqual(self.estimate.work_order, work_order)
+
+    def test_approve_carries_diagnosis_notes_into_work_order(self):
+        work_order = self.estimate.approve(approved_by=self.owner)
+        self.assertEqual(work_order.notes, "Rem bunyi")
 
     def test_work_order_can_look_back_at_its_originating_estimate(self):
         """Proves the reverse-accessor traceability works without any
