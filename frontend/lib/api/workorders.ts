@@ -80,8 +80,8 @@ export const workOrdersApi = {
     const { data } = await api.patch(`/api/work-orders/${id}/status/`, { status });
     return data.work_order;
   },
-  async close(id: string): Promise<WorkOrder> {
-    const { data } = await api.post(`/api/work-orders/${id}/close/`);
+  async close(id: string, serviceDate?: string): Promise<WorkOrder> {
+    const { data } = await api.post(`/api/work-orders/${id}/close/`, serviceDate ? { service_date: serviceDate } : {});
     return data.work_order;
   },
   async cancel(id: string): Promise<WorkOrder> {
