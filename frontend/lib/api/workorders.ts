@@ -107,8 +107,11 @@ export const workOrderMaterialLinesApi = {
     return data.material_line;
   },
   // Deleting reverses the stock it deducted — see the backend's own
-  // WorkOrderMaterialLineDetailView docstring for why.
-  async remove(id: string): Promise<void> {
-    await api.delete(`/api/work-orders/material-lines/${id}/`);
+  // WorkOrderMaterialLineDetailView docstring for why. reason
+  // distinguishes a genuine customer cancellation (Made's own
+  // described scenario) from a plain data-entry correction, so the
+  // audit trail stays honest about which actually happened.
+  async remove(id: string, reason: "correction" | "customer_cancelled_part" = "correction"): Promise<void> {
+    await api.delete(`/api/work-orders/material-lines/${id}/`, { data: { reason } });
   },
 };
