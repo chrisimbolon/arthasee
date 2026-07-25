@@ -1,6 +1,8 @@
 # =============================================================================
 # === backend/apps/service/serializers.py ===
 # =============================================================================
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import Customer, ServiceRecord, Vehicle
@@ -25,16 +27,20 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
     part_usages      = serializers.SerializerMethodField()
     invoice_id        = serializers.SerializerMethodField()
+    original_estimate_total = serializers.SerializerMethodField()
 
     class Meta:
         model  = ServiceRecord
         fields = [
             "id", "vehicle", "service_date", "odometer_km",
             "issue_description", "parts_replaced", "notes", "part_usages",
-            "invoice_id",
+            "invoice_id", "original_estimate_total",
             "created_by", "created_by_name", "created_at",
         ]
-        read_only_fields = ["id", "created_by", "created_by_name", "created_at", "part_usages", "invoice_id"]
+        read_only_fields = [
+            "id", "created_by", "created_by_name", "created_at",
+            "part_usages", "invoice_id", "original_estimate_total",
+        ]
 
     def get_part_usages(self, obj):
         return [
@@ -45,6 +51,27 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
             }
             for pu in obj.part_usages.select_related("part").all()
         ]
+
+    def get_original_estimate_total(self, obj):
+        # Traces ServiceRecord -> WorkOrder -> Estimate entirely via
+        # reverse accessors (WorkOrder.service_record and
+        # Estimate.work_order are both the forward side of their
+        # OneToOneFields) — apps.service imports nothing from
+        # apps.workorders or apps.estimates to do this. getattr with
+        # a default is the correct way to probe each reverse
+        # OneToOne: Django's RelatedObjectDoesNotExist is deliberately
+        # a subclass of AttributeError specifically so this works,
+        # for a record that never went through a Work Order at all,
+        # or one that did but was never quoted first (both entirely
+        # normal — this field surfaces the reference only when it
+        # genuinely exists, never fabricates one).
+        work_order = getattr(obj, "work_order", None)
+        if work_order is None:
+            return None
+        estimate = getattr(work_order, "estimate", None)
+        if estimate is None:
+            return None
+        return sum((li.subtotal for li in estimate.line_items.all()), Decimal("0"))
 
     def get_invoice_id(self, obj):
         # apps.invoicing.Invoice's OneToOneField reverse accessor —
