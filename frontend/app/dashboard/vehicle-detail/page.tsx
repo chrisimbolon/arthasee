@@ -8,20 +8,33 @@
 // that's structurally impossible here. A query string doesn't have
 // that problem — the served HTML is identical regardless of ?id=
 // value, and the client-side JS reads it once loaded.
+//
+// RESTRUCTURED — confirmed with Made across several rounds of
+// follow-up calls:
+//   - "Catat Servis Baru" (the old free-text quick-entry form) is
+//     removed entirely. It used to exist as a competing pathway
+//     alongside "Buat Work Order", with nothing distinguishing when
+//     to use which — a real UX gap Sansan's review flagged directly.
+//     Work Order now genuinely covers everything that button used
+//     to (including backdating, via the optional service_date on
+//     close — see work-order-detail/page.tsx).
+//   - Riwayat Servis is now strictly read-only. "+ Gunakan Part dari
+//     Katalog" is gone from every entry, including pre-Work-Order
+//     legacy records — parts are only ever logged through an active
+//     Work Order now, never retroactively against a closed record.
+//   - The Work Order section defaults to active-only
+//     (OPEN/IN_PROGRESS/QC); DONE/CANCELLED ones are real history
+//     (never deleted — see the customer_cancelled_part StockAdjustment
+//     reason) but sit behind a toggle rather than cluttering the
+//     primary, actionable view.
 // =============================================================================
-import { invoicesApi, LaborLinePayload } from "@/lib/api/invoicing";
-import { Part, partsApi, partUsagesApi, ServiceRecord, serviceRecordsApi, Vehicle, vehiclesApi } from "@/lib/api/service";
-import { workOrdersApi, WorkOrderStatus, WorkOrderSummary } from "@/lib/api/workorders";
+import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
+import { ServiceRecord, Vehicle, vehiclesApi } from "@/lib/api/service";
+import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
 import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-
-interface PartLine {
-  key:      string;
-  part:     string;
-  quantity: string;
-}
 
 interface LaborLine {
   key:         string;
@@ -30,221 +43,16 @@ interface LaborLine {
   unit_price:  string;
 }
 
-function AddServiceRecordForm({ vehicleId, catalog, onAdded }: {
-  vehicleId: string; catalog: Part[]; onAdded: (r: ServiceRecord, newOdometer: number) => void;
-}) {
-  const [form, setForm] = useState({
-    service_date: new Date().toISOString().slice(0, 10),
-    odometer_km: "", issue_description: "", parts_replaced: "", notes: "",
-  });
-  const [partLines, setPartLines] = useState<PartLine[]>([]);
-  const [saving, setSaving]   = useState(false);
-  const [error, setError]     = useState<string | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [open, setOpen]       = useState(false);
-
-  const addPartLine = () => {
-    setPartLines((prev) => [...prev, { key: crypto.randomUUID(), part: "", quantity: "" }]);
-  };
-  const removePartLine = (key: string) => {
-    setPartLines((prev) => prev.filter((l) => l.key !== key));
-  };
-  const updatePartLine = (key: string, field: "part" | "quantity", value: string) => {
-    setPartLines((prev) => prev.map((l) => (l.key === key ? { ...l, [field]: value } : l)));
-  };
-
-  const resetForm = () => {
-    setForm({ service_date: new Date().toISOString().slice(0, 10), odometer_km: "", issue_description: "", parts_replaced: "", notes: "" });
-    setPartLines([]);
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSaving(true); setError(null); setWarnings([]);
-
-    let record: ServiceRecord;
-    try {
-      record = await serviceRecordsApi.create(vehicleId, {
-        ...form, odometer_km: Number(form.odometer_km),
-      });
-    } catch {
-      setError("Gagal menyimpan catatan servis.");
-      setSaving(false);
-      return;
-    }
-
-    const filledLines = partLines.filter((l) => l.part && l.quantity);
-    const results = await Promise.allSettled(
-      filledLines.map((l) => partUsagesApi.create(record.id, { part: l.part, quantity: Number(l.quantity) }))
-    );
-
-    const failedLines: string[] = [];
-    const allWarnings: string[] = [];
-    results.forEach((result, i) => {
-      const line = filledLines[i];
-      const partName = catalog.find((p) => p.id === line.part)?.name ?? "Part";
-      if (result.status === "rejected") {
-        failedLines.push(partName);
-      } else if (result.value.warnings.length > 0) {
-        allWarnings.push(...result.value.warnings);
-      }
-    });
-
-    onAdded(record, Number(form.odometer_km));
-
-    if (failedLines.length > 0) {
-      setError(`Catatan servis tersimpan, tapi gagal mencatat: ${failedLines.join(", ")}. Coba lagi di bawah.`);
-      setWarnings(allWarnings);
-      setSaving(false);
-      return;
-    }
-
-    if (allWarnings.length > 0) {
-      setWarnings(allWarnings);
-    }
-
-    resetForm();
-    setSaving(false);
-    setOpen(false);
-  };
-
-  if (!open) {
-    return <button className="btn-rust" onClick={() => setOpen(true)}><Plus size={16} /> Catat Servis Baru</button>;
-  }
-
+function PartUsageDisplay({ record }: { record: ServiceRecord }) {
+  if (record.part_usages.length === 0) return null;
   return (
-    <div className="card" style={{ marginBottom: 20 }}>
-      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Catat Servis Baru</h3>
-      {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
-      {warnings.map((w, i) => (
-        <div key={i} style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 8 }}>{w}</div>
+    <div style={{ marginTop: record.parts_replaced ? 8 : 0, display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+      {record.part_usages.map((pu) => (
+        <div key={pu.id} className="mono" style={{ fontSize: 12.5, color: "var(--steel)", display: "flex", justifyContent: "space-between" }}>
+          <span>{pu.part_name} × {pu.quantity} {pu.unit}</span>
+          <span>@ Rp {Number(pu.unit_price_at_time).toLocaleString("id-ID")}</span>
+        </div>
       ))}
-      <form onSubmit={handleSubmit}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-          <div>
-            <label className="label">Tanggal Servis</label>
-            <input className="input" type="date" required value={form.service_date} onChange={(e) => setForm({ ...form, service_date: e.target.value })} />
-          </div>
-          <div>
-            <label className="label">KM Saat Servis</label>
-            <input className="input" type="number" required min={0} value={form.odometer_km} onChange={(e) => setForm({ ...form, odometer_km: e.target.value })} />
-          </div>
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <label className="label">Kerusakan</label>
-          <textarea className="input" required rows={2} value={form.issue_description} onChange={(e) => setForm({ ...form, issue_description: e.target.value })} placeholder="Ganti oli, servis rem, dll." />
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <label className="label">Part yang Diganti <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional, catatan bebas)</span></label>
-          <input className="input" value={form.parts_replaced} onChange={(e) => setForm({ ...form, parts_replaced: e.target.value })} placeholder="Filter oli, kampas rem" />
-        </div>
-
-        <div style={{ marginBottom: 14 }}>
-          <label className="label">Part dari Katalog <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional — otomatis kurangi stok)</span></label>
-          {partLines.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
-              {partLines.map((line) => (
-                <div key={line.key} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <select
-                    className="input" style={{ flex: 1 }}
-                    value={line.part}
-                    onChange={(e) => updatePartLine(line.key, "part", e.target.value)}
-                  >
-                    <option value="">— Pilih Part —</option>
-                    {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.current_stock} {p.unit})</option>)}
-                  </select>
-                  <input
-                    className="input" style={{ width: 90 }} type="number" min={0} step="0.01" placeholder="Jml"
-                    value={line.quantity}
-                    onChange={(e) => updatePartLine(line.key, "quantity", e.target.value)}
-                  />
-                  <button type="button" onClick={() => removePartLine(line.key)} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}>
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <button type="button" className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px" }} onClick={addPartLine}>
-            <Plus size={13} /> Tambah Part dari Katalog
-          </button>
-        </div>
-
-        <div style={{ marginBottom: 18 }}>
-          <label className="label">Catatan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
-          <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-        </div>
-        <div style={{ display: "flex", gap: 10 }}>
-          <button className="btn-rust" type="submit" disabled={saving}>
-            {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
-          </button>
-          <button type="button" className="btn-ghost" onClick={() => { resetForm(); setError(null); setWarnings([]); setOpen(false); }}>Batal</button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function PartUsageRow({ record, catalog, onUsed }: {
-  record: ServiceRecord; catalog: Part[]; onUsed: () => void;
-}) {
-  const [adding, setAdding]     = useState(false);
-  const [partId, setPartId]     = useState("");
-  const [qty, setQty]           = useState("");
-  const [saving, setSaving]     = useState(false);
-  const [warning, setWarning]   = useState<string | null>(null);
-  const [error, setError]       = useState<string | null>(null);
-
-  const handleAdd = async () => {
-    if (!partId || !qty) return;
-    setSaving(true); setError(null); setWarning(null);
-    try {
-      const { warnings } = await partUsagesApi.create(record.id, { part: partId, quantity: Number(qty) });
-      if (warnings.length > 0) setWarning(warnings[0]);
-      setPartId(""); setQty(""); setAdding(false);
-      onUsed();
-    } catch {
-      setError("Gagal mencatat pemakaian part.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={{ marginTop: record.parts_replaced ? 8 : 0 }}>
-      {record.part_usages.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
-          {record.part_usages.map((pu) => (
-            <div key={pu.id} className="mono" style={{ fontSize: 12.5, color: "var(--steel)", display: "flex", justifyContent: "space-between" }}>
-              <span>{pu.part_name} × {pu.quantity} {pu.unit}</span>
-              <span>@ Rp {Number(pu.unit_price_at_time).toLocaleString("id-ID")}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {warning && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "6px 10px", borderRadius: 5, fontSize: 12, marginBottom: 8 }}>{warning}</div>}
-      {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "6px 10px", borderRadius: 5, fontSize: 12, marginBottom: 8 }}>{error}</div>}
-
-      {record.invoice_id ? null : (
-        adding ? (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <select className="input" style={{ fontSize: 12.5, padding: "6px 8px" }} value={partId} onChange={(e) => setPartId(e.target.value)}>
-              <option value="">— Pilih Part —</option>
-              {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.current_stock} {p.unit})</option>)}
-            </select>
-            <input className="input" style={{ fontSize: 12.5, padding: "6px 8px", width: 80 }} type="number" min={0} step="0.01" placeholder="Jml" value={qty} onChange={(e) => setQty(e.target.value)} />
-            <button className="btn-rust" style={{ fontSize: 12, padding: "6px 10px" }} disabled={saving} onClick={handleAdd}>
-              {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
-            </button>
-            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 10px" }} onClick={() => setAdding(false)}>Batal</button>
-          </div>
-        ) : (
-          <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 9px" }} onClick={() => setAdding(true)}>
-            <Plus size={12} /> Gunakan Part dari Katalog
-          </button>
-        )
-      )}
     </div>
   );
 }
@@ -288,10 +96,6 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
           {record.service_date} — {record.issue_description}
         </p>
 
-        {/* Part usages are read-only here — they were already locked
-            in the moment a mechanic logged them, same reasoning as
-            everywhere else this sprint: an invoice snapshots what
-            already happened, it never re-decides it. */}
         {record.part_usages.length > 0 && (
           <div style={{ marginBottom: 16 }}>
             <div className="label" style={{ marginBottom: 6 }}>Part (dari catatan servis)</div>
@@ -348,12 +152,14 @@ const WO_STATUS_LABEL: Record<WorkOrderStatus, string> = {
 const WO_STATUS_COLOR: Record<WorkOrderStatus, string> = {
   OPEN: "var(--steel)", IN_PROGRESS: "var(--rust)", QC: "#b5860b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
 };
+const WO_OPEN_STATUSES: WorkOrderStatus[] = ["OPEN", "IN_PROGRESS", "QC"];
 
 function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
   const router = useRouter();
   const [orders, setOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
 
   const load = () => workOrdersApi.list(vehicleId).then(setOrders).finally(() => setLoading(false));
   useEffect(() => { load(); }, [vehicleId]);
@@ -368,6 +174,10 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
     }
   };
 
+  const activeOrders  = orders.filter((wo) => WO_OPEN_STATUSES.includes(wo.status));
+  const historyOrders = orders.filter((wo) => !WO_OPEN_STATUSES.includes(wo.status));
+  const visibleOrders = showHistory ? orders : activeOrders;
+
   return (
     <div style={{ marginBottom: 24 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -381,11 +191,13 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
 
       {loading ? (
         <div style={{ color: "var(--steel)", fontSize: 13.5 }}><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /></div>
-      ) : orders.length === 0 ? (
-        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>Belum ada work order untuk kendaraan ini.</div>
+      ) : visibleOrders.length === 0 ? (
+        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>
+          {showHistory ? "Belum ada work order untuk kendaraan ini." : "Tidak ada work order aktif saat ini."}
+        </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {orders.map((wo) => (
+          {visibleOrders.map((wo) => (
             <Link key={wo.id} href={`/dashboard/work-order-detail?id=${wo.id}`} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
               <span className="mono" style={{ fontSize: 13.5, fontWeight: 600 }}>WO #{wo.number}</span>
               <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: WO_STATUS_COLOR[wo.status] }}>
@@ -394,6 +206,15 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
             </Link>
           ))}
         </div>
+      )}
+
+      {historyOrders.length > 0 && (
+        <button
+          className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", marginTop: 10 }}
+          onClick={() => setShowHistory((v) => !v)}
+        >
+          {showHistory ? "Sembunyikan Riwayat Work Order" : `Lihat Riwayat Work Order (${historyOrders.length})`}
+        </button>
       )}
     </div>
   );
@@ -404,7 +225,6 @@ function VehicleDetailContent() {
   const router = useRouter();
   const vehicleId = searchParams.get("id") ?? "";
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
-  const [catalog, setCatalog] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
   const [invoicingRecord, setInvoicingRecord] = useState<ServiceRecord | null>(null);
 
@@ -412,9 +232,6 @@ function VehicleDetailContent() {
   useEffect(() => {
     if (vehicleId) load();
   }, [vehicleId]);
-  useEffect(() => { partsApi.list().then(setCatalog); }, []);
-
-  const handleAdded = () => load();
 
   if (!vehicleId) {
     return <div style={{ color: "var(--danger)" }}>Kendaraan tidak ditemukan — tidak ada ID yang diberikan.</div>;
@@ -491,11 +308,7 @@ function VehicleDetailContent() {
 
       <WorkOrdersSection vehicleId={vehicle.id} />
 
-      <div style={{ marginBottom: 16 }}>
-        <AddServiceRecordForm vehicleId={vehicle.id} catalog={catalog} onAdded={handleAdded} />
-      </div>
-
-      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
         <Wrench size={16} /> Riwayat Servis
       </h2>
 
@@ -512,7 +325,7 @@ function VehicleDetailContent() {
               <p style={{ fontSize: 14, marginBottom: r.parts_replaced ? 6 : 0 }}>{r.issue_description}</p>
               {r.parts_replaced && <p style={{ fontSize: 13, color: "var(--steel)" }}>Part diganti (catatan bebas): {r.parts_replaced}</p>}
               {r.notes && <p style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>{r.notes}</p>}
-              <PartUsageRow record={r} catalog={catalog} onUsed={handleAdded} />
+              <PartUsageDisplay record={r} />
 
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
                 {r.invoice_id ? (
