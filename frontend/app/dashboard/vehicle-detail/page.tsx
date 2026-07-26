@@ -23,10 +23,30 @@
 //     legacy records — parts are only ever logged through an active
 //     Work Order now, never retroactively against a closed record.
 //   - The Work Order section defaults to active-only
-//     (OPEN/IN_PROGRESS/QC); DONE/CANCELLED ones are real history
-//     (never deleted — see the customer_cancelled_part StockAdjustment
-//     reason) but sit behind a toggle rather than cluttering the
-//     primary, actionable view.
+//     (OPEN/IN_PROGRESS/QC).
+//
+// SECOND ROUND — Sansan's remaining point, now resolved: a completed
+// WorkOrder used to still render as its own separate card behind a
+// history toggle in the Work Order section, disconnected from the
+// ServiceRecord it produced sitting in Riwayat Servis below — "two
+// disconnected sections" for one real job, exactly what he flagged.
+// Per PROJECT_STATE, WorkOrder and ServiceRecord stay two genuinely
+// separate models (deliberate, confirmed with Made) — so the fix is
+// a read-only link, not a data-model merge:
+//   - DONE WorkOrders are no longer shown in WorkOrdersSection at
+//     all — a done order's real, final form is the ServiceRecord it
+//     promoted into, which already has its own card below.
+//   - Every Riwayat Servis card now shows a small "WO #N" link
+//     (ServiceRecord.work_order_number) back to the WorkOrder that
+//     produced it, when one exists — one entry, one link, not two
+//     unrelated cards.
+//   - WorkOrdersSection's history toggle is now CANCELLED-only.
+//     Cancelled orders genuinely have nowhere else to live —
+//     WorkOrder.cancel() never creates a ServiceRecord, only
+//     close() does — so they'd vanish from view entirely if treated
+//     the same as DONE. They stay real, visible history, just in
+//     their own small section rather than implying they became a
+//     real visit.
 // =============================================================================
 import { EstimateStatus, EstimateSummary, estimatesApi } from "@/lib/api/estimates";
 import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
@@ -182,9 +202,20 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
     }
   };
 
-  const activeOrders  = orders.filter((wo) => WO_OPEN_STATUSES.includes(wo.status));
-  const historyOrders = orders.filter((wo) => !WO_OPEN_STATUSES.includes(wo.status));
-  const visibleOrders = showHistory ? orders : activeOrders;
+  // DONE orders are deliberately excluded here entirely, not just
+  // hidden behind the toggle — a completed order's real, final form
+  // is the ServiceRecord it promoted into via close(), which already
+  // renders below in Riwayat Servis with its own "WO #N" link back
+  // to this order. Showing it again here would be exactly the "two
+  // disconnected sections for one job" Sansan flagged.
+  const relevantOrders = orders.filter((wo) => wo.status !== "DONE");
+  const activeOrders    = relevantOrders.filter((wo) => WO_OPEN_STATUSES.includes(wo.status));
+  const cancelledOrders = relevantOrders.filter((wo) => wo.status === "CANCELLED");
+  // CANCELLED-only history, not "everything non-active" — a
+  // cancelled order genuinely has nowhere else to live (cancel()
+  // never creates a ServiceRecord, only close() does), so it stays
+  // real, visible history here rather than vanishing from the page.
+  const visibleOrders = showHistory ? relevantOrders : activeOrders;
 
   return (
     <div style={{ marginBottom: 24 }}>
@@ -201,7 +232,7 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
         <div style={{ color: "var(--steel)", fontSize: 13.5 }}><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /></div>
       ) : visibleOrders.length === 0 ? (
         <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>
-          {showHistory ? "Belum ada work order untuk kendaraan ini." : "Tidak ada work order aktif saat ini."}
+          {showHistory ? "Belum ada work order yang dibatalkan." : "Tidak ada work order aktif saat ini."}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -216,12 +247,12 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
         </div>
       )}
 
-      {historyOrders.length > 0 && (
+      {cancelledOrders.length > 0 && (
         <button
           className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", marginTop: 10 }}
           onClick={() => setShowHistory((v) => !v)}
         >
-          {showHistory ? "Sembunyikan Riwayat Work Order" : `Lihat Riwayat Work Order (${historyOrders.length})`}
+          {showHistory ? "Sembunyikan Riwayat Dibatalkan" : `Lihat Riwayat Dibatalkan (${cancelledOrders.length})`}
         </button>
       )}
     </div>
@@ -401,8 +432,25 @@ function VehicleDetailContent() {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {vehicle.service_records!.map((r) => (
             <div key={r.id} className="card">
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{r.service_date}</span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{r.service_date}</span>
+                  {/* The actual fix for Sansan's "two disconnected
+                      sections" review: when this record came from a
+                      WorkOrder, link straight back to it here instead
+                      of it also showing up as its own separate card
+                      in the Work Order section above. One entry, one
+                      link — not two unrelated cards for the same job. */}
+                  {r.work_order_number && (
+                    <Link
+                      href={`/dashboard/work-order-detail?id=${r.work_order_id}`}
+                      className="btn-ghost"
+                      style={{ fontSize: 11, padding: "2px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
+                    >
+                      <ClipboardList size={11} /> WO #{r.work_order_number}
+                    </Link>
+                  )}
+                </div>
                 <span className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{r.odometer_km.toLocaleString("id-ID")} km</span>
               </div>
               <p style={{ fontSize: 14, marginBottom: r.parts_replaced ? 6 : 0 }}>{r.issue_description}</p>
