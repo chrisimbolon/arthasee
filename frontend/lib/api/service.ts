@@ -40,6 +40,19 @@ export interface ServiceRecord {
   // went through the estimate flow. Purely a reference point at
   // invoice-creation time, never enforced against the real invoice.
   original_estimate_total: string | null;
+  // Set when this record was produced by WorkOrder.close() — null
+  // for any record predating WorkOrder, or created some other way in
+  // the future. Drives the "WO #N" link on the Riwayat Servis card,
+  // the fix for Sansan's "two disconnected sections" review: a
+  // completed WorkOrder now renders as one entry (this card, with a
+  // link back to its own checklist/material breakdown) rather than
+  // also appearing as its own separate card elsewhere on the page.
+  // Deliberately never present for a CANCELLED WorkOrder — cancel()
+  // never creates a ServiceRecord in the first place, so there is
+  // nothing here to link from on that side; cancelled orders stay
+  // visible only in WorkOrdersSection's own history.
+  work_order_id:     string | null;
+  work_order_number: string | null;
   created_by:        string | null;
   created_by_name:   string | null;
   created_at:        string;
