@@ -28,6 +28,18 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
     part_usages      = serializers.SerializerMethodField()
     invoice_id        = serializers.SerializerMethodField()
     original_estimate_total = serializers.SerializerMethodField()
+    # Sansan's "two disconnected sections" review, resolved: rather
+    # than merging WorkOrder/ServiceRecord into one data model (which
+    # was explicitly ruled out — see PROJECT_STATE, "existing
+    # ServiceRecord/Invoice history preserved exactly as-is, work
+    # order is additive"), the fix is a read-only reverse link so the
+    # frontend can render a completed WorkOrder as one linked entry
+    # instead of two unrelated cards. Same getattr-on-reverse-
+    # OneToOne pattern already proven by get_invoice_id and
+    # get_original_estimate_total just below — no new coupling risk,
+    # this app still imports nothing from apps.workorders.
+    work_order_id     = serializers.SerializerMethodField()
+    work_order_number = serializers.SerializerMethodField()
 
     class Meta:
         model  = ServiceRecord
@@ -35,11 +47,13 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
             "id", "vehicle", "service_date", "odometer_km",
             "issue_description", "parts_replaced", "notes", "part_usages",
             "invoice_id", "original_estimate_total",
+            "work_order_id", "work_order_number",
             "created_by", "created_by_name", "created_at",
         ]
         read_only_fields = [
             "id", "created_by", "created_by_name", "created_at",
             "part_usages", "invoice_id", "original_estimate_total",
+            "work_order_id", "work_order_number",
         ]
 
     def get_part_usages(self, obj):
@@ -82,6 +96,26 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
         # specifically so getattr(obj, 'invoice', None) works.
         invoice = getattr(obj, "invoice", None)
         return invoice.id if invoice else None
+
+    def get_work_order_id(self, obj):
+        # Deliberately null for records created before WorkOrder
+        # existed, or any future path that creates a ServiceRecord
+        # without going through one — this field only ever surfaces
+        # a genuine link, never fabricates one. A CANCELLED WorkOrder
+        # never reaches this at all: WorkOrder.cancel() never sets
+        # service_record, only close() does, so cancelled orders
+        # correctly have no ServiceRecord to be found from.
+        work_order = getattr(obj, "work_order", None)
+        return work_order.id if work_order else None
+
+    def get_work_order_number(self, obj):
+        # Split into its own field rather than overloading
+        # work_order_id's presence — the frontend wants the human
+        # number ("WO #12") for display without a second lookup, same
+        # reasoning as invoice_id existing purely to drive a UI
+        # branch cheaply.
+        work_order = getattr(obj, "work_order", None)
+        return work_order.number if work_order else None
 
     def validate_vehicle(self, vehicle):
         request = self.context.get("request")

@@ -5,6 +5,7 @@ from datetime import date, timedelta
 
 from apps.authentication.models import CustomUser
 from apps.organizations.models import Organization, OrganizationMembership
+from apps.workorders.models import WorkOrder
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -295,3 +296,84 @@ class VehicleRegistrationExpiryTests(ServiceAPITestBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["count"], 1)
         self.assertEqual(resp.data["results"][0]["model"], "Expiring Car")
+
+
+class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
+    """
+    Proves the read-only work_order_id/work_order_number fields added
+    to ServiceRecordSerializer for Sansan's "two disconnected
+    sections" fix: a ServiceRecord produced by WorkOrder.close() must
+    expose enough for the frontend to link straight back to it,
+    without inventing a link where none genuinely exists.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5001 WO", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            current_odometer_km=20000,
+        )
+
+    def test_service_record_without_work_order_has_null_link(self):
+        """
+        A ServiceRecord created directly (the only path that existed
+        before WorkOrder, and still a valid one via the API today)
+        must not fabricate a work order reference — it genuinely has
+        none.
+        """
+        resp = self.client.post(
+            f"/api/vehicles/{self.vehicle.id}/service-records/",
+            {"service_date": "2026-07-20", "odometer_km": 20000, "issue_description": "Ganti oli"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(resp.data["service_record"]["work_order_id"])
+        self.assertIsNone(resp.data["service_record"]["work_order_number"])
+
+    def test_service_record_from_closed_work_order_exposes_the_link(self):
+        """
+        The actual case the frontend fix depends on: once a WorkOrder
+        is closed, the ServiceRecord it produced should carry both
+        the WorkOrder's id (for the link's href) and its human number
+        (for the "WO #N" label), traced entirely through the reverse
+        OneToOneField accessor — no new coupling between apps.service
+        and apps.workorders to make this work.
+        """
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, odometer_km_intake=20000,
+        )
+        record = work_order.close(service_date=date(2026, 7, 20), closed_by=self.owner)
+
+        resp = self.client.get(f"/api/vehicles/{self.vehicle.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        matching = next(
+            r for r in resp.data["vehicle"]["service_records"] if str(r["id"]) == str(record.id)
+        )
+        # str() on both sides deliberately — resp.data holds the
+        # serializer's raw Python objects (a real uuid.UUID instance
+        # here, same as get_invoice_id's existing convention), not
+        # the JSON-rendered string a real HTTP client would receive.
+        # Comparing str-to-str is correct regardless of which
+        # representation DRF's test client happens to hand back.
+        self.assertEqual(str(matching["work_order_id"]), str(work_order.id))
+        self.assertEqual(matching["work_order_number"], work_order.number)
+
+    def test_cancelled_work_order_never_creates_a_service_record_to_link_from(self):
+        """
+        Not strictly a ServiceRecordSerializer test, but the load-
+        bearing assumption the frontend fix's "cancelled orders have
+        nowhere else to live" reasoning depends on — confirmed
+        directly here rather than assumed from reading close()/
+        cancel() side by side. If this ever stopped being true,
+        WorkOrdersSection's CANCELLED-only history toggle would
+        start silently hiding real jobs with no ServiceRecord to
+        surface them elsewhere.
+        """
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, odometer_km_intake=20000,
+        )
+        work_order.cancel()
+        self.assertIsNone(work_order.service_record)
+        self.assertEqual(ServiceRecord.objects.filter(vehicle=self.vehicle).count(), 0)
