@@ -76,13 +76,13 @@ function AddVehicleModal({ customers, onClose, onCreated }: {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
             <div>
-              <label className="label">Jenis</label>
+              <label className="label">Jenis Kendaraan</label>
               <select className="input" value={form.vehicle_type} onChange={(e) => setForm({ ...form, vehicle_type: e.target.value })}>
                 <option>Mobil</option><option>Motor</option>
               </select>
             </div>
             <div>
-              <label className="label">Model</label>
+              <label className="label">Merek/Type</label>
               <input className="input" required value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="Toyota Avanza" />
             </div>
           </div>
@@ -105,7 +105,7 @@ function AddVehicleModal({ customers, onClose, onCreated }: {
             <>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
                 <div>
-                  <label className="label">Jenis Bodi</label>
+                  <label className="label">Jenis/Model</label>
                   <input className="input" value={form.body_style} onChange={(e) => setForm({ ...form, body_style: e.target.value })} placeholder="Sedan, SUV, MPV" />
                 </div>
                 <div>
@@ -191,7 +191,7 @@ export default function VehiclesPage() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Plat</th><th>Model</th><th>Pelanggan</th><th>KM Sekarang</th><th>Servis Terakhir</th><th>Status</th></tr>
+              <tr><th>Plat</th><th>Merek/Type</th><th>Pelanggan</th><th>KM Sekarang</th><th>Servis Terakhir</th><th>Status</th></tr>
             </thead>
             <tbody>
               {vehicles.map((v) => (
