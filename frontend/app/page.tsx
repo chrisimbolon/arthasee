@@ -28,9 +28,8 @@
 // this page's CTAs use slightly larger padding and a hover lift
 // that suit a marketing hero, and reusing the dashboard's exact
 // button class names for a visually different treatment would mean
-// two different button styles silently fighting over the same
-// class name depending on load order. Renaming avoids that outright
-// instead of relying on the cascade to sort it out.
+// two different button styles silently fighting over the same class name depending on load order.
+//  Renaming avoids that outright instead of relying on the cascade to sort it out.
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import Link from "next/link";
