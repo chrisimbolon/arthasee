@@ -52,6 +52,7 @@ import { EstimateStatus, EstimateSummary, estimatesApi } from "@/lib/api/estimat
 import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
 import { ServiceRecord, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
+import { formatDateID } from "@/lib/format";
 import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -114,7 +115,7 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
       <div className="card" style={{ width: 560, background: "var(--paper-3)" }}>
         <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Buat Invoice</h2>
         <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 16 }}>
-          {record.service_date} — {record.issue_description}
+          {formatDateID(record.service_date)} — {record.issue_description}
         </p>
 
         {record.original_estimate_total && (
@@ -395,12 +396,12 @@ function VehicleDetailContent() {
         </div>
         <div className="card">
           <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 6 }}>Servis Terakhir</div>
-          <div className="mono" style={{ fontSize: 22, fontWeight: 600 }}>{vehicle.last_service_date || "—"}</div>
+          <div className="mono" style={{ fontSize: 22, fontWeight: 600 }}>{formatDateID(vehicle.last_service_date)}</div>
         </div>
         <div className="card">
           <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 6 }}>STNK Berlaku Sampai</div>
           <div className="mono" style={{ fontSize: 22, fontWeight: 600, color: vehicle.is_registration_expiring_soon ? "var(--danger)" : undefined }}>
-            {vehicle.registration_expiry || "—"}
+            {formatDateID(vehicle.registration_expiry)}
           </div>
         </div>
       </div>
@@ -434,7 +435,7 @@ function VehicleDetailContent() {
             <div key={r.id} className="card">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{r.service_date}</span>
+                  <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{formatDateID(r.service_date)}</span>
                   {/* The actual fix for Sansan's "two disconnected
                       sections" review: when this record came from a
                       WorkOrder, link straight back to it here instead
