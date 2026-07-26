@@ -356,7 +356,7 @@ function VehicleDetailContent() {
   }
 
   const stnkFields = [
-    { label: "Jenis Bodi", value: vehicle.body_style },
+    { label: "Jenis/Model", value: vehicle.body_style },
     { label: "Warna", value: vehicle.color },
     { label: "No. Rangka", value: vehicle.chassis_number },
     { label: "No. Mesin", value: vehicle.engine_number },
