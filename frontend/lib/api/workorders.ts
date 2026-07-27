@@ -8,6 +8,10 @@ export type WorkOrderStatus = "OPEN" | "IN_PROGRESS" | "QC" | "DONE" | "CANCELLE
 export interface WorkOrderJobLine {
   id:          string;
   work_order:  string;
+  // Optional grouping into a WorkOrderStage — null for the
+  // overwhelming majority of job lines (routine, single-visit
+  // repairs never use stages at all). See WorkOrderStage below.
+  stage:       string | null;
   description: string;
   is_done:     boolean;
   created_at:  string;
@@ -23,6 +27,27 @@ export interface WorkOrderMaterialLine {
   unit_price_at_time: string;
   subtotal:           string;
   created_at:         string;
+}
+
+// Made's own request: a custom, per-repair breakdown of heavy jobs
+// (collision, overhaul) into named stages — body work, painting,
+// reassembly, etc. — each with its own start/complete clock time,
+// eventually feeding a "Vehicle Timeline" view Made can check
+// remotely without being physically at the shop. Deliberately
+// optional and additive: a routine job's WorkOrder simply has zero
+// stages, and nothing about its UI or data changes because of that.
+export interface WorkOrderStage {
+  id:            string;
+  work_order:    string;
+  name:          string;
+  sequence:      number;
+  started_at:    string | null;
+  completed_at:  string | null;
+  // Only the job lines currently grouped under this specific stage —
+  // a convenience view, not a separate source of truth from
+  // WorkOrder.job_lines' own flat list.
+  job_lines:     WorkOrderJobLine[];
+  created_at:    string;
 }
 
 export interface WorkOrder {
@@ -47,6 +72,7 @@ export interface WorkOrder {
   service_record:      string | null;
   job_lines:           WorkOrderJobLine[];
   material_lines:      WorkOrderMaterialLine[];
+  stages:              WorkOrderStage[];
   created_by:          string | null;
   created_by_name:     string | null;
   created_at:          string;
@@ -55,7 +81,7 @@ export interface WorkOrder {
 
 // Lighter shape returned by the list endpoint — no nested lines,
 // matching WorkOrderListSerializer on the backend.
-export type WorkOrderSummary = Omit<WorkOrder, "job_lines" | "material_lines">;
+export type WorkOrderSummary = Omit<WorkOrder, "job_lines" | "material_lines" | "stages">;
 
 export interface WorkOrderIntakePayload {
   odometer_km_intake?: number;
@@ -101,12 +127,23 @@ export const workOrdersApi = {
 };
 
 export const workOrderJobLinesApi = {
-  async create(workOrderId: string, description: string): Promise<WorkOrderJobLine> {
-    const { data } = await api.post(`/api/work-orders/${workOrderId}/job-lines/`, { description });
+  // stageId is optional — omit it entirely for a routine, unstaged
+  // job line, exactly as this already worked before stages existed.
+  async create(workOrderId: string, description: string, stageId?: string): Promise<WorkOrderJobLine> {
+    const { data } = await api.post(`/api/work-orders/${workOrderId}/job-lines/`, {
+      description, ...(stageId ? { stage: stageId } : {}),
+    });
     return data.job_line;
   },
   async toggle(id: string): Promise<WorkOrderJobLine> {
     const { data } = await api.patch(`/api/work-orders/job-lines/${id}/toggle/`);
+    return data.job_line;
+  },
+  // Moves an existing job line into a stage, or clears it back to
+  // unstaged with stageId = null — lets a line created before any
+  // stage existed get grouped in later.
+  async assignStage(id: string, stageId: string | null): Promise<WorkOrderJobLine> {
+    const { data } = await api.patch(`/api/work-orders/job-lines/${id}/assign-stage/`, { stage: stageId });
     return data.job_line;
   },
 };
@@ -123,5 +160,29 @@ export const workOrderMaterialLinesApi = {
   // audit trail stays honest about which actually happened.
   async remove(id: string, reason: "correction" | "customer_cancelled_part" = "correction"): Promise<void> {
     await api.delete(`/api/work-orders/material-lines/${id}/`, { data: { reason } });
+  },
+};
+
+export const workOrderStagesApi = {
+  async create(workOrderId: string, name: string): Promise<WorkOrderStage> {
+    const { data } = await api.post(`/api/work-orders/${workOrderId}/stages/`, { name });
+    return data.stage;
+  },
+  async update(id: string, payload: { name?: string; sequence?: number }): Promise<WorkOrderStage> {
+    const { data } = await api.put(`/api/work-orders/stages/${id}/`, payload);
+    return data.stage;
+  },
+  async remove(id: string): Promise<void> {
+    // Never deletes the job lines grouped under it — see the
+    // backend's own WorkOrderStageDetailView.delete() docstring.
+    await api.delete(`/api/work-orders/stages/${id}/`);
+  },
+  async start(id: string): Promise<WorkOrderStage> {
+    const { data } = await api.post(`/api/work-orders/stages/${id}/start/`);
+    return data.stage;
+  },
+  async complete(id: string): Promise<WorkOrderStage> {
+    const { data } = await api.post(`/api/work-orders/stages/${id}/complete/`);
+    return data.stage;
   },
 };
