@@ -39,6 +39,8 @@ services:
     environment:
       DB_HOST: arthasee_db
       DB_PORT: "5432"
+    volumes:
+      - arthasee_media:/app/media
     networks:
       - arthasee-internal
     depends_on:
@@ -47,6 +49,7 @@ services:
 
 volumes:
   arthasee_pgdata:
+  arthasee_media:
 
 networks:
   arthasee-internal:
