@@ -6,8 +6,10 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from .models import Contract, ContractImport
-from .parsing import ContractParseError, diff_against_contract, parse_hps_workbook
-from .serializers import ContractImportSerializer, ContractListSerializer, ContractSerializer
+from .parsing import (ContractParseError, diff_against_contract,
+                      parse_hps_workbook)
+from .serializers import (ContractImportSerializer, ContractListSerializer,
+                          ContractSerializer)
 
 
 class ContractListView(TenantScopedAPIView):
@@ -62,14 +64,29 @@ class ContractDetailView(TenantScopedAPIView):
 
 class ContractImportUploadView(TenantScopedAPIView):
     """
-    POST /api/contracts/<contract_id>/imports/  (multipart, field "file")
+    GET/POST /api/contracts/<contract_id>/imports/
+    GET lists every import ever attempted for this contract (newest
+    first, per ContractImport's own Meta.ordering) — the "Riwayat
+    Import" history a contract-detail page needs. POST uploads and
+    parses a new HPS/RAB Excel file.
 
-    Uploads and parses an HPS/RAB Excel file. Never touches live
-    ContractVehicle/ContractLineItem rows directly — always creates a
-    PENDING_REVIEW ContractImport, even for a brand-new Contract with
-    no vehicles yet (that first upload's diff is simply all "added").
+    Never touches live ContractVehicle/ContractLineItem rows directly
+    on upload — always creates a PENDING_REVIEW ContractImport, even
+    for a brand-new Contract with no vehicles yet (that first
+    upload's diff is simply all "added").
     """
     model = ContractImport
+
+    def get(self, request, contract_id):
+        contract = self._get_contract(request, contract_id)
+        if contract is None:
+            return Response(
+                {"success": False, "message": "Contract tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        imports = ContractImport.objects.filter(contract=contract).order_by("-uploaded_at")
+        serializer = ContractImportSerializer(imports, many=True)
+        return Response({"success": True, "count": imports.count(), "results": serializer.data})
 
     def post(self, request, contract_id):
         contract = self._get_contract(request, contract_id)

@@ -395,3 +395,37 @@ class ContractsTenantIsolationTests(ContractsAPITestBase):
         self.client.force_authenticate(user=self.other_owner)
         resp = self.client.get(f"/api/contracts/{self.contract.id}/")
         self.assertEqual(resp.status_code, 404)
+
+
+class ContractImportListTests(ContractsAPITestBase):
+    """
+    Covers the GET side of the nested imports endpoint — the data
+    source for a contract-detail page's "Riwayat Import" section.
+    """
+
+    def test_lists_imports_newest_first(self):
+        older = ContractImport.objects.create(
+            organization=self.org, contract=self.contract,
+            original_file="contract_imports/first.xlsx", uploaded_by=self.owner,
+            status="APPLIED",
+        )
+        newer = ContractImport.objects.create(
+            organization=self.org, contract=self.contract,
+            original_file="contract_imports/second.xlsx", uploaded_by=self.owner,
+        )
+        resp = self.client.get(f"/api/contracts/{self.contract.id}/imports/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["count"], 2)
+        # Newest first, per ContractImport's own Meta.ordering:
+        self.assertEqual(resp.data["results"][0]["id"], str(newer.id))
+        self.assertEqual(resp.data["results"][1]["id"], str(older.id))
+
+    def test_empty_list_for_contract_with_no_imports(self):
+        resp = self.client.get(f"/api/contracts/{self.contract.id}/imports/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_returns_404_for_nonexistent_contract(self):
+        import uuid as uuid_module
+        resp = self.client.get(f"/api/contracts/{uuid_module.uuid4()}/imports/")
+        self.assertEqual(resp.status_code, 404)
