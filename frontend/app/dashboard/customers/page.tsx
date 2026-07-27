@@ -2,12 +2,12 @@
 // =============================================================================
 // === frontend/app/dashboard/customers/page.tsx ===
 // =============================================================================
-import { Customer, customersApi } from "@/lib/api/service";
-import { Loader2, Plus, Search, Trash2, X } from "lucide-react";
+import { Customer, CustomerType, customersApi } from "@/lib/api/service";
+import { Briefcase, Loader2, Plus, Search, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (c: Customer) => void }) {
-  const [form, setForm] = useState({ name: "", phone: "", stnk_name: "" });
+  const [form, setForm] = useState({ name: "", phone: "", stnk_name: "", customer_type: "INDIVIDUAL" as CustomerType });
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState<string | null>(null);
 
@@ -42,9 +42,20 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
             <label className="label">Nomor Telepon</label>
             <input className="input" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="08xxxxxxxxxx" />
           </div>
-          <div style={{ marginBottom: 20 }}>
+          <div style={{ marginBottom: 14 }}>
             <label className="label">Nama di STNK <span style={{ textTransform: "none", fontWeight: 400 }}>(jika berbeda)</span></label>
             <input className="input" value={form.stnk_name} onChange={(e) => setForm({ ...form, stnk_name: e.target.value })} placeholder="Kosongkan jika sama" />
+          </div>
+          <div style={{ marginBottom: 20 }}>
+            <label className="label">Jenis Pelanggan</label>
+            <select className="input" value={form.customer_type} onChange={(e) => setForm({ ...form, customer_type: e.target.value as CustomerType })}>
+              <option value="INDIVIDUAL">Perorangan</option>
+              <option value="INSTITUTIONAL">Institusi/Tender</option>
+            </select>
+            <p style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 4 }}>
+              Pilih &quot;Institusi/Tender&quot; untuk klien pemerintah, kepolisian, atau perusahaan
+              yang membayar lewat kontrak — ini yang muncul saat membuat Contract.
+            </p>
           </div>
           <button className="btn-rust" type="submit" disabled={saving} style={{ width: "100%", justifyContent: "center" }}>
             {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
@@ -55,16 +66,24 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
   );
 }
 
+type FilterMode = "all" | "institutional";
+
 export default function CustomersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading]     = useState(true);
   const [search, setSearch]       = useState("");
+  const [filter, setFilter]       = useState<FilterMode>("all");
   const [showAdd, setShowAdd]     = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deletingId, setDeletingId]   = useState<string | null>(null);
 
-  const load = () => customersApi.list().then(setCustomers).finally(() => setLoading(false));
-  useEffect(() => { load(); }, []);
+  const load = (mode: FilterMode) => {
+    setLoading(true);
+    customersApi.list(mode === "institutional" ? { customerType: "INSTITUTIONAL" } : {})
+      .then(setCustomers)
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { load(filter); }, [filter]);
 
   const filtered = customers.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
 
@@ -89,7 +108,7 @@ export default function CustomersPage() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
         <div>
           <h1 className="display" style={{ fontSize: 30, marginBottom: 4, textTransform: "none" }}>Pelanggan</h1>
-          <p style={{ color: "var(--steel)", fontSize: 14 }}>{customers.length} pelanggan tercatat</p>
+          <p style={{ color: "var(--steel)", fontSize: 14 }}>{customers.length} pelanggan {filter !== "all" ? "(terfilter)" : "tercatat"}</p>
         </div>
         <button className="btn-rust" onClick={() => setShowAdd(true)}><Plus size={16} /> Tambah Pelanggan</button>
       </div>
@@ -100,9 +119,15 @@ export default function CustomersPage() {
         </div>
       )}
 
-      <div style={{ position: "relative", marginBottom: 18, maxWidth: 320 }}>
-        <Search size={15} style={{ position: "absolute", left: 12, top: 11, color: "var(--steel)" }} />
-        <input className="input" style={{ paddingLeft: 34 }} placeholder="Cari nama pelanggan…" value={search} onChange={(e) => setSearch(e.target.value)} />
+      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap", alignItems: "center" }}>
+        <button onClick={() => setFilter("all")} className={filter === "all" ? "btn-rust" : "btn-ghost"} style={{ fontSize: 13 }}>Semua</button>
+        <button onClick={() => setFilter("institutional")} className={filter === "institutional" ? "btn-rust" : "btn-ghost"} style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+          <Briefcase size={14} /> Institusi/Tender
+        </button>
+        <div style={{ position: "relative", maxWidth: 260, marginLeft: "auto" }}>
+          <Search size={15} style={{ position: "absolute", left: 12, top: 11, color: "var(--steel)" }} />
+          <input className="input" style={{ paddingLeft: 34 }} placeholder="Cari nama pelanggan…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
       </div>
 
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
@@ -111,12 +136,19 @@ export default function CustomersPage() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Nama</th><th>Telepon</th><th>Nama di STNK</th><th>Kendaraan</th><th></th></tr>
+              <tr><th>Nama</th><th>Jenis</th><th>Telepon</th><th>Nama di STNK</th><th>Kendaraan</th><th></th></tr>
             </thead>
             <tbody>
               {filtered.map((c) => (
                 <tr key={c.id}>
                   <td style={{ fontWeight: 600 }}>{c.name}</td>
+                  <td>
+                    {c.customer_type === "INSTITUTIONAL" && (
+                      <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "var(--workshop)", background: "var(--workshop-lt)", whiteSpace: "nowrap" }}>
+                        Institusi/Tender
+                      </span>
+                    )}
+                  </td>
                   <td className="mono" style={{ fontSize: 13 }}>{c.phone || "—"}</td>
                   <td>{c.stnk_name || <span style={{ color: "var(--steel)" }}>Sama dengan nama</span>}</td>
                   <td className="mono">{c.vehicle_count}</td>
@@ -129,7 +161,9 @@ export default function CustomersPage() {
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr><td colSpan={5} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>Belum ada pelanggan</td></tr>
+                <tr><td colSpan={6} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>
+                  {filter === "institutional" ? "Belum ada pelanggan bertipe Institusi/Tender" : "Belum ada pelanggan"}
+                </td></tr>
               )}
             </tbody>
           </table>
@@ -137,7 +171,14 @@ export default function CustomersPage() {
       </div>
 
       {showAdd && (
-        <AddCustomerModal onClose={() => setShowAdd(false)} onCreated={(c) => setCustomers((prev) => [c, ...prev])} />
+        <AddCustomerModal
+          onClose={() => setShowAdd(false)}
+          onCreated={(c) => {
+            if (filter === "all" || c.customer_type === "INSTITUTIONAL") {
+              setCustomers((prev) => [c, ...prev]);
+            }
+          }}
+        />
       )}
     </div>
   );
