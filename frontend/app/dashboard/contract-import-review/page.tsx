@@ -37,13 +37,16 @@ function AddedVehicleCard({
   onFieldChange: (fleetCode: string, field: "manufacture_year" | "vehicle_type", value: string) => void;
 }) {
   const total = vehicle.line_items.reduce((sum, li) => sum + Number(li.subtotal), 0);
+  const isReuse = Boolean(vehicle.existing_vehicle_id);
   return (
-    <div className="card" style={{ borderLeft: "4px solid var(--workshop)", marginBottom: 12 }}>
+    <div className="card" style={{ borderLeft: `4px solid ${isReuse ? "var(--rust)" : "var(--workshop)"}`, marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
-          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--workshop)" }}>Kendaraan Baru</span>
+          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: isReuse ? "var(--rust)" : "var(--workshop)" }}>
+            {isReuse ? "Kendaraan Sudah Ada" : "Kendaraan Baru"}
+          </span>
           <div className="mono" style={{ fontSize: 16, fontWeight: 700, marginTop: 4 }}>{vehicle.fleet_code || "(kode armada tidak terbaca)"}</div>
-          <div style={{ fontSize: 13.5, color: "var(--ink-soft)" }}>{vehicle.vehicle_model}</div>
+          <div style={{ fontSize: 13.5, color: "var(--ink-soft)" }}>{isReuse ? vehicle.existing_vehicle_model : vehicle.vehicle_model}</div>
         </div>
         <div className="mono" style={{ fontSize: 14, fontWeight: 600 }}>{money(vehicle.allocated_budget)}</div>
       </div>
@@ -55,30 +58,42 @@ function AddedVehicleCard({
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
-        <div>
-          <label className="label">Tahun Pembuatan <span style={{ color: "var(--danger)" }}>*</span></label>
-          <input
-            className="input" type="number" placeholder="cth. 2020"
-            value={vehicle.manufacture_year ?? ""}
-            onChange={(e) => onFieldChange(vehicle.fleet_code, "manufacture_year", e.target.value)}
-          />
-          <p style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 4 }}>
-            Tidak tercantum di dokumen sumber — wajib diisi manual.
-          </p>
+      {isReuse ? (
+        // Same real fleet vehicle already exists in the org — most
+        // plausibly from a prior fiscal year's contract. Nothing to
+        // fill in: it's being linked to this contract, not created
+        // again, so its existing manufacture_year/vehicle_type stay
+        // exactly as they already are.
+        <div style={{ background: "var(--paper)", border: "1px solid var(--line)", padding: "9px 12px", borderRadius: 5, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 12 }}>
+          Kendaraan ini sudah terdaftar di sistem ({vehicle.existing_vehicle_model}) — akan dihubungkan ke contract ini,
+          bukan dibuat sebagai kendaraan baru.
         </div>
-        <div>
-          <label className="label">Jenis Kendaraan</label>
-          <select
-            className="input"
-            value={vehicle.vehicle_type ?? "Mobil"}
-            onChange={(e) => onFieldChange(vehicle.fleet_code, "vehicle_type", e.target.value)}
-          >
-            <option>Mobil</option>
-            <option>Motor</option>
-          </select>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          <div>
+            <label className="label">Tahun Pembuatan <span style={{ color: "var(--danger)" }}>*</span></label>
+            <input
+              className="input" type="number" placeholder="cth. 2020"
+              value={vehicle.manufacture_year ?? ""}
+              onChange={(e) => onFieldChange(vehicle.fleet_code, "manufacture_year", e.target.value)}
+            />
+            <p style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 4 }}>
+              Tidak tercantum di dokumen sumber — wajib diisi manual.
+            </p>
+          </div>
+          <div>
+            <label className="label">Jenis Kendaraan</label>
+            <select
+              className="input"
+              value={vehicle.vehicle_type ?? "Mobil"}
+              onChange={(e) => onFieldChange(vehicle.fleet_code, "vehicle_type", e.target.value)}
+            >
+              <option>Mobil</option>
+              <option>Motor</option>
+            </select>
+          </div>
         </div>
-      </div>
+      )}
 
       <div style={{ borderTop: "1px solid var(--line)", paddingTop: 10 }}>
         {vehicle.line_items.map((li) => (
@@ -152,7 +167,12 @@ function ContractImportReviewContent() {
   // Every added vehicle needs a real fleet_code AND a manufacture_year
   // before this import can be applied — the two things the source
   // document can never supply on its own.
-  const readyToApply = mergedAddedVehicles.every((v) => v.fleet_code && v.manufacture_year);
+  // A reuse-case vehicle (existing_vehicle_id set) only needs a real
+  // fleet_code — it never needs manufacture_year, since it's linking
+  // to an already-real Vehicle, not creating one.
+  const readyToApply = mergedAddedVehicles.every((v) =>
+    v.fleet_code && (v.existing_vehicle_id || v.manufacture_year)
+  );
 
   const handleApply = async () => {
     if (!diff || !readyToApply) return;
