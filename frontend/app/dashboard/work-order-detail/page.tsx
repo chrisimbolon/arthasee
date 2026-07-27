@@ -21,6 +21,17 @@ const STATUS_COLOR: Record<WorkOrderStatus, string> = {
 };
 const OPEN_STATUSES: WorkOrderStatus[] = ["OPEN", "IN_PROGRESS", "QC"];
 
+// Deliberately includes the clock time, not just the date — Made's
+// own request was specifically "jam mulai dikerjakan" (the hour work
+// started), so a date-only display would miss the actual point of
+// asking for this at all.
+function formatDateTimeWithClock(iso: string) {
+  const d = new Date(iso);
+  const datePart = d.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
+  const timePart = d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+  return `${datePart}, ${timePart}`;
+}
+
 function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
   const [form, setForm] = useState({
@@ -288,9 +299,16 @@ function WorkOrderDetailContent() {
         </span>
       </div>
 
-      <p style={{ color: "var(--steel)", fontSize: 14, marginBottom: 20 }}>
+      <p style={{ color: "var(--steel)", fontSize: 14, marginBottom: wo.work_started_at ? 6 : 20 }}>
         {wo.vehicle_plate} · {wo.customer_name}
       </p>
+
+      {wo.work_started_at && (
+        <p style={{ color: "var(--workshop)", fontSize: 13, marginBottom: 20, display: "flex", alignItems: "center", gap: 6 }}>
+          <Check size={13} />
+          Mulai dikerjakan: <span className="mono">{formatDateTimeWithClock(wo.work_started_at)}</span>
+        </p>
+      )}
 
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
