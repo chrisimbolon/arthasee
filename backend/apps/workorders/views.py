@@ -90,6 +90,13 @@ class WorkOrderStatusUpdateView(TenantScopedAPIView):
     close/cancel endpoints below, since those actually do things
     (freeze into a ServiceRecord, reverse stock) that a bare status
     write must never trigger implicitly.
+
+    The one real side effect this endpoint DOES carry: transitioning
+    into IN_PROGRESS calls WorkOrder.mark_started(), Made's own
+    "jam mulai dikerjakan" request — see that method's own docstring
+    for exactly when it does (and deliberately doesn't) record
+    anything. Included in the same update_fields as the status write
+    itself, one save for one real event, not two.
     """
     model = WorkOrder
 
@@ -107,7 +114,11 @@ class WorkOrderStatusUpdateView(TenantScopedAPIView):
                 status=status.HTTP_409_CONFLICT,
             )
         order.status = new_status
-        order.save(update_fields=["status", "updated_at"])
+        update_fields = ["status", "updated_at"]
+        if new_status == "IN_PROGRESS":
+            order.mark_started()
+            update_fields.append("work_started_at")
+        order.save(update_fields=update_fields)
         return Response({"success": True, "work_order": WorkOrderSerializer(order).data})
 
 

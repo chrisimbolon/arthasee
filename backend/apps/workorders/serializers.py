@@ -56,13 +56,13 @@ class WorkOrderSerializer(serializers.ModelSerializer):
         fields = [
             "id", "vehicle", "vehicle_plate", "customer_name",
             "number", "sequence_number", "status",
-            "odometer_km_intake", "received_by", "notes",
+            "odometer_km_intake", "received_by", "notes", "work_started_at",
             "service_record", "job_lines", "material_lines",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "vehicle_plate", "customer_name", "number", "sequence_number", "status",
-            "service_record", "job_lines", "material_lines",
+            "work_started_at", "service_record", "job_lines", "material_lines",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 

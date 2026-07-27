@@ -2,6 +2,7 @@
 # === backend/apps/workorders/tests.py ===
 # =============================================================================
 from decimal import Decimal
+from unittest.mock import PropertyMock, patch
 
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, PartUsage, StockAdjustment
@@ -414,3 +415,77 @@ class WorkOrderMaterialLineDeletionReasonTests(WorkOrderAPITestBase):
         self.client.delete(f"/api/work-orders/material-lines/{line_id}/", {"reason": "made_up_value"}, format="json")
         adjustment = StockAdjustment.objects.filter(part=self.part).first()
         self.assertEqual(adjustment.reason, "correction")
+
+
+class WorkOrderStartedAtTests(WorkOrderAPITestBase):
+    """
+    Made's own request — "jam mulai dikerjakan," the exact clock time
+    work actually began. Confirmed with Chris: captured automatically
+    the instant status first moves to IN_PROGRESS, and only ever
+    meaningful for a Work Order that traces back to an approved
+    Estimate.
+
+    NOTE on test coverage: the "does have an Estimate origin" cases
+    below use unittest.mock.patch.object to temporarily replace the
+    WorkOrder.estimate class-level descriptor with a PropertyMock,
+    rather than creating a real apps.estimates.models.Estimate row.
+    This is deliberate, not a shortcut of convenience: "estimate" is
+    a reverse OneToOneField descriptor, and Django's own __set__
+    actually validates the assigned value's type — a plain
+    `wo.estimate = object()` raises ValueError outright rather than
+    silently working, which is exactly what happened the first time
+    this test was written without checking. patch.object replaces
+    the descriptor itself for the duration of the context manager,
+    bypassing that validation entirely, which correctly isolates
+    mark_started()'s own logic (it only ever calls
+    getattr(self, "estimate", None)) from the real cross-app relation.
+    A fuller integration test, creating a real Estimate and promoting
+    it via approve(), would belong in apps.estimates.tests instead,
+    matching how that promotion is already tested at its own source.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_work_started_at_is_null_until_in_progress(self):
+        self.assertIsNone(self.wo.work_started_at)
+
+    def test_moving_to_in_progress_without_estimate_origin_leaves_it_null(self):
+        """
+        The real, default case for most Work Orders — direct entry,
+        no Estimate ever involved. Confirmed with Chris this field
+        should never populate for this path, by design, not by
+        omission.
+        """
+        resp = self.client.patch(
+            f"/api/work-orders/{self.wo.id}/status/", {"status": "IN_PROGRESS"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["work_order"]["work_started_at"])
+
+    def test_mark_started_sets_timestamp_when_estimate_origin_present(self):
+        with patch.object(WorkOrder, "estimate", new_callable=PropertyMock) as mock_estimate:
+            mock_estimate.return_value = object()  # any truthy stand-in
+            self.wo.mark_started()
+        self.assertIsNotNone(self.wo.work_started_at)
+
+    def test_mark_started_is_a_noop_without_estimate_origin(self):
+        self.wo.mark_started()
+        self.assertIsNone(self.wo.work_started_at)
+
+    def test_mark_started_never_overwrites_an_existing_timestamp(self):
+        """
+        First-time-wins: a Work Order that somehow cycles IN_PROGRESS
+        -> QC -> IN_PROGRESS again (both legal OPEN_STATUSES
+        transitions per WorkOrderStatusUpdateView) must not have its
+        original start time silently replaced by the second entry.
+        """
+        with patch.object(WorkOrder, "estimate", new_callable=PropertyMock) as mock_estimate:
+            mock_estimate.return_value = object()
+            self.wo.mark_started()
+            original = self.wo.work_started_at
+            self.assertIsNotNone(original)
+
+            self.wo.mark_started()
+            self.assertEqual(self.wo.work_started_at, original)

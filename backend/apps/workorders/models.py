@@ -29,14 +29,22 @@ Design locked in with Chris/Made:
   - Numbering is plain sequential (matching the paper's bare "1451",
     no prefix, no visible year) — WorkOrderSequence is one row per
     organization, not scoped by year the way InvoiceSequence is.
+  - work_started_at: Made's own request — "jam mulai dikerjakan,"
+    the exact clock time a car actually enters work, captured
+    automatically the moment SA marks a Work Order "Dikerjakan"
+    (IN_PROGRESS). Confirmed with Chris: only meaningful for Work
+    Orders that trace back to an approved Estimate — per Made's own
+    phrasing ("...jika estimasi disetujui customer") — so a
+    direct-entry Work Order with no Estimate origin never gets this
+    field populated at all, by design, not by omission.
 """
 import uuid
 from datetime import date
 
-from django.db import models, transaction
-
 from apps.core.models import TenantScopedModel
 from apps.inventory.models import Part, PartUsage, StockAdjustment
+from django.db import models, transaction
+from django.utils import timezone
 
 
 class WorkOrderSequence(TenantScopedModel):
@@ -100,6 +108,14 @@ class WorkOrder(TenantScopedModel):
     received_by         = models.CharField(max_length=200, blank=True, verbose_name="Diterima Oleh")
     notes                = models.TextField(blank=True, verbose_name="Catatan")
 
+    # Made's own request: the exact clock time work actually began —
+    # not just the date. Nullable and set at most once — see
+    # mark_started() below for exactly when and why. Deliberately a
+    # plain DateTimeField on WorkOrder itself, not a new model: this
+    # is one fact about one WorkOrder, not a repeating event needing
+    # its own history.
+    work_started_at = models.DateTimeField(null=True, blank=True, verbose_name="Jam Mulai Dikerjakan")
+
     # Set only once, at close time — a direct, queryable answer to
     # "which WorkOrder became this ServiceRecord," rather than making
     # anyone infer it. Nullable because most of a WorkOrder's life it
@@ -134,6 +150,36 @@ class WorkOrder(TenantScopedModel):
             self.sequence_number = WorkOrderSequence.next_number(org)
             self.number = str(self.sequence_number)
         super().save(*args, **kwargs)
+
+    def mark_started(self):
+        """
+        Sets work_started_at on the in-memory instance — deliberately
+        does NOT call save() itself. The one caller (the status-
+        transition view) is already about to save() the status change
+        in the same request; doing so here too would mean two writes
+        for one real event instead of one. The caller is responsible
+        for including "work_started_at" in its own update_fields.
+
+        First-time-wins: silently does nothing if already set, so a
+        WorkOrder that somehow cycles IN_PROGRESS -> OPEN ->
+        IN_PROGRESS again never has its original start time overwritten
+        by a later re-entry into the same status.
+
+        Deliberately a no-op for a WorkOrder with no Estimate origin —
+        per Made's own words, this concept only applies to a Work
+        Order born from an approved Estimate. getattr(self, "estimate",
+        None) is the same reverse-OneToOneField probe already used
+        throughout this project (ServiceRecordSerializer's own
+        get_original_estimate_total, most directly) — Django's
+        RelatedObjectDoesNotExist is deliberately a subclass of
+        AttributeError specifically so this works without a
+        try/except.
+        """
+        if self.work_started_at is not None:
+            return
+        if getattr(self, "estimate", None) is None:
+            return
+        self.work_started_at = timezone.now()
 
     def close(self, service_date=None, closed_by=None):
         """
