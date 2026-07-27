@@ -3,7 +3,8 @@
 # =============================================================================
 from rest_framework import serializers
 
-from .models import WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine
+from .models import (WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine,
+                     WorkOrderStage)
 
 
 def _user_org_ids(request):
@@ -15,8 +16,26 @@ def _user_org_ids(request):
 class WorkOrderJobLineSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkOrderJobLine
-        fields = ["id", "work_order", "description", "is_done", "created_at"]
+        fields = ["id", "work_order", "stage", "description", "is_done", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+    def validate_stage(self, stage):
+        """
+        A job line's stage must belong to the SAME WorkOrder it's
+        being created/assigned on — without this, nothing stops a
+        stray cross-WorkOrder (or even cross-org) stage id from
+        silently attaching a job line to a completely unrelated
+        repair's stage. self.initial_data["work_order"] is reliable
+        here because both call sites (WorkOrderJobLineListView.post()
+        and the assign-stage endpoint) always set it in the payload
+        before this serializer ever validates.
+        """
+        if stage is None:
+            return stage
+        work_order_id = self.initial_data.get("work_order")
+        if work_order_id and str(stage.work_order_id) != str(work_order_id):
+            raise serializers.ValidationError("Tahap tidak sesuai dengan work order ini.")
+        return stage
 
 
 class WorkOrderMaterialLineSerializer(serializers.ModelSerializer):
@@ -44,9 +63,29 @@ class WorkOrderMaterialLineSerializer(serializers.ModelSerializer):
         return part
 
 
+class WorkOrderStageSerializer(serializers.ModelSerializer):
+    # Nested read-only — a stage's own view of exactly which job
+    # lines currently belong to it. WorkOrderJobLine's own flat list
+    # (on WorkOrderSerializer) stays the full, ungrouped set — this
+    # is purely a convenience so the frontend doesn't need to
+    # cross-reference two separate lists by hand to render one
+    # stage's card.
+    job_lines = WorkOrderJobLineSerializer(many=True, read_only=True)
+
+    class Meta:
+        model  = WorkOrderStage
+        fields = ["id", "work_order", "name", "sequence", "started_at", "completed_at", "job_lines", "created_at"]
+        # started_at/completed_at are deliberately read-only here —
+        # they only ever move through start()/complete(), never a
+        # direct field write, same discipline as WorkOrder.status
+        # never being settable through a plain PUT.
+        read_only_fields = ["id", "started_at", "completed_at", "job_lines", "created_at"]
+
+
 class WorkOrderSerializer(serializers.ModelSerializer):
     job_lines       = WorkOrderJobLineSerializer(many=True, read_only=True)
     material_lines   = WorkOrderMaterialLineSerializer(many=True, read_only=True)
+    stages           = WorkOrderStageSerializer(many=True, read_only=True)
     vehicle_plate    = serializers.CharField(source="vehicle.plate_number", read_only=True)
     customer_name    = serializers.CharField(source="vehicle.customer.name", read_only=True)
     created_by_name  = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
@@ -57,12 +96,12 @@ class WorkOrderSerializer(serializers.ModelSerializer):
             "id", "vehicle", "vehicle_plate", "customer_name",
             "number", "sequence_number", "status",
             "odometer_km_intake", "received_by", "notes", "work_started_at",
-            "service_record", "job_lines", "material_lines",
+            "service_record", "job_lines", "material_lines", "stages",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "vehicle_plate", "customer_name", "number", "sequence_number", "status",
-            "work_started_at", "service_record", "job_lines", "material_lines",
+            "work_started_at", "service_record", "job_lines", "material_lines", "stages",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 
@@ -79,4 +118,4 @@ class WorkOrderListSerializer(WorkOrderSerializer):
     """Lighter version for list views — no nested lines, same
     reasoning as VehicleListSerializer's own trimmed-down shape."""
     class Meta(WorkOrderSerializer.Meta):
-        fields = [f for f in WorkOrderSerializer.Meta.fields if f not in ("job_lines", "material_lines")]
+        fields = [f for f in WorkOrderSerializer.Meta.fields if f not in ("job_lines", "material_lines", "stages")]

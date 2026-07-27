@@ -272,6 +272,84 @@ class WorkOrder(TenantScopedModel):
             self.save(update_fields=["status", "updated_at"])
 
 
+class WorkOrderStage(TenantScopedModel):
+    """
+    A custom, optional, higher-level grouping of job lines — Made's
+    own request, confirmed with Chris: for a heavy-damage repair
+    (collision, overhaul) that genuinely happens in distinct phases
+    (e.g. body work, painting, reassembly), each phase gets tracked
+    as its own named stage with its own start/complete timestamps.
+
+    Deliberately additive, not a replacement for anything already
+    proven: a routine, single-visit repair (the overwhelming
+    majority of jobs) never touches this table at all — its
+    WorkOrder.job_lines stay exactly as flat and simple as they
+    already are. Stages only exist when someone actually creates
+    one for a specific job that needs the finer granularity.
+
+    Also deliberately NOT the same concept as WorkOrder.status
+    (OPEN/IN_PROGRESS/QC/DONE/CANCELLED) — status is the generic
+    pipeline position every WorkOrder has; stages are a custom,
+    per-repair breakdown of what's actually happening inside
+    IN_PROGRESS for THIS specific job. A WorkOrder can have zero
+    stages (routine jobs) or several custom ones (a collision job),
+    completely independent of its status.
+
+    name/sequence are free text/plain ordering, not a fixed
+    taxonomy — confirmed with Chris this is defined fresh per
+    repair, not a standard list every job must follow.
+    """
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    work_order  = models.ForeignKey(WorkOrder, on_delete=models.CASCADE, related_name="stages", verbose_name="Work Order")
+    name        = models.CharField(max_length=255, verbose_name="Nama Tahap")
+    sequence    = models.PositiveIntegerField(verbose_name="Urutan")
+    # First-time-wins, same pattern as WorkOrder.work_started_at —
+    # see start()/complete() below.
+    started_at   = models.DateTimeField(null=True, blank=True, verbose_name="Mulai")
+    completed_at = models.DateTimeField(null=True, blank=True, verbose_name="Selesai")
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Work Order Stage"
+        verbose_name_plural  = "Work Order Stages"
+        ordering             = ["sequence", "created_at"]
+
+    def __str__(self):
+        return f"{self.name} — WO {self.work_order.number}"
+
+    def _resolve_organization(self):
+        return self.work_order.organization
+
+    def start(self):
+        """
+        Sets started_at in memory — does not save(). Same reasoning
+        as WorkOrder.mark_started(): the caller is already about to
+        save() in the same request, avoiding two writes for one
+        event. First-time-wins: a stage re-entered later (unlikely,
+        but not prevented) never has its original start silently
+        overwritten.
+        """
+        if self.started_at is not None:
+            return
+        self.started_at = timezone.now()
+
+    def complete(self):
+        """
+        Sets completed_at in memory — does not save(). Auto-starts
+        first if somehow marked complete without ever being
+        explicitly started: a stage that's clearly finished deserves
+        a real (if slightly late) start time on record rather than
+        none at all, matching the spirit of never leaving a genuinely
+        real event untracked. First-time-wins on completed_at itself,
+        same as start().
+        """
+        if self.started_at is None:
+            self.start()
+        if self.completed_at is not None:
+            return
+        self.completed_at = timezone.now()
+
+
 class WorkOrderJobLine(TenantScopedModel):
     """
     One numbered row from the paper's "Job Description" table —
@@ -281,6 +359,16 @@ class WorkOrderJobLine(TenantScopedModel):
     """
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     work_order  = models.ForeignKey(WorkOrder, on_delete=models.CASCADE, related_name="job_lines", verbose_name="Work Order")
+    # Nullable, optional — most job lines never belong to a stage at
+    # all (see WorkOrderStage's own docstring). SET_NULL rather than
+    # CASCADE: deleting a stage removes the grouping, never the real
+    # checklist items underneath it — a job line that already
+    # happened doesn't stop being real history just because its
+    # organizational label went away.
+    stage       = models.ForeignKey(
+        WorkOrderStage, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="job_lines", verbose_name="Tahap",
+    )
     description = models.CharField(max_length=255, verbose_name="Deskripsi Pekerjaan")
     is_done      = models.BooleanField(default=False, verbose_name="Selesai")
     created_at  = models.DateTimeField(auto_now_add=True)

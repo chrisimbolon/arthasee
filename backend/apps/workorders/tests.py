@@ -11,7 +11,8 @@ from apps.service.models import Customer, Vehicle
 from rest_framework import status
 from rest_framework.test import APITestCase, APITransactionTestCase
 
-from .models import WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine
+from .models import (WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine,
+                     WorkOrderStage)
 
 
 class WorkOrderAPITestBase(APITestCase):
@@ -489,3 +490,165 @@ class WorkOrderStartedAtTests(WorkOrderAPITestBase):
 
             self.wo.mark_started()
             self.assertEqual(self.wo.work_started_at, original)
+
+
+class WorkOrderStageTests(WorkOrderAPITestBase):
+    """
+    Made's own request: a custom, per-repair breakdown of heavy jobs
+    into named stages (body work, painting, reassembly, etc.), each
+    with its own start/complete timestamps. Deliberately additive —
+    confirmed with Chris a routine job never touches this at all,
+    proven below alongside the actual stage mechanics.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_routine_work_order_has_zero_stages_by_default(self):
+        """The default, overwhelmingly common case — proven first,
+        since this is the behavior that must never regress."""
+        self.assertEqual(self.wo.stages.count(), 0)
+
+    def test_create_stage_via_api(self):
+        resp = self.client.post(
+            f"/api/work-orders/{self.wo.id}/stages/", {"name": "Body Repair"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["stage"]["name"], "Body Repair")
+        self.assertIsNone(resp.data["stage"]["started_at"])
+        self.assertIsNone(resp.data["stage"]["completed_at"])
+
+    def test_sequence_defaults_to_next_position_when_omitted(self):
+        first = self.client.post(f"/api/work-orders/{self.wo.id}/stages/", {"name": "Body Repair"}, format="json")
+        second = self.client.post(f"/api/work-orders/{self.wo.id}/stages/", {"name": "Painting"}, format="json")
+        self.assertEqual(first.data["stage"]["sequence"], 1)
+        self.assertEqual(second.data["stage"]["sequence"], 2)
+
+    def test_start_sets_timestamp_once(self):
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/start/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(resp.data["stage"]["started_at"])
+
+    def test_start_never_overwrites_an_existing_timestamp(self):
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        stage.start()
+        stage.save(update_fields=["started_at"])
+        original = stage.started_at
+
+        self.client.post(f"/api/work-orders/stages/{stage.id}/start/")
+        stage.refresh_from_db()
+        self.assertEqual(stage.started_at, original)
+
+    def test_complete_auto_starts_if_never_explicitly_started(self):
+        """
+        A stage marked complete without ever being explicitly
+        started still deserves a real start time on record — better
+        a slightly-late timestamp than no record at all for
+        something that clearly did happen.
+        """
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(resp.data["stage"]["started_at"])
+        self.assertIsNotNone(resp.data["stage"]["completed_at"])
+
+    def test_job_line_can_be_created_directly_under_a_stage(self):
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        resp = self.client.post(
+            f"/api/work-orders/{self.wo.id}/job-lines/",
+            {"description": "Ketok panel pintu", "stage": str(stage.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        # str() on both sides deliberately — "stage" is auto-generated
+        # by ModelSerializer from the FK (a PrimaryKeyRelatedField),
+        # whose to_representation() returns value.pk directly rather
+        # than stringifying it. On a UUID-keyed model that stays a
+        # real uuid.UUID object in resp.data (the test client's raw
+        # Python objects, before JSON rendering) — same class of bug
+        # already fixed once for work_order_id elsewhere in this
+        # project, just via a different DRF field type this time.
+        self.assertEqual(str(resp.data["job_line"]["stage"]), str(stage.id))
+
+    def test_cannot_assign_job_line_to_a_stage_from_a_different_work_order(self):
+        """
+        The real gap the validate_stage() check exists to close —
+        without it, nothing would stop a stray stage id from another
+        WorkOrder entirely (even a different vehicle's job) from
+        silently attaching here.
+        """
+        other_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        other_stage = WorkOrderStage.objects.create(organization=self.org, work_order=other_wo, name="Painting", sequence=1)
+        resp = self.client.post(
+            f"/api/work-orders/{self.wo.id}/job-lines/",
+            {"description": "Ketok panel pintu", "stage": str(other_stage.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_assign_stage_endpoint_moves_an_existing_job_line(self):
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Ketok panel pintu")
+        self.assertIsNone(line.stage)
+
+        resp = self.client.patch(
+            f"/api/work-orders/job-lines/{line.id}/assign-stage/", {"stage": str(stage.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.stage_id, stage.id)
+
+    def test_assign_stage_endpoint_can_clear_it_back_to_unstaged(self):
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Ketok panel pintu", stage=stage)
+
+        resp = self.client.patch(
+            f"/api/work-orders/job-lines/{line.id}/assign-stage/", {"stage": None}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertIsNone(line.stage)
+
+    def test_deleting_a_stage_does_not_delete_its_job_lines(self):
+        """
+        The core safety property SET_NULL exists for: a job line that
+        already happened is real history, and must never vanish just
+        because its organizational grouping did.
+        """
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Ketok panel pintu", stage=stage)
+
+        resp = self.client.delete(f"/api/work-orders/stages/{stage.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        line.refresh_from_db()
+        self.assertIsNone(line.stage)
+        self.assertTrue(WorkOrderJobLine.objects.filter(id=line.id).exists())
+
+    def test_cannot_create_stage_on_a_done_work_order(self):
+        self.wo.close(closed_by=self.owner)
+        resp = self.client.post(
+            f"/api/work-orders/{self.wo.id}/stages/", {"name": "Body Repair"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_cannot_start_a_stage_on_a_cancelled_work_order(self):
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        self.wo.cancel()
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/start/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_stages_scoped_to_organization(self):
+        self.client.force_authenticate(user=self.owner)
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+
+        other_org = Organization.objects.create(name="Bengkel Lain Stages", invoice_code="BLS")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherstages@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.get(f"/api/work-orders/stages/{stage.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

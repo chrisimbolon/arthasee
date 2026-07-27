@@ -3,11 +3,13 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (
-    WorkOrderCancelView, WorkOrderCloseView, WorkOrderDetailView, WorkOrderJobLineListView,
-    WorkOrderJobLineToggleView, WorkOrderListView, WorkOrderMaterialLineDetailView,
-    WorkOrderMaterialLineListView, WorkOrderStatusUpdateView,
-)
+from .views import (WorkOrderCancelView, WorkOrderCloseView,
+                    WorkOrderDetailView, WorkOrderJobLineAssignStageView,
+                    WorkOrderJobLineListView, WorkOrderJobLineToggleView,
+                    WorkOrderListView, WorkOrderMaterialLineDetailView,
+                    WorkOrderMaterialLineListView, WorkOrderStageCompleteView,
+                    WorkOrderStageDetailView, WorkOrderStageListView,
+                    WorkOrderStageStartView, WorkOrderStatusUpdateView)
 
 urlpatterns = [
     path("vehicles/<uuid:vehicle_id>/work-orders/", WorkOrderListView.as_view(), name="work-order-list"),
@@ -21,9 +23,23 @@ urlpatterns = [
          WorkOrderJobLineListView.as_view(), name="work-order-job-line-list"),
     path("work-orders/job-lines/<uuid:pk>/toggle/",
          WorkOrderJobLineToggleView.as_view(), name="work-order-job-line-toggle"),
+    path("work-orders/job-lines/<uuid:pk>/assign-stage/",
+         WorkOrderJobLineAssignStageView.as_view(), name="work-order-job-line-assign-stage"),
 
     path("work-orders/<uuid:work_order_id>/material-lines/",
          WorkOrderMaterialLineListView.as_view(), name="work-order-material-line-list"),
     path("work-orders/material-lines/<uuid:pk>/",
          WorkOrderMaterialLineDetailView.as_view(), name="work-order-material-line-detail"),
+
+    # Made's own request — custom, per-repair stage tracking. See
+    # WorkOrderStage's own docstring in models.py for why this is a
+    # separate, additive concept from WorkOrder.status.
+    path("work-orders/<uuid:work_order_id>/stages/",
+         WorkOrderStageListView.as_view(), name="work-order-stage-list"),
+    path("work-orders/stages/<uuid:pk>/",
+         WorkOrderStageDetailView.as_view(), name="work-order-stage-detail"),
+    path("work-orders/stages/<uuid:pk>/start/",
+         WorkOrderStageStartView.as_view(), name="work-order-stage-start"),
+    path("work-orders/stages/<uuid:pk>/complete/",
+         WorkOrderStageCompleteView.as_view(), name="work-order-stage-complete"),
 ]

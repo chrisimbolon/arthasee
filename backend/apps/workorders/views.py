@@ -9,9 +9,11 @@ from django.db import transaction
 from rest_framework import status
 from rest_framework.response import Response
 
-from .models import WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine
+from .models import (WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine,
+                     WorkOrderStage)
 from .serializers import (WorkOrderJobLineSerializer, WorkOrderListSerializer,
-                          WorkOrderMaterialLineSerializer, WorkOrderSerializer)
+                          WorkOrderMaterialLineSerializer, WorkOrderSerializer,
+                          WorkOrderStageSerializer)
 
 # Statuses a WorkOrder can still be actively edited in — once it's
 # DONE or CANCELLED, it's frozen, matching ServiceRecord's own
@@ -220,6 +222,169 @@ class WorkOrderJobLineToggleView(TenantScopedAPIView):
         line.is_done = not line.is_done
         line.save(update_fields=["is_done"])
         return Response({"success": True, "job_line": WorkOrderJobLineSerializer(line).data})
+
+
+class WorkOrderJobLineAssignStageView(TenantScopedAPIView):
+    """
+    PATCH /api/work-orders/job-lines/<id>/assign-stage/
+    Body: {"stage": "<uuid>"} or {"stage": null} to clear it.
+    Separate from the plain create-with-stage path — lets a job line
+    created before any stage existed get grouped in later, or moved
+    between stages, without needing to delete and recreate it.
+    """
+    model = WorkOrderJobLine
+
+    def patch(self, request, pk):
+        line = self.get_object(pk)
+        if line.work_order.status not in OPEN_STATUSES:
+            return Response(
+                {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        stage_id = request.data.get("stage")
+        if stage_id:
+            stage = WorkOrderStage.objects.filter(id=stage_id, work_order=line.work_order).first()
+            if stage is None:
+                return Response(
+                    {"success": False, "message": "Tahap tidak ditemukan untuk work order ini."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            line.stage = stage
+        else:
+            line.stage = None
+        line.save(update_fields=["stage"])
+        return Response({"success": True, "job_line": WorkOrderJobLineSerializer(line).data})
+
+
+class WorkOrderStageListView(TenantScopedAPIView):
+    """
+    GET/POST /api/work-orders/<work_order_id>/stages/
+    Stages are purely optional, additive grouping — see
+    WorkOrderStage's own docstring. Most Work Orders (routine,
+    single-visit jobs) never create one at all.
+    """
+    model = WorkOrderStage
+
+    def get(self, request, work_order_id):
+        stages = self.get_queryset().filter(work_order_id=work_order_id).prefetch_related("job_lines")
+        serializer = WorkOrderStageSerializer(stages, many=True)
+        return Response({"success": True, "count": stages.count(), "results": serializer.data})
+
+    def post(self, request, work_order_id):
+        work_order = self._get_open_work_order(request, work_order_id)
+        if work_order is None:
+            return Response({"success": False, "message": "Work order tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        if work_order.status not in OPEN_STATUSES:
+            return Response(
+                {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        payload = dict(request.data)
+        payload["work_order"] = work_order_id
+        if not payload.get("sequence"):
+            # A convenience default, not a strict identifier — sequence
+            # only ever drives display ordering, never a uniqueness
+            # guarantee, so a simple count-based next value is
+            # deliberately not defended against a deleted-stage edge
+            # case producing a duplicate. Cheap ordering hint, not
+            # WorkOrder.number's own sequence discipline.
+            payload["sequence"] = WorkOrderStage.objects.filter(work_order_id=work_order_id).count() + 1
+        serializer = WorkOrderStageSerializer(data=payload)
+        if serializer.is_valid():
+            stage = serializer.save()
+            return Response(
+                {"success": True, "stage": WorkOrderStageSerializer(stage).data},
+                status=status.HTTP_201_CREATED,
+            )
+        return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    def _get_open_work_order(self, request, work_order_id):
+        user = request.user
+        if user.role == "super_admin":
+            qs = WorkOrder.objects.all()
+        else:
+            org_ids = user.memberships.filter(is_active=True).values_list("organization_id", flat=True)
+            qs = WorkOrder.objects.filter(organization_id__in=org_ids)
+        return qs.filter(pk=work_order_id).first()
+
+
+class WorkOrderStageDetailView(TenantScopedAPIView):
+    """
+    GET/PUT/DELETE /api/work-orders/stages/<id>/
+    PUT only ever touches name/sequence — started_at/completed_at
+    move exclusively through the dedicated start/complete endpoints
+    below, same "a bare write must never hide a real side effect"
+    discipline as WorkOrderDetailView's own PUT.
+    """
+    model = WorkOrderStage
+
+    def get(self, request, pk):
+        stage = self.get_object(pk)
+        return Response({"success": True, "stage": WorkOrderStageSerializer(stage).data})
+
+    def put(self, request, pk):
+        stage = self.get_object(pk)
+        if stage.work_order.status not in OPEN_STATUSES:
+            return Response(
+                {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        allowed = {k: v for k, v in request.data.items() if k in ("name", "sequence")}
+        serializer = WorkOrderStageSerializer(stage, data=allowed, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True, "stage": WorkOrderStageSerializer(stage).data})
+        return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        stage = self.get_object(pk)
+        if stage.work_order.status not in OPEN_STATUSES:
+            return Response(
+                {"success": False, "message": "Work order ini sudah selesai atau dibatalkan — tahap tidak bisa dihapus."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        # Job lines under this stage are NOT deleted — SET_NULL on
+        # WorkOrderJobLine.stage means they simply become unstaged
+        # again, same as if they'd never been grouped at all. Real
+        # checklist history never disappears just because its
+        # organizational label did.
+        stage.delete()
+        return Response({
+            "success": True,
+            "message": "Tahap dihapus — item pekerjaan di dalamnya tetap ada, kembali menjadi tanpa tahap.",
+        })
+
+
+class WorkOrderStageStartView(TenantScopedAPIView):
+    """POST /api/work-orders/stages/<id>/start/"""
+    model = WorkOrderStage
+
+    def post(self, request, pk):
+        stage = self.get_object(pk)
+        if stage.work_order.status not in OPEN_STATUSES:
+            return Response(
+                {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        stage.start()
+        stage.save(update_fields=["started_at"])
+        return Response({"success": True, "stage": WorkOrderStageSerializer(stage).data})
+
+
+class WorkOrderStageCompleteView(TenantScopedAPIView):
+    """POST /api/work-orders/stages/<id>/complete/"""
+    model = WorkOrderStage
+
+    def post(self, request, pk):
+        stage = self.get_object(pk)
+        if stage.work_order.status not in OPEN_STATUSES:
+            return Response(
+                {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        stage.complete()
+        stage.save(update_fields=["started_at", "completed_at"])
+        return Response({"success": True, "stage": WorkOrderStageSerializer(stage).data})
 
 
 class WorkOrderMaterialLineListView(TenantScopedAPIView):
