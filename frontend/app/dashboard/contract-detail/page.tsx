@@ -112,8 +112,8 @@ function ContractDetailContent() {
 
   return (
     <div>
-      <Link href="/dashboard" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)", marginBottom: 18 }}>
-        <ArrowLeft size={14} /> Kembali ke Ringkasan
+      <Link href="/dashboard/contracts" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)", marginBottom: 18 }}>
+        <ArrowLeft size={14} /> Kembali ke Kontrak
       </Link>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
