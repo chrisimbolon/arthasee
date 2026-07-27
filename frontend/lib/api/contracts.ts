@@ -53,6 +53,16 @@ export interface DiffAddedVehicle {
   fleet_code:       string;
   vehicle_model:    string;
   allocated_budget: string;
+  // Set by the backend when a Vehicle with this exact plate_number
+  // already exists in the org — the real scenario ContractVehicle
+  // was built as its own join table for: the same fleet vehicle
+  // reappearing in a later fiscal year's contract. When set, this
+  // entry means "link the existing vehicle to this contract," not
+  // "create a new one" — manufacture_year/vehicle_type are neither
+  // needed nor used in that case, since the existing Vehicle's own
+  // fields are already real.
+  existing_vehicle_id?:    string | null;
+  existing_vehicle_model?: string | null;
   line_items: Array<{
     row_no: number; description: string; volume: string;
     unit: string; unit_price: string; subtotal: string;
@@ -61,6 +71,7 @@ export interface DiffAddedVehicle {
   // machine parse — the source document never provides this, but
   // Vehicle.manufacture_year is required on the backend, so the
   // reviewer must fill it in before this entry can be applied.
+  // Only relevant when existing_vehicle_id is absent.
   manufacture_year?: number;
   vehicle_type?:     string;
 }
