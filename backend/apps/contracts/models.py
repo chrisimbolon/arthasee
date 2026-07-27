@@ -300,6 +300,7 @@ class ContractImport(TenantScopedModel):
         elsewhere in this project.
         """
         from apps.service.models import Vehicle  # local import, same
+
         # cross-app reasoning as WorkOrder.close()'s own local import
         # of ServiceRecord — apps.contracts depends on apps.service,
         # not the other way around, and this keeps that direction
@@ -310,14 +311,37 @@ class ContractImport(TenantScopedModel):
 
         with transaction.atomic():
             for entry in confirmed_diff.get("added_vehicles", []):
-                vehicle = Vehicle.objects.create(
-                    organization=self.organization,
-                    customer=self.contract.customer,
-                    plate_number=entry["fleet_code"],
-                    manufacture_year=entry["manufacture_year"],
-                    vehicle_type=entry.get("vehicle_type", "Mobil"),
-                    model=entry.get("vehicle_model") or entry["fleet_code"],
-                )
+                existing_vehicle_id = entry.get("existing_vehicle_id")
+                if existing_vehicle_id:
+                    # The real scenario ContractVehicle was built as
+                    # its own join table for: this exact fleet
+                    # vehicle already exists in the org — from a
+                    # prior fiscal year's contract, most plausibly —
+                    # just not yet linked to THIS contract. Reuse it
+                    # rather than attempting Vehicle.objects.create()
+                    # again, which would violate the (organization,
+                    # plate_number) unique constraint outright, not
+                    # "fail gracefully" — this shipped to production
+                    # once as exactly that crash before this check
+                    # existed. Deliberately does not touch
+                    # manufacture_year/vehicle_type from the entry —
+                    # the existing Vehicle's own fields are the real
+                    # ones; a reviewer's guess for a brand-new vehicle
+                    # (the only case those fields are even collected
+                    # for) has no business overwriting an
+                    # already-real record.
+                    vehicle = Vehicle.objects.get(
+                        organization=self.organization, id=existing_vehicle_id,
+                    )
+                else:
+                    vehicle = Vehicle.objects.create(
+                        organization=self.organization,
+                        customer=self.contract.customer,
+                        plate_number=entry["fleet_code"],
+                        manufacture_year=entry["manufacture_year"],
+                        vehicle_type=entry.get("vehicle_type", "Mobil"),
+                        model=entry.get("vehicle_model") or entry["fleet_code"],
+                    )
                 contract_vehicle = ContractVehicle.objects.create(
                     organization=self.organization, contract=self.contract,
                     vehicle=vehicle, allocated_budget=entry["allocated_budget"],

@@ -277,11 +277,13 @@ def diff_against_contract(parsed: ParsedContract, contract) -> dict:
     ContractImport.parsed_diff — every Decimal is stringified here so
     json.dumps() never has to deal with a raw Decimal at all.
     """
-    from .models import ContractVehicle  # local import: keeps parsing.py
+    from apps.service.models import Vehicle  # local import, same
 
-    # importable (and unit-testable) without requiring Django's ORM
-    # to be configured, since parse_hps_workbook/parse_rupiah on their
-    # own have no database dependency at all.
+    # reasoning as the ContractVehicle import just below — parsing.py
+    # stays importable without Django's ORM configured for its own
+    # pure-parsing tests, this only gets pulled in when the diff
+    # function (which always needs the ORM anyway) actually runs.
+    from .models import ContractVehicle
 
     existing_vehicles = {
         cv.vehicle.plate_number: cv
@@ -302,10 +304,27 @@ def diff_against_contract(parsed: ParsedContract, contract) -> dict:
         existing_cv = existing_vehicles.get(group.fleet_code)
 
         if existing_cv is None:
+            # New to THIS contract — but not necessarily new to the
+            # org. The exact scenario ContractVehicle was built as a
+            # separate join table for in the first place: the same
+            # real fleet vehicle reappearing in a later fiscal year's
+            # contract. Vehicle.plate_number is unique per
+            # organization (not per contract), so checking here,
+            # before ever proposing a "create a new Vehicle" action,
+            # is what actually lets that reuse work — surfacing
+            # existing_vehicle_id lets the review screen skip asking
+            # for manufacture_year again (the existing Vehicle
+            # already has one) and lets apply() link to it instead of
+            # colliding with the DB's own unique constraint.
+            reusable_vehicle = Vehicle.objects.filter(
+                organization=contract.organization, plate_number=group.fleet_code,
+            ).first()
             diff["added_vehicles"].append({
                 "fleet_code": group.fleet_code,
                 "vehicle_model": group.vehicle_model,
                 "allocated_budget": str(group.allocated_budget),
+                "existing_vehicle_id": str(reusable_vehicle.id) if reusable_vehicle else None,
+                "existing_vehicle_model": reusable_vehicle.model if reusable_vehicle else None,
                 "line_items": [
                     {
                         "row_no": li.row_no, "description": li.description,

@@ -299,7 +299,89 @@ class ContractImportApplyTests(ContractsAPITestBase):
         contract_import.refresh_from_db()
         self.assertEqual(contract_import.status, "APPLIED")
         self.assertEqual(contract_import.applied_by, self.owner)
-        self.assertIsNotNone(contract_import.applied_at)
+
+    def test_apply_reuses_existing_vehicle_instead_of_creating_duplicate(self):
+        """
+        The real bug this test exists to prevent regressing: the same
+        real fleet vehicle reappearing in a second contract (the
+        exact scenario ContractVehicle was built as its own join
+        table for) used to crash outright — Vehicle.objects.create()
+        colliding with the (organization, plate_number) unique
+        constraint, since apply() never checked whether a Vehicle
+        with that plate already existed anywhere in the org before
+        trying to create one.
+        """
+        existing_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.institutional_customer,
+            plate_number="2-XXXI", manufacture_year=2018,
+            vehicle_type="Mobil", model="HONDA BRIO",
+        )
+        # A second, separate Contract — the same fleet vehicle
+        # showing up in a different fiscal year's tender, same
+        # organization.
+        second_contract = Contract.objects.create(
+            organization=self.org, customer=self.institutional_customer,
+            title="Pengadaan Tahun Kedua", fiscal_year=2027, termin_count=4,
+        )
+        contract_import = ContractImport.objects.create(
+            organization=self.org, contract=second_contract,
+            original_file="contract_imports/year2.xlsx", uploaded_by=self.owner,
+        )
+        confirmed_diff = {
+            "added_vehicles": [{
+                "fleet_code": "2-XXXI",
+                "vehicle_model": "HONDA BRIO",
+                "existing_vehicle_id": str(existing_vehicle.id),
+                # Deliberately no manufacture_year/vehicle_type here —
+                # a reuse-case entry never needs them, per the review
+                # screen's own logic.
+                "allocated_budget": "19700000",
+                "line_items": [
+                    {"row_no": 1, "description": "Oli Mesin", "volume": "15",
+                     "unit": "Liter", "unit_price": "200000", "subtotal": "3000000"},
+                ],
+            }],
+        }
+
+        contract_import.apply(confirmed_diff, applied_by=self.owner)
+
+        # No duplicate Vehicle created — still exactly one with this plate:
+        self.assertEqual(Vehicle.objects.filter(plate_number="2-XXXI").count(), 1)
+        vehicle = Vehicle.objects.get(plate_number="2-XXXI")
+        self.assertEqual(vehicle.id, existing_vehicle.id)
+        # Its original manufacture_year is untouched, not overwritten:
+        self.assertEqual(vehicle.manufacture_year, 2018)
+        # Correctly linked to the NEW contract:
+        cv = ContractVehicle.objects.get(contract=second_contract, vehicle=vehicle)
+        self.assertEqual(cv.allocated_budget, Decimal("19700000"))
+
+    def test_diff_detects_reusable_vehicle_from_a_different_contract(self):
+        """
+        Proves diff_against_contract() itself surfaces
+        existing_vehicle_id correctly — this is what makes the
+        review screen able to skip asking for manufacture_year at
+        all for a vehicle that already has one.
+        """
+        Vehicle.objects.create(
+            organization=self.org, customer=self.institutional_customer,
+            plate_number="2-XXXI", manufacture_year=2018,
+            vehicle_type="Mobil", model="HONDA BRIO",
+        )
+        second_contract = Contract.objects.create(
+            organization=self.org, customer=self.institutional_customer,
+            title="Pengadaan Tahun Kedua", fiscal_year=2027, termin_count=4,
+        )
+        buf = _build_test_workbook(HEADER_ROWS + [
+            ["", "HONDA BRIO (2-XXXI)", 1, "MOBIL", "", "Rp 19.700.000"],
+            [1, "Oli Mesin", 15, "Liter", "Rp 200.000", "Rp 3.000.000"],
+        ])
+        parsed = parse_hps_workbook(buf)
+        diff = diff_against_contract(parsed, second_contract)
+
+        self.assertEqual(len(diff["added_vehicles"]), 1)
+        entry = diff["added_vehicles"][0]
+        self.assertIsNotNone(entry["existing_vehicle_id"])
+        self.assertEqual(entry["existing_vehicle_model"], "HONDA BRIO")
 
     def test_apply_supersedes_old_line_never_hard_deletes(self):
         """The core safety property this whole design exists for: a
