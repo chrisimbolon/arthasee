@@ -31,7 +31,6 @@ from typing import List, Optional
 
 import openpyxl
 
-ROMAN_NUMERAL_RE = re.compile(r"^[IVXLCDM]+$")
 FLEET_CODE_RE    = re.compile(r"\(([^)]+)\)\s*$")
 RUPIAH_KEEP_RE   = re.compile(r"[^\d,]")
 
@@ -121,23 +120,23 @@ def parse_rupiah(raw) -> Decimal:
     return Decimal(text)
 
 
-def _is_group_header_row(no_cell, satuan_cell) -> bool:
+def _is_group_header_row(satuan_cell) -> bool:
     """
-    The real, structural signal for "this row starts a new vehicle,"
-    found directly in the actual Polda Kepri document: the NO column
-    holds a Roman numeral (I, II, III...) and SATUAN holds "MOBIL" —
-    every single vehicle-group row in the real HPS matched exactly
-    this pattern. Deliberately NOT keyed off cell background color —
-    the real document does highlight these rows, but color is a far
-    more fragile thing to depend on through openpyxl (theming,
-    indexed-vs-RGB color storage, etc.) than a plain structural
-    pattern that costs nothing extra to check.
+    The real, structural signal for "this row starts a new vehicle."
+    Originally required a Roman numeral (I, II, III...) in the NO
+    column too, based on the one document seen as PDF text during
+    design — but the real .xlsx (once actually opened) turned out to
+    leave NO completely blank on its own group-header row, with only
+    SATUAN=="MOBIL" present. Across the two real document variants
+    seen so far, that's the one signal that's actually constant; NO
+    is not. Dropping the NO requirement entirely rather than trying
+    to special-case both shapes — "unit is literally MOBIL" is
+    already a strong, near-unambiguous signal on its own (no genuine
+    line item's unit would ever legitimately read "MOBIL").
     """
-    if no_cell is None or satuan_cell is None:
+    if satuan_cell is None:
         return False
-    no_text = str(no_cell).strip().upper()
-    satuan_text = str(satuan_cell).strip().upper()
-    return bool(ROMAN_NUMERAL_RE.match(no_text)) and satuan_text == "MOBIL"
+    return str(satuan_cell).strip().upper() == "MOBIL"
 
 
 def _split_vehicle_name(raw_name: str):
@@ -215,13 +214,17 @@ def parse_hps_workbook(file_obj) -> ParsedContract:
                 document_total = parse_rupiah(jumlah_val)
             continue
 
-        if _is_group_header_row(no_val, satuan_val):
+        if _is_group_header_row(satuan_val):
             if current_group is not None:
                 vehicle_groups.append(current_group)
             model_name, fleet_code = _split_vehicle_name(item_text)
             jumlah_val = row[col["jumlah"]].value
             current_group = ParsedVehicleGroup(
-                group_label=str(no_val).strip(),
+                # NO is often blank on the real group-header row (see
+                # _is_group_header_row's own docstring) — group_label
+                # is purely informational and never used for matching
+                # (fleet_code is), so a blank one is harmless.
+                group_label=str(no_val).strip() if no_val is not None else "",
                 raw_name=item_text,
                 vehicle_model=model_name,
                 fleet_code=fleet_code,
@@ -275,6 +278,7 @@ def diff_against_contract(parsed: ParsedContract, contract) -> dict:
     json.dumps() never has to deal with a raw Decimal at all.
     """
     from .models import ContractVehicle  # local import: keeps parsing.py
+
     # importable (and unit-testable) without requiring Django's ORM
     # to be configured, since parse_hps_workbook/parse_rupiah on their
     # own have no database dependency at all.
