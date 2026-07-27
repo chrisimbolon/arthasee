@@ -126,6 +126,10 @@ export const contractsApi = {
 };
 
 export const contractImportsApi = {
+  async list(contractId: string): Promise<ContractImport[]> {
+    const { data } = await api.get(`/api/contracts/${contractId}/imports/`);
+    return data.results;
+  },
   async upload(contractId: string, file: File): Promise<{ contractImport: ContractImport; success: boolean; message?: string }> {
     const formData = new FormData();
     formData.append("file", file);
