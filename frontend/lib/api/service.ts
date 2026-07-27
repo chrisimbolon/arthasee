@@ -3,11 +3,19 @@
 // ===========================================================
 import api from "@/lib/api";
 
+export type CustomerType = "INDIVIDUAL" | "INSTITUTIONAL";
+
 export interface Customer {
   id:            string;
   name:          string;
   phone:         string;
   stnk_name:     string;
+  // Distinguishes institutional/tender clients (government bodies,
+  // police, large companies) from regular walk-in customers — added
+  // once apps.contracts needed a real way to filter which customers
+  // are eligible to have a Contract attached, rather than showing
+  // every customer in that picker, undifferentiated, forever.
+  customer_type: CustomerType;
   vehicle_count: number;
   created_at:    string;
   updated_at:    string;
@@ -125,15 +133,18 @@ export interface ApiErrorShape {
 }
 
 export const customersApi = {
-  async list(search?: string): Promise<Customer[]> {
-    const { data } = await api.get("/api/customers/", { params: search ? { search } : {} });
+  async list(opts?: { search?: string; customerType?: CustomerType }): Promise<Customer[]> {
+    const params: Record<string, string> = {};
+    if (opts?.search) params.search = opts.search;
+    if (opts?.customerType) params.customer_type = opts.customerType;
+    const { data } = await api.get("/api/customers/", { params });
     return data.results;
   },
-  async create(payload: { name: string; phone?: string; stnk_name?: string }): Promise<Customer> {
+  async create(payload: { name: string; phone?: string; stnk_name?: string; customer_type?: CustomerType }): Promise<Customer> {
     const { data } = await api.post("/api/customers/", payload);
     return data.customer;
   },
-  async update(id: string, payload: Partial<{ name: string; phone: string; stnk_name: string }>): Promise<Customer> {
+  async update(id: string, payload: Partial<{ name: string; phone: string; stnk_name: string; customer_type: CustomerType }>): Promise<Customer> {
     const { data } = await api.put(`/api/customers/${id}/`, payload);
     return data.customer;
   },
