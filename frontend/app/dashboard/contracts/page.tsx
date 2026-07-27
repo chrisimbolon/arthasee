@@ -59,12 +59,18 @@ function AddContractModal({ customers, onClose, onCreated }: {
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: 14 }}>
             <label className="label">Klien Institusi</label>
-            <select className="input" required value={form.customer} onChange={(e) => setForm({ ...form, customer: e.target.value })}>
+            {customers.length === 0 ? (
+              <div style={{ background: "var(--hazard-light)", color: "var(--hazard-dark)", padding: "9px 12px", borderRadius: 5, fontSize: 12.5, marginBottom: 8 }}>
+                Belum ada pelanggan bertipe &quot;Institusi/Tender&quot; — tambahkan dulu lewat halaman Pelanggan sebelum bisa membuat contract.
+              </div>
+            ) : null}
+            <select className="input" required disabled={customers.length === 0} value={form.customer} onChange={(e) => setForm({ ...form, customer: e.target.value })}>
               <option value="">— Pilih Klien —</option>
               {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
             <p style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 4 }}>
-              Belum ada di daftar? Tambahkan dulu lewat halaman Pelanggan.
+              Hanya menampilkan pelanggan bertipe &quot;Institusi/Tender&quot;. Belum ada di daftar?
+              Tambahkan atau ubah jenisnya lewat halaman Pelanggan.
             </p>
           </div>
           <div style={{ marginBottom: 14 }}>
@@ -104,7 +110,13 @@ export default function ContractsPage() {
   useEffect(() => {
     contractsApi.list().then(setContracts).finally(() => setLoading(false));
   }, []);
-  useEffect(() => { customersApi.list().then(setCustomers); }, []);
+  useEffect(() => {
+    // Now a real backend filter — apps.service.views' CustomerListView
+    // was reviewed and confirmed to support ?customer_type=, so this
+    // no longer needs the client-side workaround that fetched every
+    // customer and filtered in the browser.
+    customersApi.list({ customerType: "INSTITUTIONAL" }).then(setCustomers);
+  }, []);
 
   const handleCreated = (contract: Contract) => {
     // Straight into contract-detail — see file header comment for why
