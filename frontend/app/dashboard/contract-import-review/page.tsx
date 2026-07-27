@@ -122,7 +122,16 @@ function ContractImportReviewContent() {
   const diff = contractImport?.parsed_diff;
 
   const mergedAddedVehicles: DiffAddedVehicle[] = useMemo(() => {
-    if (!diff) return [];
+    // Deliberately diff?.added_vehicles, not just !diff — parsed_diff
+    // defaults to {} (an empty but truthy object) whenever a parse
+    // fails, since the backend only ever populates it on success.
+    // Checking plain truthiness let {} slip through, then crashed on
+    // .map() of an undefined key — one render before this component
+    // would have reached its own parse_error early-return further
+    // down (hooks always run before any conditional return, so this
+    // guard has to hold on its own, it can't rely on that later check
+    // happening first).
+    if (!diff?.added_vehicles) return [];
     return diff.added_vehicles.map((v) => ({
       ...v,
       manufacture_year: addedVehicleEdits[v.fleet_code]?.manufacture_year ?? v.manufacture_year,
