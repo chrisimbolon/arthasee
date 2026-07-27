@@ -12,7 +12,16 @@ from .serializers import (CustomerSerializer, ServiceRecordSerializer,
 
 
 class CustomerListView(TenantScopedAPIView):
-    """GET/POST /api/customers/"""
+    """
+    GET/POST /api/customers/
+    ?customer_type=INSTITUTIONAL filters to institutional/tender
+    clients only — the real backend equivalent of what
+    apps.contracts' Contract-creation picker was doing client-side
+    until this view was actually reviewed. Same plain-equality-filter
+    style as ?search=, no extra validation on the value: an unknown
+    customer_type just yields zero results, same harmless behavior as
+    a search term matching nothing.
+    """
     model = Customer
 
     def get(self, request):
@@ -20,6 +29,9 @@ class CustomerListView(TenantScopedAPIView):
         search = request.query_params.get("search")
         if search:
             customers = customers.filter(name__icontains=search)
+        customer_type = request.query_params.get("customer_type")
+        if customer_type:
+            customers = customers.filter(customer_type=customer_type)
         serializer = CustomerSerializer(customers, many=True)
         return Response({"success": True, "count": customers.count(), "results": serializer.data})
 

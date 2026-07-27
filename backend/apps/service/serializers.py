@@ -19,7 +19,13 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = Customer
-        fields = ["id", "name", "phone", "stnk_name", "vehicle_count", "created_at", "updated_at"]
+        fields = ["id", "name", "phone", "stnk_name", "customer_type", "vehicle_count", "created_at", "updated_at"]
+        # customer_type deliberately editable, not read-only — unlike
+        # vehicle_count (a derived count) or created_at, this is a
+        # real classification the person creating the Customer should
+        # set explicitly. Defaults to INDIVIDUAL server-side (see the
+        # model), so omitting it entirely from a create payload still
+        # behaves correctly — it's optional, not read-only.
         read_only_fields = ["id", "vehicle_count", "created_at", "updated_at"]
 
 

@@ -181,6 +181,53 @@ class CustomerAPITests(ServiceAPITestBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["count"], 1)
 
+    def test_customer_type_defaults_to_individual(self):
+        """
+        Omitting customer_type entirely — the normal case for every
+        regular walk-in customer — must not require the caller to
+        know this field exists at all.
+        """
+        resp = self.client.post(
+            "/api/customers/", {"name": "Pelanggan Biasa"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["customer"]["customer_type"], "INDIVIDUAL")
+
+    def test_customer_type_can_be_set_institutional(self):
+        resp = self.client.post(
+            "/api/customers/",
+            {"name": "Ditreskrimum & Dittahti Polda Kepri", "customer_type": "INSTITUTIONAL"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["customer"]["customer_type"], "INSTITUTIONAL")
+
+    def test_existing_customer_rows_default_to_individual(self):
+        """
+        Proves the backward-compatibility story explicitly, not just
+        via the field's default= at creation time: a Customer created
+        through the ORM without ever mentioning customer_type (as
+        every pre-existing row in a real database would have been)
+        still comes back correctly classified, with no backfill step
+        required.
+        """
+        legacy_customer = Customer.objects.create(organization=self.org, name="Pelanggan Lama")
+        legacy_customer.refresh_from_db()
+        self.assertEqual(legacy_customer.customer_type, "INDIVIDUAL")
+
+    def test_customer_type_filter_endpoint(self):
+        """
+        The real backend filter apps.contracts' Contract-creation
+        picker should use instead of filtering client-side — this is
+        what actually makes that upgrade safe.
+        """
+        Customer.objects.create(organization=self.org, name="Ditreskrimum Polda Kepri", customer_type="INSTITUTIONAL")
+        Customer.objects.create(organization=self.org, name="Budi Perorangan", customer_type="INDIVIDUAL")
+        resp = self.client.get("/api/customers/?customer_type=INSTITUTIONAL")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 1)
+        self.assertEqual(resp.data["results"][0]["name"], "Ditreskrimum Polda Kepri")
+
 
 class Principle2ProtectedDeletionTests(ServiceAPITestBase):
     """

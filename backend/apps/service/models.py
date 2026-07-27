@@ -28,13 +28,35 @@ class Customer(TenantScopedModel):
     which may or may not be the same as the registered owner on the
     STNK. That distinction was explicit on the handwritten spec, not
     an assumption made here.
+
+    customer_type added once apps.contracts made the gap real and
+    visible: institutional/tender clients (government bodies, police,
+    large companies — see apps.contracts' own docstring) are stored
+    as regular Customer rows, same as any walk-in customer, per the
+    deliberate decision not to build a separate model for them. But
+    with zero way to tell them apart, a UI picker meant to surface
+    only institutional clients (Contract creation) would have no
+    honest way to filter — every customer would show up in that list
+    forever, regardless of how large the regular-customer list grows.
+    Defaults to INDIVIDUAL so every existing Customer row, created
+    before this field existed, stays correctly classified without
+    requiring a backfill or a guess.
     """
+    CUSTOMER_TYPE_CHOICES = [
+        ("INDIVIDUAL",    "Perorangan"),
+        ("INSTITUTIONAL", "Institusi/Tender"),
+    ]
+
     id        = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name      = models.CharField(max_length=200, verbose_name="Nama Pelanggan")
     phone     = models.CharField(max_length=20, blank=True, verbose_name="Nomor Telepon")
     stnk_name = models.CharField(
         max_length=200, blank=True, verbose_name="Nama di STNK",
         help_text="Nama pemilik terdaftar di STNK, jika berbeda dari nama pelanggan.",
+    )
+    customer_type = models.CharField(
+        max_length=20, choices=CUSTOMER_TYPE_CHOICES, default="INDIVIDUAL",
+        verbose_name="Jenis Pelanggan",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
