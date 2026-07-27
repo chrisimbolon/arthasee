@@ -6,7 +6,11 @@
 // =============================================================================
 import { Part, partsApi } from "@/lib/api/service";
 import {
-  WorkOrder, WorkOrderStatus, workOrderJobLinesApi, workOrderMaterialLinesApi, workOrdersApi,
+  WorkOrder,
+  workOrderJobLinesApi, workOrderMaterialLinesApi, workOrdersApi,
+  WorkOrderStage,
+  workOrderStagesApi,
+  WorkOrderStatus,
 } from "@/lib/api/workorders";
 import { AlertTriangle, ArrowLeft, Check, Loader2, Plus, Trash2 } from "lucide-react";
 import Link from "next/link";
@@ -28,6 +32,15 @@ const OPEN_STATUSES: WorkOrderStatus[] = ["OPEN", "IN_PROGRESS", "QC"];
 function formatDateTimeWithClock(iso: string) {
   const d = new Date(iso);
   const datePart = d.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
+  const timePart = d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+  return `${datePart}, ${timePart}`;
+}
+
+// Shorter form for stage cards, where a start AND complete time may
+// both show side by side — the full month name would crowd the row.
+function formatCompactDateTime(iso: string) {
+  const d = new Date(iso);
+  const datePart = d.toLocaleDateString("id-ID", { day: "numeric", month: "short" });
   const timePart = d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
   return `${datePart}, ${timePart}`;
 }
@@ -96,10 +109,161 @@ function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void })
   );
 }
 
+function StageCard({ stage, editable, onUpdated }: { stage: WorkOrderStage; editable: boolean; onUpdated: () => void }) {
+  const [desc, setDesc] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const start = async () => { await workOrderStagesApi.start(stage.id); onUpdated(); };
+  const complete = async () => { await workOrderStagesApi.complete(stage.id); onUpdated(); };
+  const toggle = async (lineId: string) => { await workOrderJobLinesApi.toggle(lineId); onUpdated(); };
+
+  const addLine = async () => {
+    if (!desc.trim()) return;
+    setSaving(true);
+    try {
+      await workOrderJobLinesApi.create(stage.work_order, desc.trim(), stage.id);
+      setDesc("");
+      onUpdated();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const borderColor = stage.completed_at ? "#2e7d4f" : stage.started_at ? "var(--rust)" : "var(--steel-lt)";
+
+  return (
+    <div className="card" style={{ marginBottom: 10, borderLeft: `3px solid ${borderColor}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>{stage.name}</span>
+        {stage.completed_at ? (
+          <span style={{ fontSize: 11, color: "#2e7d4f", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+            <Check size={12} /> Selesai
+          </span>
+        ) : editable ? (
+          !stage.started_at ? (
+            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px" }} onClick={start}>Mulai Tahap</button>
+          ) : (
+            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px" }} onClick={complete}>Selesaikan Tahap</button>
+          )
+        ) : null}
+      </div>
+
+      {(stage.started_at || stage.completed_at) && (
+        <div className="mono" style={{ fontSize: 11, color: "var(--steel)", marginBottom: 10 }}>
+          {stage.started_at && <>Mulai: {formatCompactDateTime(stage.started_at)}</>}
+          {stage.completed_at && <> · Selesai: {formatCompactDateTime(stage.completed_at)}</>}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: editable ? 10 : 0 }}>
+        {stage.job_lines.length === 0 && <p style={{ fontSize: 12.5, color: "var(--steel)" }}>Belum ada item di tahap ini.</p>}
+        {stage.job_lines.map((line) => (
+          <div key={line.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <button
+              onClick={() => editable && toggle(line.id)}
+              disabled={!editable}
+              style={{
+                width: 16, height: 16, borderRadius: 4, border: "1px solid var(--line)",
+                background: line.is_done ? "var(--rust)" : "transparent",
+                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                cursor: editable ? "pointer" : "default",
+              }}
+            >
+              {line.is_done && <Check size={10} color="#fff" />}
+            </button>
+            <span style={{ textDecoration: line.is_done ? "line-through" : "none", color: line.is_done ? "var(--steel)" : undefined }}>
+              {line.description}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {editable && (
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            className="input" style={{ flex: 1, fontSize: 13, padding: "6px 10px" }}
+            placeholder="Tambah item ke tahap ini" value={desc}
+            onChange={(e) => setDesc(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addLine()}
+          />
+          <button className="btn-ghost" style={{ fontSize: 11.5, padding: "6px 10px" }} onClick={addLine} disabled={saving}>
+            {saving ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <Plus size={12} />}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StagesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void }) {
+  const editable = OPEN_STATUSES.includes(wo.status);
+  const [showAdd, setShowAdd] = useState(false);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Purely additive — a routine, single-visit repair never creates a
+  // stage at all, and this section renders nothing but a small,
+  // easy-to-ignore "+ Tambah Tahap" affordance in that case. Made's
+  // own scoping: stages are for genuinely multi-phase jobs (heavy
+  // collision/overhaul work), not something every job is expected to use.
+  if (wo.stages.length === 0 && !editable) return null;
+
+  const addStage = async () => {
+    if (!name.trim()) return;
+    setSaving(true);
+    try {
+      await workOrderStagesApi.create(wo.id, name.trim());
+      setName("");
+      setShowAdd(false);
+      onUpdated();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      {wo.stages.length > 0 && (
+        <>
+          <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Tahap Pengerjaan</h3>
+          {wo.stages.map((stage) => (
+            <StageCard key={stage.id} stage={stage} editable={editable} onUpdated={onUpdated} />
+          ))}
+        </>
+      )}
+      {editable && (
+        showAdd ? (
+          <div style={{ display: "flex", gap: 8, marginTop: wo.stages.length > 0 ? 8 : 0 }}>
+            <input
+              className="input" style={{ flex: 1 }} placeholder="Nama tahap, cth. Body Repair"
+              value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addStage()}
+            />
+            <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={addStage} disabled={saving}>
+              {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Tambah"}
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={() => setShowAdd(false)}>Batal</button>
+          </div>
+        ) : (
+          <button
+            className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px", marginTop: wo.stages.length > 0 ? 8 : 0 }}
+            onClick={() => setShowAdd(true)}
+          >
+            <Plus size={13} /> Tambah Tahap{wo.stages.length === 0 && " (untuk pekerjaan besar/bertahap)"}
+          </button>
+        )
+      )}
+    </div>
+  );
+}
+
 function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
   const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // Only the unstaged lines — anything grouped into a stage already
+  // renders inside its own StageCard above, and showing it twice
+  // here would be pure duplication, not a second, different view.
+  const unstagedLines = wo.job_lines.filter((line) => !line.stage);
 
   const addLine = async () => {
     if (!desc.trim()) return;
@@ -120,10 +284,12 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
 
   return (
     <div className="card" style={{ marginBottom: 20 }}>
-      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Pekerjaan</h3>
-      {wo.job_lines.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13.5, marginBottom: 12 }}>Belum ada item pekerjaan.</p>}
+      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>
+        {wo.stages.length > 0 ? "Pekerjaan Lain (Tanpa Tahap)" : "Pekerjaan"}
+      </h3>
+      {unstagedLines.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13.5, marginBottom: 12 }}>Belum ada item pekerjaan.</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: editable ? 14 : 0 }}>
-        {wo.job_lines.map((line) => (
+        {unstagedLines.map((line) => (
           <div key={line.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button
               onClick={() => editable && toggle(line.id)}
@@ -313,6 +479,7 @@ function WorkOrderDetailContent() {
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
       <IntakeCard wo={wo} onUpdated={load} />
+      <StagesSection wo={wo} onUpdated={load} />
       <JobLinesSection wo={wo} onUpdated={load} />
       <MaterialLinesSection wo={wo} catalog={catalog} onUpdated={load} />
 
