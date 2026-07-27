@@ -36,6 +36,14 @@ export interface WorkOrder {
   odometer_km_intake:  number | null;
   received_by:         string;
   notes:               string;
+  // Made's own request — "jam mulai dikerjakan," the exact clock
+  // time work actually began, not just the date. Set automatically
+  // the instant status first moves to IN_PROGRESS — see the
+  // backend's WorkOrder.mark_started() for the exact rule. Stays
+  // null forever for a Work Order with no Estimate origin; per
+  // Made's own phrasing, this concept only applies to a Work Order
+  // born from an approved Estimate.
+  work_started_at:     string | null;
   service_record:      string | null;
   job_lines:           WorkOrderJobLine[];
   material_lines:      WorkOrderMaterialLine[];
@@ -75,7 +83,9 @@ export const workOrdersApi = {
   // Only ever OPEN/IN_PROGRESS/QC — DONE and CANCELLED go through
   // close()/cancel() below, which carry real side effects a bare
   // status write must never trigger implicitly (matches the
-  // backend's own explicit split).
+  // backend's own explicit split). Moving into IN_PROGRESS also
+  // silently sets work_started_at server-side — nothing extra to
+  // pass here, the caller just sees it appear in the response.
   async updateStatus(id: string, status: "OPEN" | "IN_PROGRESS" | "QC"): Promise<WorkOrder> {
     const { data } = await api.patch(`/api/work-orders/${id}/status/`, { status });
     return data.work_order;
