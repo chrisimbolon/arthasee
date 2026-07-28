@@ -43,6 +43,12 @@ export interface ServiceRecord {
   // backend) — null until then. Drives whether the UI shows "Buat
   // Invoice" or "Lihat Invoice" per record.
   invoice_id:        string | null;
+  // The actual, final invoice amount — null until an Invoice exists,
+  // "0" if one exists but has no line items yet. Distinct from
+  // original_estimate_total (what was quoted before work started) —
+  // this is what was actually charged. Drives the cost shown per
+  // entry on the Vehicle Timeline.
+  invoice_total:     string | null;
   // Set when this record traces back through a WorkOrder to an
   // approved Estimate — null for plain records or ones that never
   // went through the estimate flow. Purely a reference point at
