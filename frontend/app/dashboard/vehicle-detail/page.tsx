@@ -334,6 +334,148 @@ function EstimatesSection({ vehicleId }: { vehicleId: string }) {
 }
 
 
+// ── Vehicle Timeline ──────────────────────────────────────────────
+// Sansan's "Digital Medical Record" mockup, built against what's
+// already real: work_order_number/invoice_id/invoice_total all trace
+// through existing reverse OneToOne relations, nothing new to
+// validate with Made here — this is a restyle plus one new backend
+// field (invoice_total), not a new data model.
+//
+// UpcomingServiceEntry is deliberately its own isolated component,
+// not inline logic — the explicit reason: KM stays the sole trigger
+// for the badge/color, by design (see the conversation that led
+// here). If date-based prediction ever gets added later, it only
+// ever appears as a second, clearly-labeled line inside THIS
+// component — nothing else in the timeline needs to change.
+
+function TimelineDot({ color, isLast, pulse }: { color: string; isLast: boolean; pulse?: boolean }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 24, flexShrink: 0 }}>
+      <div
+        style={{
+          width: 12, height: 12, borderRadius: "50%", background: color,
+          border: "2px solid var(--paper)", boxShadow: "0 0 0 1px var(--line)",
+          flexShrink: 0, marginTop: 4,
+          animation: pulse ? "timeline-pulse 1.8s ease-in-out infinite" : undefined,
+        }}
+      />
+      {!isLast && <div style={{ flex: 1, width: 2, background: "var(--line)", marginTop: 2, minHeight: 24 }} />}
+    </div>
+  );
+}
+
+function UpcomingServiceEntry({ vehicle, isLast }: { vehicle: Vehicle; isLast: boolean }) {
+  const due = vehicle.is_due_for_service;
+  const kmRemaining = vehicle.last_service_odometer_km != null
+    ? Math.max(0, (vehicle.last_service_odometer_km + 5000) - vehicle.current_odometer_km)
+    : null;
+
+  return (
+    <div style={{ display: "flex", gap: 12 }}>
+      <TimelineDot color={due ? "var(--rust)" : "var(--hazard)"} isLast={isLast} pulse={due} />
+      <div style={{ flex: 1, paddingBottom: 16 }}>
+        <div className="card" style={{ background: "var(--paper-3)", border: `1.5px dashed ${due ? "var(--rust)" : "var(--steel-lt)"}` }}>
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 4 }}>
+            Servis Berikutnya
+          </div>
+          {vehicle.last_service_odometer_km == null ? (
+            <p style={{ fontSize: 13.5, color: "var(--steel)" }}>Belum ada data servis untuk memperkirakan jadwal berikutnya.</p>
+          ) : due ? (
+            <p style={{ fontSize: 14, fontWeight: 600, color: "var(--rust)" }}>
+              Sudah waktunya servis — <span className="mono">{(vehicle.current_odometer_km - vehicle.last_service_odometer_km).toLocaleString("id-ID")} km</span> sejak servis terakhir.
+            </p>
+          ) : (
+            <p style={{ fontSize: 14 }}>
+              Sekitar <span className="mono" style={{ fontWeight: 600 }}>{kmRemaining?.toLocaleString("id-ID")} km</span> lagi (setiap 5.000 km).
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TimelineEntry({ record, isLast, onInvoice }: { record: ServiceRecord; isLast: boolean; onInvoice: (r: ServiceRecord) => void }) {
+  const dotColor = record.invoice_id ? "#2e7d4f" : "var(--steel-lt)";
+
+  return (
+    <div style={{ display: "flex", gap: 12 }}>
+      <TimelineDot color={dotColor} isLast={isLast} />
+      <div style={{ flex: 1, paddingBottom: 16 }}>
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{formatDateID(record.service_date)}</span>
+              {/* The actual fix for Sansan's "two disconnected
+                  sections" review: when this record came from a
+                  WorkOrder, link straight back to it here instead
+                  of it also showing up as its own separate card
+                  in the Work Order section above. One entry, one
+                  link — not two unrelated cards for the same job. */}
+              {record.work_order_number && (
+                <Link
+                  href={`/dashboard/work-order-detail?id=${record.work_order_id}`}
+                  className="btn-ghost"
+                  style={{ fontSize: 11, padding: "2px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
+                >
+                  <ClipboardList size={11} /> WO #{record.work_order_number}
+                </Link>
+              )}
+            </div>
+            <span className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{record.odometer_km.toLocaleString("id-ID")} km</span>
+          </div>
+          <p style={{ fontSize: 14, marginBottom: record.parts_replaced ? 6 : 0 }}>{record.issue_description}</p>
+          {record.parts_replaced && <p style={{ fontSize: 13, color: "var(--steel)" }}>Part diganti (catatan bebas): {record.parts_replaced}</p>}
+          {record.notes && <p style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>{record.notes}</p>}
+          <PartUsageDisplay record={record} />
+
+          <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            {record.invoice_id ? (
+              <Link href={`/dashboard/invoice-detail?id=${record.invoice_id}`} className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <Receipt size={13} /> Lihat Invoice
+              </Link>
+            ) : (
+              <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px" }} onClick={() => onInvoice(record)}>
+                <FileText size={13} /> Buat Invoice
+              </button>
+            )}
+            {record.invoice_total != null && (
+              <span className="mono" style={{ fontSize: 14, fontWeight: 600 }}>
+                Rp {Number(record.invoice_total).toLocaleString("id-ID")}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VehicleTimeline({ vehicle, onInvoice }: { vehicle: Vehicle; onInvoice: (r: ServiceRecord) => void }) {
+  const records = vehicle.service_records ?? [];
+
+  return (
+    <div>
+      <style>{`
+        @keyframes timeline-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+      `}</style>
+      <UpcomingServiceEntry vehicle={vehicle} isLast={records.length === 0} />
+      {records.length === 0 ? (
+        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ width: 24, flexShrink: 0 }} />
+          <div className="card" style={{ flex: 1, textAlign: "center", color: "var(--steel)", padding: 32 }}>
+            Belum ada riwayat servis untuk kendaraan ini.
+          </div>
+        </div>
+      ) : (
+        records.map((r, idx) => (
+          <TimelineEntry key={r.id} record={r} isLast={idx === records.length - 1} onInvoice={onInvoice} />
+        ))
+      )}
+    </div>
+  );
+}
+
 function VehicleDetailContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -427,53 +569,7 @@ function VehicleDetailContent() {
         <Wrench size={16} /> Riwayat Servis
       </h2>
 
-      {(vehicle.service_records?.length ?? 0) === 0 ? (
-        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 32 }}>Belum ada riwayat servis untuk kendaraan ini.</div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {vehicle.service_records!.map((r) => (
-            <div key={r.id} className="card">
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{formatDateID(r.service_date)}</span>
-                  {/* The actual fix for Sansan's "two disconnected
-                      sections" review: when this record came from a
-                      WorkOrder, link straight back to it here instead
-                      of it also showing up as its own separate card
-                      in the Work Order section above. One entry, one
-                      link — not two unrelated cards for the same job. */}
-                  {r.work_order_number && (
-                    <Link
-                      href={`/dashboard/work-order-detail?id=${r.work_order_id}`}
-                      className="btn-ghost"
-                      style={{ fontSize: 11, padding: "2px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
-                    >
-                      <ClipboardList size={11} /> WO #{r.work_order_number}
-                    </Link>
-                  )}
-                </div>
-                <span className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{r.odometer_km.toLocaleString("id-ID")} km</span>
-              </div>
-              <p style={{ fontSize: 14, marginBottom: r.parts_replaced ? 6 : 0 }}>{r.issue_description}</p>
-              {r.parts_replaced && <p style={{ fontSize: 13, color: "var(--steel)" }}>Part diganti (catatan bebas): {r.parts_replaced}</p>}
-              {r.notes && <p style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>{r.notes}</p>}
-              <PartUsageDisplay record={r} />
-
-              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
-                {r.invoice_id ? (
-                  <Link href={`/dashboard/invoice-detail?id=${r.invoice_id}`} className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <Receipt size={13} /> Lihat Invoice
-                  </Link>
-                ) : (
-                  <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px" }} onClick={() => setInvoicingRecord(r)}>
-                    <FileText size={13} /> Buat Invoice
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <VehicleTimeline vehicle={vehicle} onInvoice={setInvoicingRecord} />
 
       {invoicingRecord && (
         <CreateInvoiceModal
