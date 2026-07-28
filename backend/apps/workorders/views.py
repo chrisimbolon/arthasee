@@ -366,7 +366,10 @@ class WorkOrderStageStartView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
                 status=status.HTTP_409_CONFLICT,
             )
-        stage.start()
+        try:
+            stage.start()
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_409_CONFLICT)
         stage.save(update_fields=["started_at"])
         return Response({"success": True, "stage": WorkOrderStageSerializer(stage).data})
 
@@ -382,7 +385,10 @@ class WorkOrderStageCompleteView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
                 status=status.HTTP_409_CONFLICT,
             )
-        stage.complete()
+        try:
+            stage.complete()
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_409_CONFLICT)
         stage.save(update_fields=["started_at", "completed_at"])
         return Response({"success": True, "stage": WorkOrderStageSerializer(stage).data})
 

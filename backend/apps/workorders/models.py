@@ -328,7 +328,19 @@ class WorkOrderStage(TenantScopedModel):
         event. First-time-wins: a stage re-entered later (unlikely,
         but not prevented) never has its original start silently
         overwritten.
+
+        Raises ValueError if the parent WorkOrder hasn't actually
+        reached IN_PROGRESS yet — confirmed with Chris after a real
+        ordering inconsistency showed up in testing: nothing
+        previously stopped a stage from starting while the WO itself
+        was still just OPEN, producing a stage's own start time
+        landing BEFORE WorkOrder.work_started_at, which undermines
+        the entire point of a coherent, trustworthy timeline. Keeps
+        the ordering guaranteed by construction: work overall always
+        starts before any of its sub-phases can.
         """
+        if self.work_order.status != "IN_PROGRESS":
+            raise ValueError('Work order harus berstatus "Dikerjakan" sebelum tahap bisa dimulai.')
         if self.started_at is not None:
             return
         self.started_at = timezone.now()
@@ -342,6 +354,13 @@ class WorkOrderStage(TenantScopedModel):
         none at all, matching the spirit of never leaving a genuinely
         real event untracked. First-time-wins on completed_at itself,
         same as start().
+
+        Deliberately routes through self.start() for that auto-start,
+        rather than setting started_at directly — this is what makes
+        the IN_PROGRESS requirement above apply here too, with no
+        separate check to keep in sync. Without this, calling
+        complete() directly on a never-started stage would be a
+        silent loophole around the exact rule start() just enforced.
         """
         if self.started_at is None:
             self.start()

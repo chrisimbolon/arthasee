@@ -505,6 +505,18 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         super().setUp()
         self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
 
+    def _move_wo_to_in_progress(self):
+        """
+        Direct ORM write, not the status-transition endpoint —
+        deliberately, these tests are about stage behavior, not
+        re-testing WorkOrderStatusUpdateView itself (that's already
+        covered in WorkOrderStartedAtTests). Bypassing the API here
+        keeps each test focused on the one thing it's actually
+        proving.
+        """
+        self.wo.status = "IN_PROGRESS"
+        self.wo.save(update_fields=["status"])
+
     def test_routine_work_order_has_zero_stages_by_default(self):
         """The default, overwhelmingly common case — proven first,
         since this is the behavior that must never regress."""
@@ -526,12 +538,14 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         self.assertEqual(second.data["stage"]["sequence"], 2)
 
     def test_start_sets_timestamp_once(self):
+        self._move_wo_to_in_progress()
         stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
         resp = self.client.post(f"/api/work-orders/stages/{stage.id}/start/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIsNotNone(resp.data["stage"]["started_at"])
 
     def test_start_never_overwrites_an_existing_timestamp(self):
+        self._move_wo_to_in_progress()
         stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
         stage.start()
         stage.save(update_fields=["started_at"])
@@ -548,11 +562,42 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         a slightly-late timestamp than no record at all for
         something that clearly did happen.
         """
+        self._move_wo_to_in_progress()
         stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
         resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIsNotNone(resp.data["stage"]["started_at"])
         self.assertIsNotNone(resp.data["stage"]["completed_at"])
+
+    def test_cannot_start_a_stage_while_work_order_is_still_open(self):
+        """
+        The actual bug this restriction exists to prevent: without
+        it, a stage's own start time could land BEFORE
+        WorkOrder.work_started_at, which undermines the entire point
+        of a coherent, trustworthy timeline. Confirmed with Chris
+        after this exact ordering showed up in real testing.
+        """
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        self.assertEqual(self.wo.status, "OPEN")
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/start/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        stage.refresh_from_db()
+        self.assertIsNone(stage.started_at)
+
+    def test_complete_cannot_bypass_the_in_progress_requirement(self):
+        """
+        The loophole this test exists to close: complete() auto-
+        starts a never-started stage, so without complete() also
+        being blocked, calling it directly on an OPEN WorkOrder would
+        silently sidestep the exact restriction test_cannot_start_a_
+        stage_while_work_order_is_still_open just proved.
+        """
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        stage.refresh_from_db()
+        self.assertIsNone(stage.started_at)
+        self.assertIsNone(stage.completed_at)
 
     def test_job_line_can_be_created_directly_under_a_stage(self):
         stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
