@@ -115,7 +115,7 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
       <div className="card" style={{ width: 560, background: "var(--paper-3)" }}>
         <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Buat Invoice</h2>
         <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 16 }}>
-          {formatDateID(record.service_date)} — {record.issue_description}
+          {formatDateID(record.service_date)} — {record.issue_description.split("\n").filter((line) => line.trim() !== "").join(", ")}
         </p>
 
         {record.original_estimate_total && (
@@ -424,7 +424,21 @@ function TimelineEntry({ record, isLast, onInvoice }: { record: ServiceRecord; i
             </div>
             <span className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{record.odometer_km.toLocaleString("id-ID")} km</span>
           </div>
-          <p style={{ fontSize: 14, marginBottom: record.parts_replaced ? 6 : 0 }}>{record.issue_description}</p>
+          {/* issue_description joins multiple job lines with \n
+              (see WorkOrder.close()) — a plain <p> silently collapses
+              those into one run-on line in HTML, invisible with a
+              single job line but genuinely unreadable with several.
+              Splitting and rendering each as its own line here fixes
+              that without needing any backend change — the \n was
+              always there, this just stops discarding it. */}
+          {record.issue_description
+            .split("\n")
+            .filter((line) => line.trim() !== "")
+            .map((line, idx, arr) => (
+              <p key={idx} style={{ fontSize: 14, marginBottom: idx < arr.length - 1 ? 3 : (record.parts_replaced ? 6 : 0) }}>
+                {line}
+              </p>
+            ))}
           {record.parts_replaced && <p style={{ fontSize: 13, color: "var(--steel)" }}>Part diganti (catatan bebas): {record.parts_replaced}</p>}
           {record.notes && <p style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>{record.notes}</p>}
           <PartUsageDisplay record={record} />
