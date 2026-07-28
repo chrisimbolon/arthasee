@@ -33,6 +33,14 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
     part_usages      = serializers.SerializerMethodField()
     invoice_id        = serializers.SerializerMethodField()
+    # Sansan's mockup for the Vehicle Timeline shows a real cost per
+    # entry — the actual invoice total, not just whether one exists
+    # (invoice_id) or what was originally quoted
+    # (original_estimate_total). Same getattr-on-reverse-OneToOne
+    # pattern as everything else on this serializer; Invoice.total
+    # is itself already a computed property (summed from line items,
+    # never stored), so this is read-only all the way down.
+    invoice_total      = serializers.SerializerMethodField()
     original_estimate_total = serializers.SerializerMethodField()
     # Sansan's "two disconnected sections" review, resolved: rather
     # than merging WorkOrder/ServiceRecord into one data model (which
@@ -52,13 +60,13 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
         fields = [
             "id", "vehicle", "service_date", "odometer_km",
             "issue_description", "parts_replaced", "notes", "part_usages",
-            "invoice_id", "original_estimate_total",
+            "invoice_id", "invoice_total", "original_estimate_total",
             "work_order_id", "work_order_number",
             "created_by", "created_by_name", "created_at",
         ]
         read_only_fields = [
             "id", "created_by", "created_by_name", "created_at",
-            "part_usages", "invoice_id", "original_estimate_total",
+            "part_usages", "invoice_id", "invoice_total", "original_estimate_total",
             "work_order_id", "work_order_number",
         ]
 
@@ -102,6 +110,10 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
         # specifically so getattr(obj, 'invoice', None) works.
         invoice = getattr(obj, "invoice", None)
         return invoice.id if invoice else None
+
+    def get_invoice_total(self, obj):
+        invoice = getattr(obj, "invoice", None)
+        return str(invoice.total) if invoice else None
 
     def get_work_order_id(self, obj):
         # Deliberately null for records created before WorkOrder

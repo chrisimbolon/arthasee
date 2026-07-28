@@ -2,8 +2,10 @@
 # === backend/apps/service/tests.py ===
 # =============================================================================
 from datetime import date, timedelta
+from decimal import Decimal
 
 from apps.authentication.models import CustomUser
+from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.workorders.models import WorkOrder
 from rest_framework import status
@@ -406,6 +408,57 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         # representation DRF's test client happens to hand back.
         self.assertEqual(str(matching["work_order_id"]), str(work_order.id))
         self.assertEqual(matching["work_order_number"], work_order.number)
+
+    def test_invoice_total_is_null_when_no_invoice_exists(self):
+        """
+        A record with no Invoice at all must not fabricate a total.
+        """
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-20", odometer_km=20000,
+            issue_description="Ganti oli",
+        )
+        resp = self.client.get(f"/api/vehicles/{self.vehicle.id}/")
+        matching = next(
+            r for r in resp.data["vehicle"]["service_records"] if r["id"] == str(record.id)
+        )
+        self.assertIsNone(matching["invoice_total"])
+
+    def test_invoice_total_reflects_the_real_invoice_amount(self):
+        """
+        Invoice.total is itself a computed property (summed from its
+        own line items, never stored) — confirmed against the real
+        model rather than assumed. Compares numerically, not by exact
+        string, deliberately: Decimal multiplication/summation can
+        carry more decimal places through than a naive hardcoded
+        "200000.00" would predict, the same class of string-format
+        assumption that already caused two separate false failures
+        elsewhere in this project (a UUID and a plain unit_price).
+        Numeric comparison sidesteps that entirely.
+        """
+        self.org.invoice_code = "AM"
+        self.org.save(update_fields=["invoice_code"])
+
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-20", odometer_km=20000,
+            issue_description="Ganti oli",
+        )
+        invoice = Invoice.objects.create(service_record=record, created_by=self.owner)
+        InvoiceLineItem.objects.create(
+            organization=self.org, invoice=invoice, kind="labor",
+            description="Jasa Ganti Oli", quantity=1, unit_price=Decimal("150000"),
+        )
+        InvoiceLineItem.objects.create(
+            organization=self.org, invoice=invoice, kind="part",
+            description="Filter Oli", quantity=1, unit_price=Decimal("50000"),
+        )
+
+        resp = self.client.get(f"/api/vehicles/{self.vehicle.id}/")
+        matching = next(
+            r for r in resp.data["vehicle"]["service_records"] if r["id"] == str(record.id)
+        )
+        self.assertEqual(Decimal(matching["invoice_total"]), Decimal("200000"))
 
     def test_cancelled_work_order_never_creates_a_service_record_to_link_from(self):
         """
