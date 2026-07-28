@@ -435,7 +435,13 @@ function TimelineEntry({ record, isLast, onInvoice }: { record: ServiceRecord; i
             .split("\n")
             .filter((line) => line.trim() !== "")
             .map((line, idx, arr) => (
-              <p key={idx} style={{ fontSize: 14, marginBottom: idx < arr.length - 1 ? 3 : (record.parts_replaced ? 6 : 0) }}>
+              <p
+                key={idx}
+                style={{
+                  fontSize: 14, margin: 0,
+                  marginBottom: idx < arr.length - 1 ? 3 : (record.parts_replaced ? 6 : 0),
+                }}
+              >
                 {line}
               </p>
             ))}
