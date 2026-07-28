@@ -63,8 +63,8 @@ export interface ServiceRecord {
   // also appearing as its own separate card elsewhere on the page.
   // Deliberately never present for a CANCELLED WorkOrder — cancel()
   // never creates a ServiceRecord in the first place, so there is
-  // nothing here to link from on that side; cancelled orders stay
-  // visible only in WorkOrdersSection's own history.
+  // nothing here to link from on that side; cancelled orders stay visible only in WorkOrdersSection's own history.
+  
   work_order_id:     string | null;
   work_order_number: string | null;
   created_by:        string | null;
