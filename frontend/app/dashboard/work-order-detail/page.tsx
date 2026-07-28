@@ -112,18 +112,49 @@ function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void })
 function StageCard({ stage, editable, onUpdated }: { stage: WorkOrderStage; editable: boolean; onUpdated: () => void }) {
   const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const start = async () => { await workOrderStagesApi.start(stage.id); onUpdated(); };
-  const complete = async () => { await workOrderStagesApi.complete(stage.id); onUpdated(); };
-  const toggle = async (lineId: string) => { await workOrderJobLinesApi.toggle(lineId); onUpdated(); };
+  const extractMessage = (err: unknown, fallback: string) =>
+    (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? fallback;
+
+  const start = async () => {
+    setError(null);
+    try {
+      await workOrderStagesApi.start(stage.id);
+      onUpdated();
+    } catch (err) {
+      setError(extractMessage(err, "Gagal memulai tahap."));
+    }
+  };
+
+  const complete = async () => {
+    setError(null);
+    try {
+      await workOrderStagesApi.complete(stage.id);
+      onUpdated();
+    } catch (err) {
+      setError(extractMessage(err, "Gagal menyelesaikan tahap."));
+    }
+  };
+
+  const toggle = async (lineId: string) => {
+    try {
+      await workOrderJobLinesApi.toggle(lineId);
+      onUpdated();
+    } catch (err) {
+      setError(extractMessage(err, "Gagal mengubah status item."));
+    }
+  };
 
   const addLine = async () => {
     if (!desc.trim()) return;
-    setSaving(true);
+    setSaving(true); setError(null);
     try {
       await workOrderJobLinesApi.create(stage.work_order, desc.trim(), stage.id);
       setDesc("");
       onUpdated();
+    } catch (err) {
+      setError(extractMessage(err, "Gagal menambah item."));
     } finally {
       setSaving(false);
     }
@@ -147,6 +178,12 @@ function StageCard({ stage, editable, onUpdated }: { stage: WorkOrderStage; edit
           )
         ) : null}
       </div>
+
+      {error && (
+        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "7px 10px", borderRadius: 5, fontSize: 12, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+          <AlertTriangle size={12} /> {error}
+        </div>
+      )}
 
       {(stage.started_at || stage.completed_at) && (
         <div className="mono" style={{ fontSize: 11, color: "var(--steel)", marginBottom: 10 }}>
@@ -199,6 +236,7 @@ function StagesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Purely additive — a routine, single-visit repair never creates a
   // stage at all, and this section renders nothing but a small,
@@ -209,12 +247,15 @@ function StagesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void
 
   const addStage = async () => {
     if (!name.trim()) return;
-    setSaving(true);
+    setSaving(true); setError(null);
     try {
       await workOrderStagesApi.create(wo.id, name.trim());
       setName("");
       setShowAdd(false);
       onUpdated();
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setError(message ?? "Gagal menambah tahap.");
     } finally {
       setSaving(false);
     }
@@ -230,9 +271,14 @@ function StagesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void
           ))}
         </>
       )}
+      {error && (
+        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginTop: wo.stages.length > 0 ? 8 : 0, marginBottom: 4 }}>
+          {error}
+        </div>
+      )}
       {editable && (
         showAdd ? (
-          <div style={{ display: "flex", gap: 8, marginTop: wo.stages.length > 0 ? 8 : 0 }}>
+          <div style={{ display: "flex", gap: 8, marginTop: wo.stages.length > 0 || error ? 8 : 0 }}>
             <input
               className="input" style={{ flex: 1 }} placeholder="Nama tahap, cth. Body Repair"
               value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addStage()}
@@ -240,7 +286,7 @@ function StagesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void
             <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={addStage} disabled={saving}>
               {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Tambah"}
             </button>
-            <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={() => setShowAdd(false)}>Batal</button>
+            <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={() => { setShowAdd(false); setError(null); }}>Batal</button>
           </div>
         ) : (
           <button
