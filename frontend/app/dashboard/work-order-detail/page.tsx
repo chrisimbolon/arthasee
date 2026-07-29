@@ -6,6 +6,8 @@
 // =============================================================================
 import { Part, partsApi } from "@/lib/api/service";
 import {
+  Mechanic,
+  mechanicsApi,
   WorkOrder,
   workOrderJobLinesApi, workOrderMaterialLinesApi, workOrdersApi,
   WorkOrderStage,
@@ -109,7 +111,9 @@ function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void })
   );
 }
 
-function StageCard({ stage, editable, onUpdated }: { stage: WorkOrderStage; editable: boolean; onUpdated: () => void }) {
+function StageCard({ stage, mechanics, editable, onUpdated }: {
+  stage: WorkOrderStage; mechanics: Mechanic[]; editable: boolean; onUpdated: () => void;
+}) {
   const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -160,21 +164,48 @@ function StageCard({ stage, editable, onUpdated }: { stage: WorkOrderStage; edit
     }
   };
 
+  // Made's own diagram showed real, named mechanics working stages
+  // in parallel — this is the concrete UI for that. Deliberately
+  // optional: nothing about starting/completing a stage requires an
+  // assignment, same "trust human judgment" reasoning as completing
+  // a stage never requiring all its job lines checked off first.
+  const assignMechanic = async (mechanicId: string) => {
+    setError(null);
+    try {
+      await workOrderStagesApi.update(stage.id, { assigned_to: mechanicId || null });
+      onUpdated();
+    } catch (err) {
+      setError(extractMessage(err, "Gagal menetapkan mekanik."));
+    }
+  };
+
   const borderColor = stage.completed_at ? "#2e7d4f" : stage.started_at ? "var(--rust)" : "var(--steel-lt)";
 
   return (
     <div className="card" style={{ marginBottom: 10, borderLeft: `3px solid ${borderColor}` }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <span style={{ fontWeight: 600, fontSize: 14 }}>{stage.name}</span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
+        <span style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+          {stage.name}
+          {/* Made's own literal example: an oil change + brake pads
+              taking more than 2 hours. Only ever shown while a stage
+              is genuinely in-progress and past its own threshold —
+              is_overdue already accounts for a completed stage never
+              qualifying, regardless of how long it actually took. */}
+          {stage.is_overdue && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 600, color: "var(--danger)", background: "var(--danger-light)", padding: "2px 7px", borderRadius: 20 }}>
+              <AlertTriangle size={10} /> Lama
+            </span>
+          )}
+        </span>
         {stage.completed_at ? (
-          <span style={{ fontSize: 11, color: "#2e7d4f", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ fontSize: 11, color: "#2e7d4f", fontWeight: 600, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
             <Check size={12} /> Selesai
           </span>
         ) : editable ? (
           !stage.started_at ? (
-            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px" }} onClick={start}>Mulai Tahap</button>
+            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={start}>Mulai Tahap</button>
           ) : (
-            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px" }} onClick={complete}>Selesaikan Tahap</button>
+            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={complete}>Selesaikan Tahap</button>
           )
         ) : null}
       </div>
@@ -184,6 +215,27 @@ function StageCard({ stage, editable, onUpdated }: { stage: WorkOrderStage; edit
           <AlertTriangle size={12} /> {error}
         </div>
       )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+        <span style={{ fontSize: 11.5, color: "var(--steel)" }}>Dikerjakan oleh:</span>
+        {editable ? (
+          <select
+            value={stage.assigned_to ?? ""}
+            onChange={(e) => assignMechanic(e.target.value)}
+            className="input"
+            style={{ fontSize: 12, padding: "3px 8px", width: "auto" }}
+          >
+            <option value="">— Belum ditentukan —</option>
+            {mechanics.map((m) => (
+              <option key={m.id} value={m.id} disabled={!m.is_active && m.id !== stage.assigned_to}>
+                {m.name}{!m.is_active ? " (nonaktif)" : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span style={{ fontSize: 12.5, fontWeight: 500 }}>{stage.assigned_to_name ?? "—"}</span>
+        )}
+      </div>
 
       {(stage.started_at || stage.completed_at) && (
         <div className="mono" style={{ fontSize: 11, color: "var(--steel)", marginBottom: 10 }}>
@@ -231,7 +283,7 @@ function StageCard({ stage, editable, onUpdated }: { stage: WorkOrderStage; edit
   );
 }
 
-function StagesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void }) {
+function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Mechanic[]; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
@@ -267,7 +319,7 @@ function StagesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void
         <>
           <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Tahap Pengerjaan</h3>
           {wo.stages.map((stage) => (
-            <StageCard key={stage.id} stage={stage} editable={editable} onUpdated={onUpdated} />
+            <StageCard key={stage.id} stage={stage} mechanics={mechanics} editable={editable} onUpdated={onUpdated} />
           ))}
         </>
       )}
@@ -441,6 +493,7 @@ function WorkOrderDetailContent() {
   const workOrderId = searchParams.get("id") ?? "";
   const [wo, setWo] = useState<WorkOrder | null>(null);
   const [catalog, setCatalog] = useState<Part[]>([]);
+  const [mechanics, setMechanics] = useState<Mechanic[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -449,6 +502,13 @@ function WorkOrderDetailContent() {
   const load = () => workOrdersApi.get(workOrderId).then(setWo).finally(() => setLoading(false));
   useEffect(() => { if (workOrderId) load(); }, [workOrderId]);
   useEffect(() => { partsApi.list().then(setCatalog); }, []);
+  // Fetched once at this level, not per-StageCard — every stage on
+  // this WO shares the same roster, so this avoids N duplicate calls
+  // for N stage cards. Includes inactive mechanics deliberately: an
+  // already-assigned stage referencing a since-deactivated mechanic
+  // must still show their real name, not silently disappear from
+  // the picker's own source data.
+  useEffect(() => { mechanicsApi.list().then(setMechanics); }, []);
 
   const advanceStatus = async (status: "IN_PROGRESS" | "QC") => {
     setBusy(true); setError(null);
@@ -516,16 +576,27 @@ function WorkOrderDetailContent() {
       </p>
 
       {wo.work_started_at && (
-        <p style={{ color: "var(--workshop)", fontSize: 13, marginBottom: 20, display: "flex", alignItems: "center", gap: 6 }}>
+        <p style={{ color: "var(--workshop)", fontSize: 13, marginBottom: wo.is_overdue ? 8 : 20, display: "flex", alignItems: "center", gap: 6 }}>
           <Check size={13} />
           Mulai dikerjakan: <span className="mono">{formatDateTimeWithClock(wo.work_started_at)}</span>
         </p>
       )}
 
+      {/* Made's own literal example: an oil change + brake pads
+          taking more than 2 hours. Whole-WorkOrder version of the
+          same signal shown per-stage in StageCard below — a routine
+          job has no stages at all, so it needs this at the WO level
+          too, not only inside stage cards. */}
+      {wo.is_overdue && (
+        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "8px 12px", borderRadius: 5, fontSize: 13, marginBottom: 20, display: "flex", alignItems: "center", gap: 6 }}>
+          <AlertTriangle size={13} /> Pekerjaan ini sudah berjalan lebih lama dari perkiraan.
+        </div>
+      )}
+
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
       <IntakeCard wo={wo} onUpdated={load} />
-      <StagesSection wo={wo} onUpdated={load} />
+      <StagesSection wo={wo} mechanics={mechanics} onUpdated={load} />
       <JobLinesSection wo={wo} onUpdated={load} />
       <MaterialLinesSection wo={wo} catalog={catalog} onUpdated={load} />
 
