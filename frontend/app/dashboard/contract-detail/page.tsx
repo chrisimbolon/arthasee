@@ -20,7 +20,7 @@ import {
 } from "@/lib/api/contracts";
 import { formatDateID } from "@/lib/format";
 import {
-  AlertTriangle, ArrowLeft, Car, History, Loader2, UploadCloud, Wallet, X,
+  AlertTriangle, ArrowLeft, Car, Download, History, Loader2, UploadCloud, Wallet, X,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -146,6 +146,7 @@ function ContractDetailContent() {
   const [dragOver, setDragOver] = useState(false);
   const [realizingPeriod, setRealizingPeriod] = useState<TerminPeriod | null>(null);
   const [generatingTermin, setGeneratingTermin] = useState(false);
+  const [exportingTermin, setExportingTermin] = useState(false);
 
   const load = () => {
     Promise.all([contractsApi.get(contractId), contractImportsApi.list(contractId)])
@@ -193,6 +194,30 @@ function ContractDetailContent() {
       setTerminError("Gagal membuat data termin.");
     } finally {
       setGeneratingTermin(false);
+    }
+  };
+
+  // Deliberately not a plain <a href="..."> — this API authenticates
+  // with a bearer token in a header (see lib/api.ts's own request
+  // interceptor), which a normal browser link click has no way to
+  // attach at all. Fetching through the same axios instance (which
+  // already carries that token) as a real Blob, then triggering the
+  // download manually, is the correct pattern here — a plain link
+  // would silently 401 instead of downloading anything.
+  const handleExportTermin = async () => {
+    setExportingTermin(true); setTerminError(null);
+    try {
+      const blob = await contractsApi.exportTermin(contractId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Termin_${contract?.title ?? "Contract"}_${contract?.fiscal_year ?? ""}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setTerminError("Gagal mengunduh laporan termin.");
+    } finally {
+      setExportingTermin(false);
     }
   };
 
@@ -299,9 +324,17 @@ function ContractDetailContent() {
         </div>
       )}
 
-      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
-        <Wallet size={16} /> Termin Pembayaran
-      </h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h2 style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          <Wallet size={16} /> Termin Pembayaran
+        </h2>
+        {terminPeriods.length > 0 && (
+          <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleExportTermin} disabled={exportingTermin}>
+            {exportingTermin ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={13} />}
+            Export Laporan Termin
+          </button>
+        )}
+      </div>
       {terminError && (
         <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
           <AlertTriangle size={14} /> {terminError}
