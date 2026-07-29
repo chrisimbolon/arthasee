@@ -4,7 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Briefcase, Car, LayoutDashboard, LogOut, Package, Phone, Users } from "lucide-react";
+import { Briefcase, Car, LayoutDashboard, LogOut, Package, Phone, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -16,6 +16,7 @@ const NAV = [
   { href: "/dashboard/inventory", icon: Package,          label: "Inventaris" },
   { href: "/dashboard/leads",     icon: Phone,            label: "Leads" },
   { href: "/dashboard/contracts", icon: Briefcase,        label: "Kontrak" },
+  { href: "/dashboard/mechanics", icon: Wrench,           label: "Mekanik" },
 ];
 
 export default function Sidebar() {
