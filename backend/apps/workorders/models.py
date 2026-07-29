@@ -37,14 +37,77 @@ Design locked in with Chris/Made:
     phrasing ("...jika estimasi disetujui customer") — so a
     direct-entry Work Order with no Estimate origin never gets this
     field populated at all, by design, not by omission.
+  - work_started_at: Made's own request — "jam mulai dikerjakan,"
+    the exact clock time a car actually enters work, captured
+    automatically the moment SA marks a Work Order "Dikerjakan"
+    (IN_PROGRESS). Confirmed with Chris: only meaningful for Work
+    Orders that trace back to an approved Estimate — per Made's own
+    phrasing ("...jika estimasi disetujui customer") — so a
+    direct-entry Work Order with no Estimate origin never gets this
+    field populated at all, by design, not by omission.
+  - Mechanic / WorkOrderStage.assigned_to / is_overdue: the concrete
+    backend for Made's 28 Jul Owner Dashboard requirements. Mechanic
+    is deliberately NOT a login-capable user — mechanics still never
+    log into the system at all (confirmed fact, unchanged) — it's a
+    lightweight roster SA/Made maintains, existing purely so a
+    dashboard can answer "how many mechanics are actually working
+    right now" with a real, honest denominator instead of a
+    fabricated stat (the exact gap Made independently flagged in
+    Sansan's mockup: "kenapa mechanic hanya 3 yg kerja? 3 dari 6").
+    is_overdue on both WorkOrder and WorkOrderStage is Made's own
+    literal example — "ganti oli + kampas rem lebih dari 2 jam" —
+    computed on read from real timestamps already captured
+    elsewhere, never stored, same discipline as
+    Vehicle.is_due_for_service.
 """
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 from apps.core.models import TenantScopedModel
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from django.db import models, transaction
 from django.utils import timezone
+
+# Made's own literal example from the 28 Jul meeting — an oil change
+# + brake pads taking more than 2 hours. The one, shared default
+# threshold for a plain WorkOrder; WorkOrderStage gets its own
+# per-stage override below, since a genuinely heavy stage (body
+# repair, painting) legitimately takes far longer than routine work
+# and shouldn't false-alarm against the same generic number.
+DEFAULT_DURATION_ALERT_HOURS = 2
+
+
+class Mechanic(TenantScopedModel):
+    """
+    A real, lightweight roster entry — deliberately NOT a login-
+    capable user. Mechanics never log into the system (confirmed,
+    unchanged) — this exists purely so a dashboard can honestly
+    count "how many mechanics are currently working" against a real
+    total, rather than the fabricated "3/6" stat Made himself called
+    out as unsourced in Sansan's mockup.
+
+    No hard-delete path is exposed via the API on purpose (see
+    views.py) — a Mechanic who leaves the shop gets deactivated
+    (is_active=False), not deleted, specifically because
+    WorkOrderStage.assigned_to would otherwise SET_NULL every
+    historical stage they ever worked, silently erasing real "who
+    did this" history — the same Principle 2 reasoning already
+    applied to Customer/Vehicle deletion, just enforced by omission
+    here rather than a ProtectedError guard, since there's no FK
+    constraint to violate in the first place.
+    """
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name       = models.CharField(max_length=200, verbose_name="Nama Mekanik")
+    is_active  = models.BooleanField(default=True, verbose_name="Aktif")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Mechanic"
+        verbose_name_plural  = "Mechanics"
+        ordering             = ["name"]
+
+    def __str__(self):
+        return self.name
 
 
 class WorkOrderSequence(TenantScopedModel):
@@ -181,6 +244,22 @@ class WorkOrder(TenantScopedModel):
             return
         self.work_started_at = timezone.now()
 
+    @property
+    def is_overdue(self):
+        """
+        Made's own literal example: a job taking longer than expected
+        (his case — oil change + brake pads over 2 hours). Only
+        meaningful while genuinely IN_PROGRESS with a real
+        work_started_at on record — a WorkOrder still OPEN hasn't
+        started yet (nothing to be "overdue" against), and one that's
+        DONE/CANCELLED is finished, not overdue. Computed on read,
+        never stored — same discipline as Vehicle.is_due_for_service.
+        """
+        if self.status != "IN_PROGRESS" or self.work_started_at is None:
+            return False
+        elapsed_hours = (timezone.now() - self.work_started_at).total_seconds() / 3600
+        return elapsed_hours >= DEFAULT_DURATION_ALERT_HOURS
+
     def close(self, service_date=None, closed_by=None):
         """
         Freezes this WorkOrder into a real ServiceRecord. The entire
@@ -303,6 +382,25 @@ class WorkOrderStage(TenantScopedModel):
     work_order  = models.ForeignKey(WorkOrder, on_delete=models.CASCADE, related_name="stages", verbose_name="Work Order")
     name        = models.CharField(max_length=255, verbose_name="Nama Tahap")
     sequence    = models.PositiveIntegerField(verbose_name="Urutan")
+    # SET_NULL, not PROTECT/CASCADE — a Mechanic leaving the roster
+    # (deactivated, never hard-deleted — see Mechanic's own docstring)
+    # should never block or cascade-delete a real historical stage
+    # record. Optional: Made's own diagram showed real assignment,
+    # but nothing about starting/completing a stage requires one —
+    # same "trust human judgment, don't force data entry" philosophy
+    # as completing a stage never requiring all its job lines done.
+    assigned_to = models.ForeignKey(
+        Mechanic, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="stages", verbose_name="Dikerjakan Oleh",
+    )
+    # Nullable override of the module-level DEFAULT_DURATION_ALERT_HOURS
+    # — a genuinely heavy stage (body repair, painting) legitimately
+    # takes far longer than routine work and shouldn't false-alarm
+    # against the same generic 2-hour default a plain WorkOrder uses.
+    expected_duration_hours = models.DecimalField(
+        max_digits=4, decimal_places=1, null=True, blank=True,
+        verbose_name="Estimasi Durasi (Jam)",
+    )
     # First-time-wins, same pattern as WorkOrder.work_started_at —
     # see start()/complete() below.
     started_at   = models.DateTimeField(null=True, blank=True, verbose_name="Mulai")
@@ -367,6 +465,26 @@ class WorkOrderStage(TenantScopedModel):
         if self.completed_at is not None:
             return
         self.completed_at = timezone.now()
+
+    @property
+    def is_overdue(self):
+        """
+        Uses this stage's own expected_duration_hours if set,
+        otherwise falls back to the same DEFAULT_DURATION_ALERT_HOURS
+        a plain WorkOrder uses. Only meaningful while genuinely
+        in-progress (started, not yet completed) — a stage that
+        never started can't be overdue, and a completed one is done,
+        not overdue, regardless of how long it actually took.
+        """
+        if self.started_at is None or self.completed_at is not None:
+            return False
+        threshold = (
+            self.expected_duration_hours
+            if self.expected_duration_hours is not None
+            else DEFAULT_DURATION_ALERT_HOURS
+        )
+        elapsed_hours = (timezone.now() - self.started_at).total_seconds() / 3600
+        return elapsed_hours >= float(threshold)
 
 
 class WorkOrderJobLine(TenantScopedModel):

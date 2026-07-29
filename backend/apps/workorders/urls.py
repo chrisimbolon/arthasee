@@ -3,7 +3,8 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (WorkOrderCancelView, WorkOrderCloseView,
+from .views import (DashboardSummaryView, MechanicDetailView, MechanicListView,
+                    WorkOrderCancelView, WorkOrderCloseView,
                     WorkOrderDetailView, WorkOrderJobLineAssignStageView,
                     WorkOrderJobLineListView, WorkOrderJobLineToggleView,
                     WorkOrderListView, WorkOrderMaterialLineDetailView,
@@ -42,4 +43,12 @@ urlpatterns = [
          WorkOrderStageStartView.as_view(), name="work-order-stage-start"),
     path("work-orders/stages/<uuid:pk>/complete/",
          WorkOrderStageCompleteView.as_view(), name="work-order-stage-complete"),
+
+    # Made's own 28 Jul Owner Dashboard requirements — Mechanic is a
+    # lightweight roster (mechanics never log in, unchanged), and
+    # dashboard/summary/ aggregates across Mechanic/WorkOrder/
+    # WorkOrderStage in one call for a single dashboard screen.
+    path("mechanics/", MechanicListView.as_view(), name="mechanic-list"),
+    path("mechanics/<uuid:pk>/", MechanicDetailView.as_view(), name="mechanic-detail"),
+    path("dashboard/summary/", DashboardSummaryView.as_view(), name="dashboard-summary"),
 ]

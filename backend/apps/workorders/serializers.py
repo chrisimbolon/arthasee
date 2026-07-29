@@ -3,14 +3,21 @@
 # =============================================================================
 from rest_framework import serializers
 
-from .models import (WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine,
-                     WorkOrderStage)
+from .models import (Mechanic, WorkOrder, WorkOrderJobLine,
+                     WorkOrderMaterialLine, WorkOrderStage)
 
 
 def _user_org_ids(request):
     return request.user.memberships.filter(is_active=True).values_list(
         "organization_id", flat=True
     )
+
+
+class MechanicSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = Mechanic
+        fields = ["id", "name", "is_active", "created_at"]
+        read_only_fields = ["id", "created_at"]
 
 
 class WorkOrderJobLineSerializer(serializers.ModelSerializer):
@@ -70,16 +77,32 @@ class WorkOrderStageSerializer(serializers.ModelSerializer):
     # is purely a convenience so the frontend doesn't need to
     # cross-reference two separate lists by hand to render one
     # stage's card.
-    job_lines = WorkOrderJobLineSerializer(many=True, read_only=True)
+    job_lines      = WorkOrderJobLineSerializer(many=True, read_only=True)
+    assigned_to_name = serializers.CharField(source="assigned_to.name", read_only=True, default=None)
+    is_overdue     = serializers.BooleanField(read_only=True)
 
     class Meta:
         model  = WorkOrderStage
-        fields = ["id", "work_order", "name", "sequence", "started_at", "completed_at", "job_lines", "created_at"]
+        fields = [
+            "id", "work_order", "name", "sequence",
+            "assigned_to", "assigned_to_name", "expected_duration_hours",
+            "started_at", "completed_at", "is_overdue", "job_lines", "created_at",
+        ]
         # started_at/completed_at are deliberately read-only here —
         # they only ever move through start()/complete(), never a
         # direct field write, same discipline as WorkOrder.status
-        # never being settable through a plain PUT.
-        read_only_fields = ["id", "started_at", "completed_at", "job_lines", "created_at"]
+        # never being settable through a plain PUT. assigned_to and
+        # expected_duration_hours ARE writable — see
+        # WorkOrderStageDetailView.put()'s own allowed-fields list.
+        read_only_fields = ["id", "assigned_to_name", "started_at", "completed_at", "is_overdue", "job_lines", "created_at"]
+
+    def validate_assigned_to(self, mechanic):
+        request = self.context.get("request")
+        if mechanic is None or request is None or request.user.role == "super_admin":
+            return mechanic
+        if mechanic.organization_id not in _user_org_ids(request):
+            raise serializers.ValidationError("Mekanik tidak ditemukan.")
+        return mechanic
 
 
 class WorkOrderSerializer(serializers.ModelSerializer):
@@ -89,19 +112,20 @@ class WorkOrderSerializer(serializers.ModelSerializer):
     vehicle_plate    = serializers.CharField(source="vehicle.plate_number", read_only=True)
     customer_name    = serializers.CharField(source="vehicle.customer.name", read_only=True)
     created_by_name  = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+    is_overdue       = serializers.BooleanField(read_only=True)
 
     class Meta:
         model  = WorkOrder
         fields = [
             "id", "vehicle", "vehicle_plate", "customer_name",
             "number", "sequence_number", "status",
-            "odometer_km_intake", "received_by", "notes", "work_started_at",
+            "odometer_km_intake", "received_by", "notes", "work_started_at", "is_overdue",
             "service_record", "job_lines", "material_lines", "stages",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "vehicle_plate", "customer_name", "number", "sequence_number", "status",
-            "work_started_at", "service_record", "job_lines", "material_lines", "stages",
+            "work_started_at", "is_overdue", "service_record", "job_lines", "material_lines", "stages",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 

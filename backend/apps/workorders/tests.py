@@ -1,6 +1,7 @@
 # =============================================================================
 # === backend/apps/workorders/tests.py ===
 # =============================================================================
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import PropertyMock, patch
 
@@ -8,11 +9,12 @@ from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase, APITransactionTestCase
 
-from .models import (WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine,
-                     WorkOrderStage)
+from .models import (Mechanic, WorkOrder, WorkOrderJobLine,
+                     WorkOrderMaterialLine, WorkOrderStage)
 
 
 class WorkOrderAPITestBase(APITestCase):
@@ -697,3 +699,265 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         self.client.force_authenticate(user=other_owner)
         resp = self.client.get(f"/api/work-orders/stages/{stage.id}/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class WorkOrderIsOverdueTests(WorkOrderAPITestBase):
+    """
+    Made's own literal example from the 28 Jul meeting: an oil
+    change + brake pads taking more than 2 hours.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_open_work_order_is_never_overdue(self):
+        self.assertFalse(self.wo.is_overdue)
+
+    def test_in_progress_but_no_work_started_at_is_not_overdue(self):
+        """
+        A direct-entry WO (no Estimate origin) never gets
+        work_started_at populated at all, even once IN_PROGRESS —
+        can't be "overdue" against a duration that was never
+        captured in the first place.
+        """
+        self.wo.status = "IN_PROGRESS"
+        self.wo.save(update_fields=["status"])
+        self.assertFalse(self.wo.is_overdue)
+
+    def test_in_progress_recently_started_is_not_yet_overdue(self):
+        self.wo.status = "IN_PROGRESS"
+        self.wo.work_started_at = timezone.now() - timedelta(minutes=30)
+        self.wo.save(update_fields=["status", "work_started_at"])
+        self.assertFalse(self.wo.is_overdue)
+
+    def test_in_progress_past_threshold_is_overdue(self):
+        self.wo.status = "IN_PROGRESS"
+        self.wo.work_started_at = timezone.now() - timedelta(hours=3)
+        self.wo.save(update_fields=["status", "work_started_at"])
+        self.assertTrue(self.wo.is_overdue)
+
+    def test_done_work_order_is_never_overdue_even_after_a_long_time(self):
+        self.wo.status = "IN_PROGRESS"
+        self.wo.work_started_at = timezone.now() - timedelta(hours=10)
+        self.wo.status = "DONE"
+        self.wo.save(update_fields=["status", "work_started_at"])
+        self.assertFalse(self.wo.is_overdue)
+
+
+class WorkOrderStageIsOverdueTests(WorkOrderAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_not_started_is_not_overdue(self):
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Body Repair", sequence=1,
+        )
+        self.assertFalse(stage.is_overdue)
+
+    def test_uses_default_threshold_when_no_override_set(self):
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Body Repair", sequence=1,
+            started_at=timezone.now() - timedelta(hours=3),
+        )
+        self.assertTrue(stage.is_overdue)
+
+    def test_expected_duration_override_prevents_false_alarm_on_heavy_stage(self):
+        """
+        The actual reason expected_duration_hours exists: a genuinely
+        heavy stage (body repair) legitimately takes longer than the
+        generic 2-hour default without being a real problem.
+        """
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Body Repair", sequence=1,
+            started_at=timezone.now() - timedelta(hours=3),
+            expected_duration_hours=Decimal("8.0"),
+        )
+        self.assertFalse(stage.is_overdue)
+
+    def test_completed_stage_is_never_overdue(self):
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Body Repair", sequence=1,
+            started_at=timezone.now() - timedelta(hours=10),
+            completed_at=timezone.now(),
+        )
+        self.assertFalse(stage.is_overdue)
+
+
+class MechanicAPITests(WorkOrderAPITestBase):
+
+    def test_create_and_list_mechanic(self):
+        resp = self.client.post("/api/mechanics/", {"name": "Alex"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(resp.data["mechanic"]["is_active"])
+
+        listing = self.client.get("/api/mechanics/")
+        self.assertEqual(listing.data["count"], 1)
+
+    def test_deactivate_via_put_not_delete(self):
+        """
+        No DELETE endpoint exists for Mechanic at all, on purpose —
+        see the model's own docstring. Deactivation via this same PUT
+        is the only removal path.
+        """
+        mechanic = Mechanic.objects.create(organization=self.org, name="Wira")
+        resp = self.client.put(f"/api/mechanics/{mechanic.id}/", {"is_active": False}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        mechanic.refresh_from_db()
+        self.assertFalse(mechanic.is_active)
+
+    def test_no_delete_method_exists(self):
+        mechanic = Mechanic.objects.create(organization=self.org, name="Wira")
+        resp = self.client.delete(f"/api/mechanics/{mechanic.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class WorkOrderStageAssignmentTests(WorkOrderAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self.stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Body Repair", sequence=1,
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+
+    def test_assign_mechanic_via_put(self):
+        resp = self.client.put(
+            f"/api/work-orders/stages/{self.stage.id}/",
+            {"assigned_to": str(self.mechanic.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["stage"]["assigned_to_name"], "Alex")
+
+    def test_set_expected_duration_via_put(self):
+        resp = self.client.put(
+            f"/api/work-orders/stages/{self.stage.id}/",
+            {"expected_duration_hours": "8.0"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(resp.data["stage"]["expected_duration_hours"]), Decimal("8.0"))
+
+    def test_cannot_assign_mechanic_from_a_different_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Mekanik", invoice_code="BLM")
+        other_mechanic = Mechanic.objects.create(organization=other_org, name="Orang Asing")
+        resp = self.client.put(
+            f"/api/work-orders/stages/{self.stage.id}/",
+            {"assigned_to": str(other_mechanic.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_deactivating_a_mechanic_does_not_delete_historical_assignment(self):
+        self.stage.assigned_to = self.mechanic
+        self.stage.save(update_fields=["assigned_to"])
+        self.mechanic.is_active = False
+        self.mechanic.save(update_fields=["is_active"])
+
+        self.stage.refresh_from_db()
+        self.assertEqual(self.stage.assigned_to_id, self.mechanic.id)
+
+
+class DashboardSummaryTests(WorkOrderAPITestBase):
+    """
+    The real deliverable of this whole round — proves the aggregation
+    endpoint actually answers Made's four numbered requirements
+    correctly, not just that it returns 200.
+    """
+
+    def test_mechanics_active_and_working_counts(self):
+        Mechanic.objects.create(organization=self.org, name="Alex")
+        Mechanic.objects.create(organization=self.org, name="Samsut")
+        Mechanic.objects.create(organization=self.org, name="Yayu", is_active=False)
+        working_mechanic = Mechanic.objects.create(organization=self.org, name="Wira")
+
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Body Repair", sequence=1,
+            assigned_to=working_mechanic, started_at=timezone.now(),
+        )
+
+        resp = self.client.get("/api/dashboard/summary/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # 3 active (Alex, Samsut, Wira) — Yayu is inactive, excluded:
+        self.assertEqual(resp.data["mechanics"]["active"], 3)
+        self.assertEqual(resp.data["mechanics"]["working"], 1)
+
+    def test_working_mechanic_not_double_counted_across_parallel_stages(self):
+        """
+        The same mechanic assigned to two different in-progress
+        stages, even across different WorkOrders, must only count
+        once — exactly what .distinct() at the DB level exists to
+        guarantee.
+        """
+        mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        wo1 = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo2 = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo1, name="Body Repair", sequence=1,
+            assigned_to=mechanic, started_at=timezone.now(),
+        )
+        WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo2, name="Painting", sequence=1,
+            assigned_to=mechanic, started_at=timezone.now(),
+        )
+        resp = self.client.get("/api/dashboard/summary/")
+        self.assertEqual(resp.data["mechanics"]["working"], 1)
+
+    def test_queued_vs_in_progress_split(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)  # OPEN
+        wo2 = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo2.status = "IN_PROGRESS"
+        wo2.save(update_fields=["status"])
+
+        resp = self.client.get("/api/dashboard/summary/")
+        self.assertEqual(resp.data["work_orders"]["queued"], 1)
+        self.assertEqual(resp.data["work_orders"]["in_progress"], 1)
+
+    def test_vehicles_cleared_counts_only_done_work_orders_in_period(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo.close(closed_by=self.owner)
+
+        resp = self.client.get("/api/dashboard/summary/?period=today")
+        self.assertEqual(resp.data["vehicles_cleared"]["count"], 1)
+        self.assertEqual(resp.data["vehicles_cleared"]["period"], "today")
+
+    def test_overdue_work_orders_list_contains_the_real_overdue_one(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo.status = "IN_PROGRESS"
+        wo.work_started_at = timezone.now() - timedelta(hours=3)
+        wo.save(update_fields=["status", "work_started_at"])
+
+        not_overdue = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        not_overdue.status = "IN_PROGRESS"
+        not_overdue.work_started_at = timezone.now() - timedelta(minutes=10)
+        not_overdue.save(update_fields=["status", "work_started_at"])
+
+        resp = self.client.get("/api/dashboard/summary/")
+        overdue_ids = [item["id"] for item in resp.data["overdue"]["work_orders"]]
+        self.assertIn(str(wo.id), overdue_ids)
+        self.assertNotIn(str(not_overdue.id), overdue_ids)
+
+    def test_overdue_stages_list_respects_expected_duration_override(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Body Repair", sequence=1,
+            started_at=timezone.now() - timedelta(hours=3), expected_duration_hours=Decimal("8.0"),
+        )
+        WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Oli Mesin", sequence=2,
+            started_at=timezone.now() - timedelta(hours=3),
+        )
+
+        resp = self.client.get("/api/dashboard/summary/")
+        overdue_names = [item["name"] for item in resp.data["overdue"]["stages"]]
+        self.assertNotIn("Body Repair", overdue_names)  # covered by its own override
+        self.assertIn("Oli Mesin", overdue_names)        # falls back to the 2h default
+
+    def test_summary_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Dashboard", invoice_code="BLD")
+        Mechanic.objects.create(organization=other_org, name="Orang Asing")
+
+        resp = self.client.get("/api/dashboard/summary/")
+        self.assertEqual(resp.data["mechanics"]["active"], 0)

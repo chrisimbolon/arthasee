@@ -1,17 +1,19 @@
 # =============================================================================
 # === backend/apps/workorders/views.py ===
 # =============================================================================
-from datetime import date
+from datetime import date, timedelta
 
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import StockAdjustment
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
-from .models import (WorkOrder, WorkOrderJobLine, WorkOrderMaterialLine,
-                     WorkOrderStage)
-from .serializers import (WorkOrderJobLineSerializer, WorkOrderListSerializer,
+from .models import (Mechanic, WorkOrder, WorkOrderJobLine,
+                     WorkOrderMaterialLine, WorkOrderStage)
+from .serializers import (MechanicSerializer, WorkOrderJobLineSerializer,
+                          WorkOrderListSerializer,
                           WorkOrderMaterialLineSerializer, WorkOrderSerializer,
                           WorkOrderStageSerializer)
 
@@ -311,10 +313,16 @@ class WorkOrderStageListView(TenantScopedAPIView):
 class WorkOrderStageDetailView(TenantScopedAPIView):
     """
     GET/PUT/DELETE /api/work-orders/stages/<id>/
-    PUT only ever touches name/sequence — started_at/completed_at
-    move exclusively through the dedicated start/complete endpoints
-    below, same "a bare write must never hide a real side effect"
-    discipline as WorkOrderDetailView's own PUT.
+    PUT touches name/sequence/assigned_to/expected_duration_hours —
+    started_at/completed_at still move exclusively through the
+    dedicated start/complete endpoints below, same "a bare write
+    must never hide a real side effect" discipline as
+    WorkOrderDetailView's own PUT. assigned_to/expected_duration_hours
+    are deliberately NOT required to set a stage in motion — Made's
+    diagram showed real assignment, but nothing about starting or
+    completing a stage should force data entry that isn't there yet,
+    same "trust human judgment" reasoning as completing a stage never
+    requiring all its job lines to be checked off first.
     """
     model = WorkOrderStage
 
@@ -329,8 +337,11 @@ class WorkOrderStageDetailView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
                 status=status.HTTP_409_CONFLICT,
             )
-        allowed = {k: v for k, v in request.data.items() if k in ("name", "sequence")}
-        serializer = WorkOrderStageSerializer(stage, data=allowed, partial=True)
+        allowed = {
+            k: v for k, v in request.data.items()
+            if k in ("name", "sequence", "assigned_to", "expected_duration_hours")
+        }
+        serializer = WorkOrderStageSerializer(stage, data=allowed, partial=True, context={"request": request})
         if serializer.is_valid():
             serializer.save()
             return Response({"success": True, "stage": WorkOrderStageSerializer(stage).data})
@@ -476,3 +487,174 @@ class WorkOrderMaterialLineDetailView(TenantScopedAPIView):
             )
             line.delete()
         return Response({"success": True, "message": "Baris material dihapus, stok dikembalikan."})
+
+
+class MechanicListView(TenantScopedAPIView):
+    """GET/POST /api/mechanics/"""
+    model = Mechanic
+
+    def get(self, request):
+        mechanics = self.get_queryset().order_by("name")
+        serializer = MechanicSerializer(mechanics, many=True)
+        return Response({"success": True, "count": mechanics.count(), "results": serializer.data})
+
+    def post(self, request):
+        org = self._resolve_org(request)
+        if org is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = MechanicSerializer(data=request.data)
+        if serializer.is_valid():
+            mechanic = serializer.save(organization=org)
+            return Response(
+                {"success": True, "mechanic": MechanicSerializer(mechanic).data},
+                status=status.HTTP_201_CREATED,
+            )
+        return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    def _resolve_org(self, request):
+        membership = request.user.memberships.filter(is_active=True).first()
+        return membership.organization if membership else None
+
+
+class MechanicDetailView(TenantScopedAPIView):
+    """
+    GET/PUT /api/mechanics/<id>/
+    Deliberately no DELETE — see Mechanic's own docstring in
+    models.py. A mechanic who leaves the shop gets deactivated
+    (is_active=False via this same PUT), not deleted, specifically
+    because deleting would SET_NULL every historical
+    WorkOrderStage.assigned_to they ever worked, silently erasing
+    real "who did this" history.
+    """
+    model = Mechanic
+
+    def get(self, request, pk):
+        mechanic = self.get_object(pk)
+        return Response({"success": True, "mechanic": MechanicSerializer(mechanic).data})
+
+    def put(self, request, pk):
+        mechanic = self.get_object(pk)
+        serializer = MechanicSerializer(mechanic, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True, "mechanic": MechanicSerializer(mechanic).data})
+        return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class DashboardSummaryView(TenantScopedAPIView):
+    """
+    GET /api/dashboard/summary/?period=today|week|month|year
+
+    The concrete backend for all four of Made's numbered Owner
+    Dashboard requirements from the 28 Jul meeting, aggregated in one
+    call rather than four separate ones for a single screen. Most
+    directly answers his own diagnosis of the real problem:
+    "Masalah utama pd kontrol adalah pelacakan & pemeriksaan"
+    (the main problem with control is tracking & checking).
+
+    Deliberately does NOT use TenantScopedAPIView's usual
+    self.get_queryset() pattern (which scopes through a single
+    `model` attribute) — this view aggregates across three different
+    models (Mechanic, WorkOrder, WorkOrderStage) in one response, so
+    organization is resolved once, up front, the same explicit
+    pattern already used by CustomerListView.post() and
+    ContractImportUploadView, rather than forcing an artificial
+    single-model queryset to stand in for all three.
+    """
+    model = WorkOrder  # nominal only — see docstring; not used for
+    # get_queryset() here, just so TenantScopedAPIView's shared
+    # permission plumbing still applies to this view.
+
+    PERIOD_DAYS = {"today": 0, "week": 7, "month": 30, "year": 365}
+
+    def get(self, request):
+        org = self._resolve_org(request)
+        if org is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        period = request.query_params.get("period", "today")
+        if period not in self.PERIOD_DAYS:
+            period = "today"
+        since = self._period_start(period)
+
+        active_mechanics = Mechanic.objects.filter(organization=org, is_active=True)
+        # "Working right now" — a real mechanic currently assigned to
+        # a stage that's genuinely in progress (started, not yet
+        # completed). .distinct() at the DB level, not counted in
+        # Python — the same mechanic assigned to two parallel stages
+        # on different WorkOrders must only count once.
+        working_mechanic_ids = (
+            WorkOrderStage.objects
+            .filter(organization=org, started_at__isnull=False, completed_at__isnull=True, assigned_to__isnull=False)
+            .values_list("assigned_to_id", flat=True)
+            .distinct()
+        )
+
+        vehicles_cleared = WorkOrder.objects.filter(
+            organization=org, status="DONE", updated_at__gte=since,
+        ).count()
+        # updated_at is a safe, accurate "closed at" timestamp here —
+        # WorkOrder.close() sets status/service_record/updated_at
+        # together in its one save() call, and every write path
+        # elsewhere in this app gates on OPEN_STATUSES, so nothing
+        # ever touches a DONE WorkOrder again after that point.
+
+        queued = WorkOrder.objects.filter(organization=org, status="OPEN").count()
+        in_progress_qs = WorkOrder.objects.filter(organization=org, status="IN_PROGRESS").select_related("vehicle")
+        in_progress = in_progress_qs.count()
+
+        # is_overdue is a Python property, not a DB column — filtered
+        # here in Python, not the queryset, same reasoning already
+        # established for Vehicle.is_due_for_service: small,
+        # per-shop-scale lists (already filtered to IN_PROGRESS only
+        # above), simpler than duplicating threshold logic as a
+        # queryset annotation.
+        overdue_work_orders = [
+            {
+                "id": str(wo.id), "number": wo.number, "vehicle_plate": wo.vehicle.plate_number,
+                "work_started_at": wo.work_started_at, "hours_elapsed": self._hours_elapsed(wo.work_started_at),
+            }
+            for wo in in_progress_qs if wo.is_overdue
+        ]
+
+        stages_qs = (
+            WorkOrderStage.objects
+            .filter(organization=org, started_at__isnull=False, completed_at__isnull=True)
+            .select_related("work_order")
+        )
+        overdue_stages = [
+            {
+                "id": str(s.id), "name": s.name, "work_order_number": s.work_order.number,
+                "started_at": s.started_at, "hours_elapsed": self._hours_elapsed(s.started_at),
+            }
+            for s in stages_qs if s.is_overdue
+        ]
+
+        return Response({
+            "success": True,
+            "mechanics": {"active": active_mechanics.count(), "working": working_mechanic_ids.count()},
+            "vehicles_cleared": {"count": vehicles_cleared, "period": period},
+            "work_orders": {"queued": queued, "in_progress": in_progress},
+            "overdue": {"work_orders": overdue_work_orders, "stages": overdue_stages},
+        })
+
+    def _resolve_org(self, request):
+        membership = request.user.memberships.filter(is_active=True).first()
+        return membership.organization if membership else None
+
+    def _period_start(self, period):
+        days = self.PERIOD_DAYS[period]
+        if days == 0:
+            return timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return timezone.now() - timedelta(days=days)
+
+    def _hours_elapsed(self, started_at):
+        if started_at is None:
+            return None
+        return round((timezone.now() - started_at).total_seconds() / 3600, 1)
