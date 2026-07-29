@@ -29,6 +29,20 @@ export interface WorkOrderMaterialLine {
   created_at:         string;
 }
 
+// A real, lightweight roster entry — deliberately NOT a login-
+// capable user (mechanics still never log into the system at all).
+// Exists purely so a dashboard can honestly count "how many
+// mechanics are currently working" against a real total, rather
+// than a fabricated stat — Made's own words: "kenapa mechanic hanya
+// 3 yg kerja? 3 dari 6". No delete — see mechanicsApi.remove's own
+// absence below; deactivation via update() is the only removal path.
+export interface Mechanic {
+  id:         string;
+  name:       string;
+  is_active:  boolean;
+  created_at: string;
+}
+
 // Made's own request: a custom, per-repair breakdown of heavy jobs
 // (collision, overhaul) into named stages — body work, painting,
 // reassembly, etc. — each with its own start/complete clock time,
@@ -41,8 +55,22 @@ export interface WorkOrderStage {
   work_order:    string;
   name:          string;
   sequence:      number;
+  // Optional — nothing about starting/completing a stage requires
+  // an assignment, same "trust human judgment" philosophy as
+  // completing a stage never requiring all its job lines done.
+  assigned_to:      string | null;
+  assigned_to_name: string | null;
+  // Nullable override of the backend's shared default duration
+  // threshold — a genuinely heavy stage (body repair, painting)
+  // legitimately takes longer than routine work without being a
+  // real problem.
+  expected_duration_hours: string | null;
   started_at:    string | null;
   completed_at:  string | null;
+  // Made's own literal example: a job taking longer than expected.
+  // Computed on the backend, never stored — see is_overdue on
+  // WorkOrder below for the same pattern.
+  is_overdue:    boolean;
   // Only the job lines currently grouped under this specific stage —
   // a convenience view, not a separate source of truth from
   // WorkOrder.job_lines' own flat list.
@@ -69,6 +97,9 @@ export interface WorkOrder {
   // Made's own phrasing, this concept only applies to a Work Order
   // born from an approved Estimate.
   work_started_at:     string | null;
+  // Made's own literal example: an oil change + brake pads taking
+  // more than 2 hours. Computed on read, never stored.
+  is_overdue:          boolean;
   service_record:      string | null;
   job_lines:           WorkOrderJobLine[];
   material_lines:      WorkOrderMaterialLine[];
@@ -87,6 +118,25 @@ export interface WorkOrderIntakePayload {
   odometer_km_intake?: number;
   received_by?:        string;
   notes?:               string;
+}
+
+// The real backend for all four of Made's own numbered Owner
+// Dashboard requirements from the 28 Jul meeting — one aggregating
+// call for one dashboard screen, rather than four separate ones.
+export interface DashboardSummary {
+  mechanics: { active: number; working: number };
+  vehicles_cleared: { count: number; period: "today" | "week" | "month" | "year" };
+  work_orders: { queued: number; in_progress: number };
+  overdue: {
+    work_orders: Array<{
+      id: string; number: string; vehicle_plate: string;
+      work_started_at: string; hours_elapsed: number;
+    }>;
+    stages: Array<{
+      id: string; name: string; work_order_id: string; work_order_number: string;
+      started_at: string; hours_elapsed: number;
+    }>;
+  };
 }
 
 export const workOrdersApi = {
@@ -168,7 +218,10 @@ export const workOrderStagesApi = {
     const { data } = await api.post(`/api/work-orders/${workOrderId}/stages/`, { name });
     return data.stage;
   },
-  async update(id: string, payload: { name?: string; sequence?: number }): Promise<WorkOrderStage> {
+  async update(
+    id: string,
+    payload: { name?: string; sequence?: number; assigned_to?: string | null; expected_duration_hours?: string | null },
+  ): Promise<WorkOrderStage> {
     const { data } = await api.put(`/api/work-orders/stages/${id}/`, payload);
     return data.stage;
   },
@@ -184,5 +237,30 @@ export const workOrderStagesApi = {
   async complete(id: string): Promise<WorkOrderStage> {
     const { data } = await api.post(`/api/work-orders/stages/${id}/complete/`);
     return data.stage;
+  },
+};
+
+export const mechanicsApi = {
+  async list(): Promise<Mechanic[]> {
+    const { data } = await api.get("/api/mechanics/");
+    return data.results;
+  },
+  async create(name: string): Promise<Mechanic> {
+    const { data } = await api.post("/api/mechanics/", { name });
+    return data.mechanic;
+  },
+  // No remove() — deliberately. Deactivation (update with
+  // is_active: false) is the only removal path; see Mechanic's own
+  // docstring in the backend for why a hard delete is never exposed.
+  async update(id: string, payload: { name?: string; is_active?: boolean }): Promise<Mechanic> {
+    const { data } = await api.put(`/api/mechanics/${id}/`, payload);
+    return data.mechanic;
+  },
+};
+
+export const dashboardApi = {
+  async summary(period: "today" | "week" | "month" | "year" = "today"): Promise<DashboardSummary> {
+    const { data } = await api.get("/api/dashboard/summary/", { params: { period } });
+    return data;
   },
 };
