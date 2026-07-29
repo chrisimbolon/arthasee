@@ -142,8 +142,10 @@ function ContractDetailContent() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [terminError, setTerminError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [realizingPeriod, setRealizingPeriod] = useState<TerminPeriod | null>(null);
+  const [generatingTermin, setGeneratingTermin] = useState(false);
 
   const load = () => {
     Promise.all([contractsApi.get(contractId), contractImportsApi.list(contractId)])
@@ -176,6 +178,22 @@ function ContractDetailContent() {
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) handleFile(file);
+  };
+
+  // Retroactive backfill — see contractsApi.generateTermin's own
+  // comment for why this exists at all: any Contract created before
+  // the termin feature shipped (like this one, in real testing) has
+  // zero periods and no other way to get them.
+  const handleGenerateTermin = async () => {
+    setGeneratingTermin(true); setTerminError(null);
+    try {
+      await contractsApi.generateTermin(contractId);
+      load();
+    } catch {
+      setTerminError("Gagal membuat data termin.");
+    } finally {
+      setGeneratingTermin(false);
+    }
   };
 
   if (!contractId) {
@@ -284,9 +302,20 @@ function ContractDetailContent() {
       <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
         <Wallet size={16} /> Termin Pembayaran
       </h2>
+      {terminError && (
+        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <AlertTriangle size={14} /> {terminError}
+        </div>
+      )}
       {terminPeriods.length === 0 ? (
         <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5, marginBottom: 28 }}>
-          Belum ada data termin untuk contract ini.
+          <p style={{ marginBottom: 12 }}>Belum ada data termin untuk contract ini.</p>
+          {/* Only ever needed for a Contract that predates this
+              feature — every Contract created from now on already
+              gets its periods automatically at creation. */}
+          <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 14px" }} onClick={handleGenerateTermin} disabled={generatingTermin}>
+            {generatingTermin ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Buat Data Termin"}
+          </button>
         </div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 28 }}>
