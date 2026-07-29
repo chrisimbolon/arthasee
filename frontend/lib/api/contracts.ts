@@ -160,6 +160,17 @@ export const contractsApi = {
     const { data } = await api.post(`/api/contracts/${id}/generate-termin/`);
     return data.contract;
   },
+  // Made's own ask, 28 Jul meeting: export to Word/Excel for sending
+  // to institutions. Returns a real Blob, not JSON — the caller is
+  // responsible for triggering the actual browser download (see
+  // contract-detail/page.tsx's own handleExportTermin for why this
+  // can't just be a plain <a href> link: this API requires a bearer
+  // token in a header, which a normal link click has no way to
+  // attach).
+  async exportTermin(id: string): Promise<Blob> {
+    const { data } = await api.get(`/api/contracts/${id}/export-termin/`, { responseType: "blob" });
+    return data;
+  },
 };
 
 export const contractImportsApi = {
