@@ -20,7 +20,8 @@ import {
 } from "@/lib/api/contracts";
 import { formatDateID } from "@/lib/format";
 import {
-  AlertTriangle, ArrowLeft, Car, Download, History, Loader2, UploadCloud, Wallet, X,
+  AlertTriangle, ArrowLeft, Car, ChevronDown, ChevronRight, Download,
+  History, Loader2, UploadCloud, Wallet, X,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -147,6 +148,13 @@ function ContractDetailContent() {
   const [realizingPeriod, setRealizingPeriod] = useState<TerminPeriod | null>(null);
   const [generatingTermin, setGeneratingTermin] = useState(false);
   const [exportingTermin, setExportingTermin] = useState(false);
+  // Defaults to collapsed — Riwayat Import grows unbounded over a
+  // contract's life (every attempted upload, applied or rejected),
+  // and pushes the more actively-used sections (Termin Pembayaran,
+  // Kendaraan) further down the page as it grows. The heading still
+  // shows a real count either way, so nothing about "how many
+  // imports exist" is hidden, just the full list itself.
+  const [showImportHistory, setShowImportHistory] = useState(false);
 
   const load = () => {
     Promise.all([contractsApi.get(contractId), contractImportsApi.list(contractId)])
@@ -378,32 +386,42 @@ function ContractDetailContent() {
         </div>
       )}
 
-      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
-        <History size={16} /> Riwayat Import
-      </h2>
-      {imports.length === 0 ? (
-        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>
-          Belum ada riwayat import untuk contract ini.
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {imports.map((imp) => (
-            <Link
-              key={imp.id} href={`/dashboard/contract-import-review?id=${imp.id}`}
-              className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}
-            >
-              <div>
-                <div style={{ fontSize: 13.5 }}>{fileNameFromPath(imp.original_file)}</div>
-                <div style={{ fontSize: 12, color: "var(--steel)" }}>
-                  {formatDateTimeID(imp.uploaded_at)} · {imp.uploaded_by_name ?? "—"}
+      <button
+        onClick={() => setShowImportHistory((prev) => !prev)}
+        style={{
+          background: "none", border: "none", padding: 0, cursor: "pointer", width: "100%",
+          display: "flex", alignItems: "center", gap: 8, marginBottom: showImportHistory ? 14 : 0,
+        }}
+      >
+        <History size={16} />
+        <h2 style={{ fontSize: 17, fontWeight: 700 }}>Riwayat Import ({imports.length})</h2>
+        {showImportHistory ? <ChevronDown size={16} style={{ color: "var(--steel)" }} /> : <ChevronRight size={16} style={{ color: "var(--steel)" }} />}
+      </button>
+      {showImportHistory && (
+        imports.length === 0 ? (
+          <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>
+            Belum ada riwayat import untuk contract ini.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {imports.map((imp) => (
+              <Link
+                key={imp.id} href={`/dashboard/contract-import-review?id=${imp.id}`}
+                className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}
+              >
+                <div>
+                  <div style={{ fontSize: 13.5 }}>{fileNameFromPath(imp.original_file)}</div>
+                  <div style={{ fontSize: 12, color: "var(--steel)" }}>
+                    {formatDateTimeID(imp.uploaded_at)} · {imp.uploaded_by_name ?? "—"}
+                  </div>
                 </div>
-              </div>
-              <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: IMPORT_STATUS_COLOR[imp.status] }}>
-                {IMPORT_STATUS_LABEL[imp.status]}
-              </span>
-            </Link>
-          ))}
-        </div>
+                <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: IMPORT_STATUS_COLOR[imp.status] }}>
+                  {IMPORT_STATUS_LABEL[imp.status]}
+                </span>
+              </Link>
+            ))}
+          </div>
+        )
       )}
 
       {realizingPeriod && (
