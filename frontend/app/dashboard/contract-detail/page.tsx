@@ -15,10 +15,12 @@
 // actually confirms what changes before anything becomes live.
 // =============================================================================
 import {
-  Contract, ContractImport, contractImportsApi, contractsApi,
+  Contract, ContractImport, TerminPeriod,
+  contractImportsApi, contractsApi, terminPeriodsApi,
 } from "@/lib/api/contracts";
+import { formatDateID } from "@/lib/format";
 import {
-  AlertTriangle, ArrowLeft, Car, History, Loader2, UploadCloud,
+  AlertTriangle, ArrowLeft, Car, History, Loader2, UploadCloud, Wallet, X,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -53,6 +55,82 @@ function fileNameFromPath(path: string) {
   return parts[parts.length - 1] || path;
 }
 
+function TerminStatusBadge({ period }: { period: TerminPeriod }) {
+  if (period.is_realized) {
+    return (
+      <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: "#2e7d4f" }}>
+        Direalisasi
+      </span>
+    );
+  }
+  if (period.is_overdue) {
+    return (
+      <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: "var(--danger)" }}>
+        Jatuh Tempo
+      </span>
+    );
+  }
+  return (
+    <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "var(--ink-soft)", background: "var(--paper-3)", border: "1px solid var(--line)" }}>
+      Belum Jatuh Tempo
+    </span>
+  );
+}
+
+function RecordRealizationModal({ period, onClose, onRecorded }: {
+  period: TerminPeriod; onClose: () => void; onRecorded: (p: TerminPeriod) => void;
+}) {
+  // Pre-filled with amount_expected, not left blank — the real,
+  // current planning figure is almost always the right starting
+  // point; Made only needs to change it when the actual disbursement
+  // genuinely differs, which is the exact scenario amount_received
+  // being its own real field (not just a boolean) exists for.
+  const [amount, setAmount] = useState(period.amount_expected);
+  const [receivedDate, setReceivedDate] = useState(new Date().toISOString().slice(0, 10));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true); setError(null);
+    try {
+      const updated = await terminPeriodsApi.realize(period.id, amount, receivedDate);
+      onRecorded(updated);
+      onClose();
+    } catch {
+      setError("Gagal mencatat realisasi.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+      <div className="card" style={{ width: 380, background: "var(--paper-3)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Catat Realisasi Termin {period.sequence}</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", display: "flex" }}><X size={18} /></button>
+        </div>
+        {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 14 }}>
+            <label className="label">Nilai Realisasi (Rp)</label>
+            <input className="input" type="number" step="0.01" min="0" required value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <p style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 4 }}>Perkiraan: {money(period.amount_expected)}</p>
+          </div>
+          <div style={{ marginBottom: 20 }}>
+            <label className="label">Tanggal Diterima</label>
+            <input className="input" type="date" required value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} />
+          </div>
+          <button className="btn-rust" type="submit" disabled={saving} style={{ width: "100%", justifyContent: "center" }}>
+            {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function ContractDetailContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -65,6 +143,7 @@ function ContractDetailContent() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [realizingPeriod, setRealizingPeriod] = useState<TerminPeriod | null>(null);
 
   const load = () => {
     Promise.all([contractsApi.get(contractId), contractImportsApi.list(contractId)])
@@ -107,6 +186,7 @@ function ContractDetailContent() {
   }
 
   const vehicles = contract.contract_vehicles ?? [];
+  const terminPeriods = contract.termin_periods ?? [];
   const totalAllocated = vehicles.reduce((sum, v) => sum + Number(v.allocated_budget), 0);
   const lastImport = imports[0];
 
@@ -202,6 +282,41 @@ function ContractDetailContent() {
       )}
 
       <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+        <Wallet size={16} /> Termin Pembayaran
+      </h2>
+      {terminPeriods.length === 0 ? (
+        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5, marginBottom: 28 }}>
+          Belum ada data termin untuk contract ini.
+        </div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: 28 }}>
+          <table className="data-table">
+            <thead>
+              <tr><th>Termin</th><th>Jatuh Tempo</th><th>Perkiraan</th><th>Realisasi</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody>
+              {terminPeriods.map((p) => (
+                <tr key={p.id}>
+                  <td className="mono">#{p.sequence}</td>
+                  <td className="mono">{formatDateID(p.jatuh_tempo)}</td>
+                  <td className="mono">{money(p.amount_expected)}</td>
+                  <td className="mono">{p.amount_received != null ? money(p.amount_received) : "—"}</td>
+                  <td><TerminStatusBadge period={p} /></td>
+                  <td>
+                    {!p.is_realized && (
+                      <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }} onClick={() => setRealizingPeriod(p)}>
+                        Catat Realisasi
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
         <History size={16} /> Riwayat Import
       </h2>
       {imports.length === 0 ? (
@@ -227,6 +342,22 @@ function ContractDetailContent() {
             </Link>
           ))}
         </div>
+      )}
+
+      {realizingPeriod && (
+        <RecordRealizationModal
+          period={realizingPeriod}
+          onClose={() => setRealizingPeriod(null)}
+          // Reload rather than patch state in place — guarantees this
+          // stays consistent with the backend, and a realized period
+          // can also shift every OTHER unrealized period's own
+          // amount_expected... actually it can't (realizing doesn't
+          // trigger recalculation, only a new ContractImport apply()
+          // does) — but reload is still the simpler, equally correct
+          // choice here regardless, matching this page's own existing
+          // pattern of calling load() after every mutating action.
+          onRecorded={() => load()}
+        />
       )}
     </div>
   );
