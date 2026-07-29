@@ -32,6 +32,32 @@ export interface ContractVehicle {
   line_items:       ContractLineItem[];
 }
 
+// Made's own real, worked example from the 28 Jul meeting (the
+// Avanza 849 XXXI-28, tracked across real termin cycles). All
+// periods for a Contract are generated together, in full, at
+// creation — see Contract.generate_termin_periods() on the backend.
+//
+// jatuh_tempo is calculated once, at generation, from the Contract's
+// own start_date — never manually typed per period. amount_expected
+// is genuinely NOT frozen the same way — it live-recalculates every
+// time a ContractImport successfully applies (except for any period
+// already realized, which is permanently excluded). amount_received
+// is a real, separate field from amount_expected, not a boolean —
+// actual institutional disbursement can genuinely differ from what
+// was expected.
+export interface TerminPeriod {
+  id:              string;
+  contract:        string;
+  sequence:        number;
+  jatuh_tempo:     string;
+  amount_expected: string;
+  amount_received: string | null;
+  received_at:     string | null;
+  is_realized:     boolean;
+  is_overdue:      boolean;
+  created_at:      string;
+}
+
 export interface Contract {
   id:               string;
   customer:         string;
@@ -39,8 +65,14 @@ export interface Contract {
   title:            string;
   fiscal_year:      number;
   termin_count:     3 | 4;
+  // The anchor point termin due dates get calculated from —
+  // defaults to today on the backend if omitted at creation, but
+  // deliberately editable there: the day a contract gets entered
+  // into Arthasee isn't always its real authorized start.
+  start_date:       string;
   status:           ContractStatus;
   contract_vehicles?: ContractVehicle[];
+  termin_periods?:  TerminPeriod[];
   created_by:       string | null;
   created_by_name:  string | null;
   created_at:       string;
@@ -53,25 +85,12 @@ export interface DiffAddedVehicle {
   fleet_code:       string;
   vehicle_model:    string;
   allocated_budget: string;
-  // Set by the backend when a Vehicle with this exact plate_number
-  // already exists in the org — the real scenario ContractVehicle
-  // was built as its own join table for: the same fleet vehicle
-  // reappearing in a later fiscal year's contract. When set, this
-  // entry means "link the existing vehicle to this contract," not
-  // "create a new one" — manufacture_year/vehicle_type are neither
-  // needed nor used in that case, since the existing Vehicle's own
-  // fields are already real.
   existing_vehicle_id?:    string | null;
   existing_vehicle_model?: string | null;
   line_items: Array<{
     row_no: number; description: string; volume: string;
     unit: string; unit_price: string; subtotal: string;
   }>;
-  // Populated client-side during review, NOT present in the raw
-  // machine parse — the source document never provides this, but
-  // Vehicle.manufacture_year is required on the backend, so the
-  // reviewer must fill it in before this entry can be applied.
-  // Only relevant when existing_vehicle_id is absent.
   manufacture_year?: number;
   vehicle_type?:     string;
 }
@@ -107,8 +126,6 @@ export interface ContractImport {
   parsed_diff:      ParsedDiff;
   document_total:   string | null;
   computed_total:   string | null;
-  // null until both totals are known — see ContractImport.totals_match
-  // on the backend for the exact comparison (within Rp 1 tolerance).
   totals_match:     boolean | null;
   parse_error:      string;
   uploaded_by:      string | null;
@@ -129,7 +146,7 @@ export const contractsApi = {
     return data.contract;
   },
   async create(payload: {
-    customer: string; title: string; fiscal_year: number; termin_count: 3 | 4;
+    customer: string; title: string; fiscal_year: number; termin_count: 3 | 4; start_date?: string;
   }): Promise<Contract> {
     const { data } = await api.post("/api/contracts/", payload);
     return data.contract;
@@ -152,9 +169,6 @@ export const contractImportsApi = {
     } catch (err) {
       const response = (err as { response?: { data?: { message?: string; contract_import?: ContractImport } } })?.response;
       if (response?.data?.contract_import) {
-        // A parse failure still returns the ContractImport row (with
-        // parse_error populated) — surface both rather than throwing
-        // the detail away.
         return { success: false, contractImport: response.data.contract_import, message: response.data.message };
       }
       throw err;
@@ -176,5 +190,17 @@ export const contractImportsApi = {
   async reject(id: string): Promise<ContractImport> {
     const { data } = await api.post(`/api/contract-imports/${id}/reject/`);
     return data.contract_import;
+  },
+};
+
+export const terminPeriodsApi = {
+  // receivedDate optional — the backend defaults it to today, same
+  // pattern as WorkOrderCloseView's own optional service_date.
+  async realize(id: string, amountReceived: string, receivedDate?: string): Promise<TerminPeriod> {
+    const { data } = await api.post(`/api/termin-periods/${id}/realize/`, {
+      amount_received: amountReceived,
+      ...(receivedDate ? { received_at: receivedDate } : {}),
+    });
+    return data.termin_period;
   },
 };
