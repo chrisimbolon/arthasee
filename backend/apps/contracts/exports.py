@@ -30,6 +30,30 @@ STATUS_LABEL = {
     "PENDING":  "Belum Jatuh Tempo",
 }
 
+INDONESIAN_MONTHS = [
+    "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+    "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+]
+
+
+def _format_date_id(d):
+    """
+    Plain, dependency-free Indonesian date formatting — deliberately
+    NOT strftime("%B"), which depends on Python's OS-level locale
+    actually having "id_ID" installed on whatever server this runs
+    on. That's not guaranteed, and on a system without it, strftime
+    silently falls back to English month names rather than raising
+    an error — exactly the bug caught in a real exported file (see
+    the conversation this was fixed from: real dates coming back as
+    "29 October 2026" instead of "29 Oktober 2026"). Also
+    deliberately not Django's own format-localization system — untested
+    here, and this project has been careful throughout not to trust
+    a framework layer's behavior without verifying it directly. A
+    static lookup table costs nothing and can never silently produce
+    the wrong language.
+    """
+    return f"{d.day} {INDONESIAN_MONTHS[d.month - 1]} {d.year}"
+
 
 def _termin_status_label(period):
     if period.is_realized:
@@ -96,7 +120,7 @@ def build_termin_report_workbook(contract):
     row = table_header_row + 1
     for period in periods:
         ws.cell(row=row, column=1, value=period.sequence)
-        ws.cell(row=row, column=2, value=period.jatuh_tempo.strftime("%d %B %Y"))
+        ws.cell(row=row, column=2, value=_format_date_id(period.jatuh_tempo))
 
         expected_cell = ws.cell(row=row, column=3, value=period.amount_expected)
         expected_cell.number_format = rupiah_format
@@ -104,7 +128,7 @@ def build_termin_report_workbook(contract):
         received_cell = ws.cell(row=row, column=4, value=period.amount_received)
         received_cell.number_format = rupiah_format
 
-        ws.cell(row=row, column=5, value=period.received_at.strftime("%d %B %Y") if period.received_at else "—")
+        ws.cell(row=row, column=5, value=_format_date_id(period.received_at) if period.received_at else "—")
         ws.cell(row=row, column=6, value=_termin_status_label(period))
 
         for col_idx in range(1, 7):

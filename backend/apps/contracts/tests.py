@@ -811,6 +811,36 @@ class ContractExportTerminTests(ContractsAPITestBase):
         self.assertEqual(Decimal(str(ws.cell(row=9, column=4).value)), Decimal("5000000"))
         self.assertEqual(ws.cell(row=9, column=6).value, "Direalisasi")
 
+    def test_export_dates_render_in_indonesian_not_the_server_locale(self):
+        """
+        The exact bug caught in a real exported file: strftime("%B")
+        depends on the server's OS-level locale actually having
+        "id_ID" installed, which isn't guaranteed and silently falls
+        back to English rather than erroring when missing.
+
+        Sets explicit, known dates rather than trusting whatever
+        month generate_termin_periods()'s own "today + N months" math
+        happens to land on when this test actually runs — that would
+        make the assertion's correctness depend on which calendar
+        month the test suite executes in, exactly the kind of
+        environment-dependent assumption this project has been
+        careful to avoid throughout. Januari is used deliberately —
+        genuinely different from English "January," not a
+        coincidental overlap like "April."
+        """
+        first, second = self.contract.termin_periods.order_by("sequence")[:2]
+        first.jatuh_tempo = date(2026, 10, 29)
+        first.save(update_fields=["jatuh_tempo"])
+        second.jatuh_tempo = date(2027, 1, 29)
+        second.save(update_fields=["jatuh_tempo"])
+        second.record_realization(Decimal("1000000"), received_date=date(2027, 1, 29))
+
+        wb = self._get_workbook(self.contract.id)
+        ws = wb.active
+        self.assertIn("Oktober", ws.cell(row=9, column=2).value)
+        self.assertIn("Januari", ws.cell(row=10, column=2).value)
+        self.assertIn("Januari", ws.cell(row=10, column=5).value)
+
     def test_export_totals_row_sums_correctly(self):
         """
         Proves the totals aren't just re-displaying one period's
