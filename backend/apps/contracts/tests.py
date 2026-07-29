@@ -765,3 +765,80 @@ class TerminPeriodModelTests(ContractsAPITestBase):
         period.jatuh_tempo = date.today() + timedelta(days=30)
         period.save(update_fields=["jatuh_tempo"])
         self.assertFalse(period.is_overdue)
+
+
+class ContractExportTerminTests(ContractsAPITestBase):
+    """
+    Made's own ask, 28 Jul meeting: export to Word/Excel for sending
+    to institutions. Proves real cell values in the actual generated
+    file, not just that the endpoint returns 200 — same discipline
+    already proven on parsing.py's own read-side tests, applied here
+    to the write side.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.contract.generate_termin_periods()
+
+    def _get_workbook(self, contract_id):
+        resp = self.client.get(f"/api/contracts/{contract_id}/export-termin/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        # A plain HttpResponse, not StreamingHttpResponse — resp.content
+        # is always the full body here, no need to branch on it.
+        return openpyxl.load_workbook(io.BytesIO(resp.content))
+
+    def test_export_contains_real_contract_header_info(self):
+        wb = self._get_workbook(self.contract.id)
+        ws = wb.active
+        self.assertEqual(ws["B3"].value, self.institutional_customer.name)
+        self.assertEqual(ws["B4"].value, self.contract.title)
+        self.assertEqual(ws["B5"].value, self.contract.fiscal_year)
+
+    def test_export_contains_real_termin_row_values(self):
+        period = self.contract.termin_periods.first()
+        period.record_realization(Decimal("5000000.00"), received_date=date(2026, 3, 1))
+
+        wb = self._get_workbook(self.contract.id)
+        ws = wb.active
+        # Row 9 is the first data row — table header sits at row 8,
+        # per build_termin_report_workbook's own layout.
+        self.assertEqual(ws.cell(row=9, column=1).value, 1)
+        self.assertEqual(Decimal(str(ws.cell(row=9, column=3).value)), Decimal("0"))  # amount_expected, pre-import
+        self.assertEqual(Decimal(str(ws.cell(row=9, column=4).value)), Decimal("5000000"))
+        self.assertEqual(ws.cell(row=9, column=6).value, "Direalisasi")
+
+    def test_export_totals_row_sums_correctly(self):
+        """
+        Proves the totals aren't just re-displaying one period's
+        figures — genuinely summed across all of them, verified
+        against real Decimal arithmetic, not assumed correct.
+        """
+        periods = list(self.contract.termin_periods.order_by("sequence"))
+        periods[0].record_realization(Decimal("3000000"))
+        periods[1].record_realization(Decimal("2000000"))
+
+        wb = self._get_workbook(self.contract.id)
+        ws = wb.active
+        # 4 periods + header row (8) + 1 = totals lands on row 13.
+        total_received = Decimal(str(ws.cell(row=13, column=4).value))
+        self.assertEqual(total_received, Decimal("5000000"))
+
+    def test_export_filename_sanitizes_unsafe_characters(self):
+        """
+        The exact real-world case this project's own test data
+        already surfaces: a contract title containing a slash
+        ("...Kendaraan R4/R6") would otherwise land in a filename a
+        real filesystem could choke on.
+        """
+        contract = Contract.objects.create(
+            organization=self.org, customer=self.institutional_customer,
+            title="Pengadaan Pemeliharaan Kendaraan R4/R6", fiscal_year=2026, termin_count=4,
+        )
+        contract.generate_termin_periods()
+        resp = self.client.get(f"/api/contracts/{contract.id}/export-termin/")
+        disposition = resp["Content-Disposition"]
+        self.assertNotIn("/", disposition.split("filename=")[1])

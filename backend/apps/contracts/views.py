@@ -1,12 +1,15 @@
 # =============================================================================
 # === backend/apps/contracts/views.py ===
 # =============================================================================
+import io
 from decimal import Decimal, InvalidOperation
 
 from apps.core.views import TenantScopedAPIView
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.response import Response
 
+from .exports import build_termin_report_workbook
 from .models import Contract, ContractImport, TerminPeriod
 from .parsing import (ContractParseError, diff_against_contract,
                       parse_hps_workbook)
@@ -100,6 +103,45 @@ class ContractGenerateTerminView(TenantScopedAPIView):
             )
         contract.generate_termin_periods()
         return Response({"success": True, "contract": ContractSerializer(contract).data})
+
+
+class ContractExportTerminView(TenantScopedAPIView):
+    """
+    GET /api/contracts/<id>/export-termin/
+    Made's own ask, 28 Jul meeting: export to Word/Excel for sending
+    to institutions (Polresta, Polsek, etc). Excel chosen deliberately
+    over Word — openpyxl is already a proven dependency in this
+    project (parsing.py already reads real HPS files with it), so
+    this needed no new dependency at all.
+
+    Returns a raw HttpResponse, not a DRF Response — this is a real
+    file download, not JSON. DRF's APIView.finalize_response() passes
+    any HttpResponseBase subclass through mostly unchanged, so this
+    is the standard, correct pattern for a file-download endpoint on
+    an otherwise JSON-oriented API, not a workaround.
+    """
+    model = Contract
+
+    def get(self, request, pk):
+        contract = self.get_object(pk)
+        workbook = build_termin_report_workbook(contract)
+
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+
+        response = HttpResponse(
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        # Filename kept simple and filesystem-safe — contract.title
+        # is free text and could contain characters a real filesystem
+        # would choke on (slashes, most obviously, given real
+        # institutional titles like "Pengadaan Pemeliharaan Kendaraan
+        # R4/R6" seen in this project's own real test data).
+        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in contract.title)
+        response["Content-Disposition"] = f'attachment; filename="Termin_{safe_title}_{contract.fiscal_year}.xlsx"'
+        return response
 
 
 class ContractImportUploadView(TenantScopedAPIView):
