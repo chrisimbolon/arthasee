@@ -45,12 +45,29 @@ Design decisions locked in with Chris:
     changes — same "the downstream model needs zero changes" logic
     as every other promotion pattern here.
 """
+import calendar
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from apps.core.models import TenantScopedModel
 from django.db import models, transaction
 from django.utils import timezone
+
+
+def _add_months(base_date, months):
+    """
+    Plain stdlib month arithmetic — deliberately not a new dependency
+    (python-dateutil isn't already used anywhere in this project, and
+    this one calculation doesn't justify introducing it). Clamps the
+    day to the target month's real last day, so e.g. 31 Jan + 1 month
+    lands on 28/29 Feb, not an invalid date.
+    """
+    month_index = base_date.month - 1 + months
+    year = base_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(base_date.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 class Contract(TenantScopedModel):
@@ -84,6 +101,14 @@ class Contract(TenantScopedModel):
         choices=[(3, "3x per tahun (tiap 4 bulan)"), (4, "4x per tahun (tiap 3 bulan)")],
         verbose_name="Jumlah Termin",
     )
+    # New field — the anchor point termin due dates get calculated
+    # from. Defaults to today's date at creation, but deliberately
+    # editable: the real day Arya Motor enters a contract into
+    # Arthasee isn't always the contract's real, authorized start —
+    # relying on created_at (system entry time) as if it were the
+    # same thing would silently produce wrong due dates for any
+    # contract entered a few days late.
+    start_date = models.DateField(default=date.today, verbose_name="Tanggal Mulai")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="ACTIVE", verbose_name="Status")
 
     created_by = models.ForeignKey(
@@ -99,6 +124,140 @@ class Contract(TenantScopedModel):
 
     def __str__(self):
         return f"{self.title} — {self.customer.name} ({self.fiscal_year})"
+
+    def generate_termin_periods(self):
+        """
+        Confirmed with Chris: all termin slots get created upfront,
+        in full, the moment a Contract is created — not added one at
+        a time as they happen. Called explicitly from
+        ContractListView.post(), not from save() itself, matching
+        this project's own established pattern of keeping model
+        business logic and its trigger point separately visible
+        (WorkOrder doesn't auto-generate its own stages in save()
+        either).
+
+        interval_months uses 12 // termin_count — Made's own
+        confirmed numbers make this exact, not approximate: 4x/year
+        is every 3 months, 3x/year is every 4 months, both clean
+        integer divisions of 12.
+
+        amount_expected starts at 0 for every period — deliberately,
+        not left null. At the moment a Contract is created it has
+        zero ContractVehicles and therefore no real budget to split
+        yet (every vehicle/line item comes in exclusively through a
+        ContractImport upload, per this model's own docstring) — see
+        recalculate_unrealized_termin_amounts() below for where the
+        real figure actually gets filled in, once there's a real
+        budget to split.
+        """
+        interval_months = 12 // self.termin_count
+        TerminPeriod.objects.bulk_create([
+            TerminPeriod(
+                organization=self.organization, contract=self,
+                sequence=n, jatuh_tempo=_add_months(self.start_date, interval_months * n),
+                amount_expected=Decimal("0"),
+            )
+            for n in range(1, self.termin_count + 1)
+        ])
+
+    def recalculate_unrealized_termin_amounts(self):
+        """
+        Called from ContractImport.apply() every time an import
+        successfully applies — the contract's real total budget only
+        exists once vehicles/line items actually exist, and can
+        legitimately change again later (a contract amendment adding
+        vehicles via a revised import). This deliberately keeps
+        amount_expected live-recalculable, NOT a permanent snapshot —
+        different from Invoice/InvoiceLineItem's own "financial
+        values are frozen at creation, never a live read" discipline,
+        because this figure represents an evolving planning
+        expectation, not an issued financial document.
+
+        The one thing that IS frozen forever: any TerminPeriod
+        already realized (amount_received is not None) is explicitly
+        excluded from recalculation — a termin that's already been
+        paid must never have its own "expected" figure retroactively
+        rewritten after the fact, regardless of what the contract's
+        scope does later.
+        """
+        total_budget = sum(
+            (cv.allocated_budget for cv in self.contract_vehicles.all()), Decimal("0"),
+        )
+        unrealized = self.termin_periods.filter(amount_received__isnull=True)
+        count = unrealized.count()
+        if count == 0:
+            return
+        each_share = (total_budget / count).quantize(Decimal("0.01"))
+        for period in unrealized:
+            period.amount_expected = each_share
+            period.save(update_fields=["amount_expected"])
+
+
+class TerminPeriod(TenantScopedModel):
+    """
+    One disbursement period within an institutional Contract — the
+    concrete answer to Made's own real, worked example from the 28
+    Jul meeting (the Avanza 849 XXXI-28 termin tracking he showed
+    directly). All periods for a Contract are generated together, in
+    full, at Contract creation — see Contract.generate_termin_periods().
+
+    jatuh_tempo (due date) is calculated once, at generation time,
+    from Contract.start_date — confirmed with Chris: automatic, not
+    manually typed per period. amount_expected is genuinely NOT
+    frozen the same way — see Contract.recalculate_unrealized_termin_
+    amounts() for why it stays live-recalculable for any period not
+    yet realized.
+
+    amount_received is deliberately a real, separate field from
+    amount_expected, not a boolean — confirmed with Chris: actual
+    institutional disbursement can genuinely differ from what was
+    expected/invoiced, and that difference is real information worth
+    keeping, not collapsing into a single "were we paid, yes/no."
+    """
+    id              = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    contract        = models.ForeignKey(Contract, on_delete=models.CASCADE, related_name="termin_periods", verbose_name="Contract")
+    sequence        = models.PositiveSmallIntegerField(verbose_name="Termin Ke-")
+    jatuh_tempo     = models.DateField(verbose_name="Jatuh Tempo")
+    amount_expected = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0"), verbose_name="Perkiraan Nilai")
+    amount_received = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True, verbose_name="Nilai Realisasi")
+    received_at     = models.DateField(null=True, blank=True, verbose_name="Tanggal Realisasi")
+    created_at      = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Termin Period"
+        verbose_name_plural  = "Termin Periods"
+        ordering             = ["sequence"]
+        unique_together      = [("contract", "sequence")]
+
+    def __str__(self):
+        return f"Termin {self.sequence} — {self.contract.title}"
+
+    def _resolve_organization(self):
+        return self.contract.organization
+
+    @property
+    def is_realized(self):
+        return self.amount_received is not None
+
+    @property
+    def is_overdue(self):
+        """Jatuh tempo has passed with nothing received yet — an
+        already-realized period is never overdue, regardless of
+        whether it was paid before or after its own due date."""
+        if self.is_realized:
+            return False
+        return date.today() > self.jatuh_tempo
+
+    def record_realization(self, amount, received_date=None):
+        """
+        No caller currently has another field to save in the same
+        request (unlike WorkOrder.mark_started()/WorkOrderStage.
+        start()), so this saves directly rather than leaving that to
+        the caller — the simpler, equally correct choice here.
+        """
+        self.amount_received = amount
+        self.received_at = received_date or date.today()
+        self.save(update_fields=["amount_received", "received_at"])
 
 
 class ContractVehicle(TenantScopedModel):
@@ -414,6 +573,14 @@ class ContractImport(TenantScopedModel):
             self.applied_by = applied_by
             self.applied_at = timezone.now()
             self.save(update_fields=["status", "applied_by", "applied_at"])
+
+            # The contract's real total budget only exists once this
+            # apply() has actually run — see Contract.recalculate_
+            # unrealized_termin_amounts()'s own docstring for why
+            # this stays live-recalculable rather than a one-time
+            # snapshot, and why an already-realized period is
+            # excluded from it.
+            self.contract.recalculate_unrealized_termin_amounts()
 
     def reject(self):
         if self.status != "PENDING_REVIEW":

@@ -2,6 +2,7 @@
 # === backend/apps/contracts/tests.py ===
 # =============================================================================
 import io
+from datetime import date, timedelta
 from decimal import Decimal
 
 import openpyxl
@@ -11,7 +12,8 @@ from apps.service.models import Customer, Vehicle
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
-from .models import Contract, ContractImport, ContractLineItem, ContractVehicle
+from .models import (Contract, ContractImport, ContractLineItem,
+                     ContractVehicle, TerminPeriod)
 from .parsing import (ContractParseError, diff_against_contract,
                       parse_hps_workbook, parse_rupiah)
 
@@ -511,3 +513,228 @@ class ContractImportListTests(ContractsAPITestBase):
         import uuid as uuid_module
         resp = self.client.get(f"/api/contracts/{uuid_module.uuid4()}/imports/")
         self.assertEqual(resp.status_code, 404)
+
+
+class TerminPeriodGenerationTests(ContractsAPITestBase):
+    """
+    Made's own real termin-tracking example from the 28 Jul meeting
+    (the Avanza 849 XXXI-28). Uses the real creation API, not direct
+    ORM Contract.objects.create() — generate_termin_periods() is
+    triggered by ContractListView.post(), by design, not by
+    Contract.save() itself, so a test needs to go through the real
+    endpoint to prove this actually happens on real contract creation.
+    """
+
+    def test_creating_a_4x_contract_generates_four_periods(self):
+        resp = self.client.post("/api/contracts/", {
+            "customer": str(self.institutional_customer.id),
+            "title": "Pengadaan Tahun Baru", "fiscal_year": 2026,
+            "termin_count": 4, "start_date": "2026-01-15",
+        }, format="json")
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(resp.data["contract"]["termin_periods"]), 4)
+
+    def test_creating_a_3x_contract_generates_three_periods(self):
+        resp = self.client.post("/api/contracts/", {
+            "customer": str(self.institutional_customer.id),
+            "title": "Pengadaan Tahun Baru", "fiscal_year": 2026,
+            "termin_count": 3, "start_date": "2026-01-15",
+        }, format="json")
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(len(resp.data["contract"]["termin_periods"]), 3)
+
+    def test_4x_due_dates_are_every_3_months_from_start_date(self):
+        """Made's own confirmed numbers: 4x/year is every 3 months —
+        not approximate, an exact integer division of 12."""
+        resp = self.client.post("/api/contracts/", {
+            "customer": str(self.institutional_customer.id),
+            "title": "Pengadaan Tahun Baru", "fiscal_year": 2026,
+            "termin_count": 4, "start_date": "2026-01-15",
+        }, format="json")
+        due_dates = [p["jatuh_tempo"] for p in resp.data["contract"]["termin_periods"]]
+        self.assertEqual(due_dates, ["2026-04-15", "2026-07-15", "2026-10-15", "2027-01-15"])
+
+    def test_3x_due_dates_are_every_4_months_from_start_date(self):
+        resp = self.client.post("/api/contracts/", {
+            "customer": str(self.institutional_customer.id),
+            "title": "Pengadaan Tahun Baru", "fiscal_year": 2026,
+            "termin_count": 3, "start_date": "2026-01-15",
+        }, format="json")
+        due_dates = [p["jatuh_tempo"] for p in resp.data["contract"]["termin_periods"]]
+        self.assertEqual(due_dates, ["2026-05-15", "2026-09-15", "2027-01-15"])
+
+    def test_month_arithmetic_clamps_end_of_month_correctly(self):
+        """
+        31 Jan + 3 months should land on 30 Apr (not an invalid
+        '31 Apr'), and 31 Jan + 6 months should land on 31 Jul (a
+        real 31-day month) — proving the clamp only ever reduces the
+        day when the target month genuinely has fewer days, not
+        unconditionally.
+        """
+        resp = self.client.post("/api/contracts/", {
+            "customer": str(self.institutional_customer.id),
+            "title": "Pengadaan Akhir Bulan", "fiscal_year": 2026,
+            "termin_count": 4, "start_date": "2026-01-31",
+        }, format="json")
+        due_dates = [p["jatuh_tempo"] for p in resp.data["contract"]["termin_periods"]]
+        self.assertEqual(due_dates[0], "2026-04-30")
+        self.assertEqual(due_dates[1], "2026-07-31")
+
+    def test_amount_expected_starts_at_zero_before_any_import(self):
+        """
+        A brand-new Contract has zero ContractVehicles — there's no
+        real budget to split yet. See Contract.generate_termin_
+        periods()'s own docstring for why this is 0, not left null.
+        """
+        resp = self.client.post("/api/contracts/", {
+            "customer": str(self.institutional_customer.id),
+            "title": "Pengadaan Tahun Baru", "fiscal_year": 2026,
+            "termin_count": 4, "start_date": "2026-01-15",
+        }, format="json")
+        amounts = [p["amount_expected"] for p in resp.data["contract"]["termin_periods"]]
+        self.assertTrue(all(Decimal(a) == Decimal("0") for a in amounts))
+
+
+class TerminPeriodRecalculationTests(ContractsAPITestBase):
+    """
+    Proves the actual live-recalculation hook in ContractImport.
+    apply() — the real reason amount_expected is NOT frozen the same
+    way Invoice/InvoiceLineItem's own financial values are.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.contract.generate_termin_periods()
+
+    def _apply_a_vehicle(self, fleet_code, budget):
+        contract_import = ContractImport.objects.create(
+            organization=self.org, contract=self.contract,
+            original_file=f"contract_imports/{fleet_code}.xlsx", uploaded_by=self.owner,
+        )
+        confirmed_diff = {
+            "added_vehicles": [{
+                "fleet_code": fleet_code, "vehicle_model": "HYUNDAY TUCSON",
+                "manufacture_year": 2020, "vehicle_type": "Mobil",
+                "allocated_budget": budget,
+                "line_items": [
+                    {"row_no": 1, "description": "Oli Mesin", "volume": "15",
+                     "unit": "Liter", "unit_price": "200000", "subtotal": "3000000"},
+                ],
+            }],
+        }
+        contract_import.apply(confirmed_diff, applied_by=self.owner)
+
+    def test_amounts_split_evenly_across_all_unrealized_periods_after_apply(self):
+        self._apply_a_vehicle("9-XXXI", "20000000")
+        periods = list(self.contract.termin_periods.order_by("sequence"))
+        self.assertEqual(len(periods), 4)
+        for p in periods:
+            p.refresh_from_db()
+            self.assertEqual(p.amount_expected, Decimal("5000000.00"))
+
+    def test_recalculation_runs_again_on_a_second_apply_reflecting_new_total(self):
+        """The real reason this stays live-recalculable rather than a
+        one-time snapshot: a contract amendment adding more vehicles
+        via a second import should update the expectation, not leave
+        it stuck at the original figure."""
+        self._apply_a_vehicle("9-XXXI", "20000000")
+        self._apply_a_vehicle("921-XXXI", "20000000")
+        periods = list(self.contract.termin_periods.order_by("sequence"))
+        for p in periods:
+            p.refresh_from_db()
+            self.assertEqual(p.amount_expected, Decimal("10000000.00"))
+
+    def test_already_realized_period_is_excluded_from_recalculation(self):
+        """
+        The one thing that IS frozen forever: a termin already marked
+        received must never have its own expected figure rewritten
+        after the fact, regardless of what the contract's total
+        budget does later.
+        """
+        first_period = self.contract.termin_periods.order_by("sequence").first()
+        first_period.record_realization(Decimal("999999"), received_date=date(2026, 3, 1))
+
+        self._apply_a_vehicle("9-XXXI", "20000000")
+
+        first_period.refresh_from_db()
+        self.assertEqual(first_period.amount_expected, Decimal("0"))  # untouched
+        self.assertEqual(first_period.amount_received, Decimal("999999"))
+
+        other_periods = self.contract.termin_periods.exclude(id=first_period.id)
+        for p in other_periods:
+            p.refresh_from_db()
+            # Split across the 3 remaining unrealized periods, not 4:
+            self.assertEqual(p.amount_expected, Decimal("6666666.67"))
+
+
+class TerminPeriodRealizeAPITests(ContractsAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.contract.generate_termin_periods()
+        self.period = self.contract.termin_periods.order_by("sequence").first()
+
+    def test_realize_sets_amount_and_defaults_received_at_to_today(self):
+        resp = self.client.post(
+            f"/api/termin-periods/{self.period.id}/realize/",
+            {"amount_received": "5000000"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data["termin_period"]["is_realized"])
+        self.assertEqual(resp.data["termin_period"]["received_at"], date.today().isoformat())
+
+    def test_realize_accepts_an_explicit_received_date(self):
+        resp = self.client.post(
+            f"/api/termin-periods/{self.period.id}/realize/",
+            {"amount_received": "5000000", "received_at": "2026-03-15"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["termin_period"]["received_at"], "2026-03-15")
+
+    def test_realize_rejects_missing_amount(self):
+        resp = self.client.post(f"/api/termin-periods/{self.period.id}/realize/", {}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_realize_rejects_a_genuinely_invalid_amount_with_400_not_500(self):
+        """
+        The exact bug caught and fixed before shipping: Decimal("not-
+        a-number") raises decimal.InvalidOperation, which is neither
+        a ValueError nor a TypeError — an earlier version of this
+        view's except clause would have let this surface as an
+        unhandled 500 instead of a clean 400.
+        """
+        resp = self.client.post(
+            f"/api/termin-periods/{self.period.id}/realize/",
+            {"amount_received": "not-a-number"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+
+class TerminPeriodModelTests(ContractsAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.contract.generate_termin_periods()
+
+    def test_is_realized_false_until_recorded(self):
+        period = self.contract.termin_periods.first()
+        self.assertFalse(period.is_realized)
+
+    def test_is_overdue_true_when_due_date_passed_and_not_realized(self):
+        period = self.contract.termin_periods.first()
+        period.jatuh_tempo = date.today() - timedelta(days=1)
+        period.save(update_fields=["jatuh_tempo"])
+        self.assertTrue(period.is_overdue)
+
+    def test_is_overdue_false_once_realized_even_if_late(self):
+        period = self.contract.termin_periods.first()
+        period.jatuh_tempo = date.today() - timedelta(days=10)
+        period.save(update_fields=["jatuh_tempo"])
+        period.record_realization(Decimal("5000000"))
+        self.assertFalse(period.is_overdue)
+
+    def test_is_overdue_false_before_due_date(self):
+        period = self.contract.termin_periods.first()
+        period.jatuh_tempo = date.today() + timedelta(days=30)
+        period.save(update_fields=["jatuh_tempo"])
+        self.assertFalse(period.is_overdue)

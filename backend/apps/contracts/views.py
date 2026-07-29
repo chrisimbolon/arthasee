@@ -1,15 +1,17 @@
 # =============================================================================
 # === backend/apps/contracts/views.py ===
 # =============================================================================
+from decimal import Decimal, InvalidOperation
+
 from apps.core.views import TenantScopedAPIView
 from rest_framework import status
 from rest_framework.response import Response
 
-from .models import Contract, ContractImport
+from .models import Contract, ContractImport, TerminPeriod
 from .parsing import (ContractParseError, diff_against_contract,
                       parse_hps_workbook)
 from .serializers import (ContractImportSerializer, ContractListSerializer,
-                          ContractSerializer)
+                          ContractSerializer, TerminPeriodSerializer)
 
 
 class ContractListView(TenantScopedAPIView):
@@ -38,6 +40,12 @@ class ContractListView(TenantScopedAPIView):
         serializer = ContractSerializer(data=request.data, context={"request": request})
         if serializer.is_valid():
             contract = serializer.save(organization=org, created_by=request.user)
+            # Confirmed with Chris: all termin slots generated upfront,
+            # in full, the moment a Contract exists — not added one at
+            # a time as they happen. See Contract.generate_termin_
+            # periods()'s own docstring for why amount_expected starts
+            # at 0 here rather than a real figure.
+            contract.generate_termin_periods()
             return Response(
                 {"success": True, "contract": ContractSerializer(contract).data},
                 status=status.HTTP_201_CREATED,
@@ -202,3 +210,43 @@ class ContractImportRejectView(TenantScopedAPIView):
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_409_CONFLICT)
         return Response({"success": True, "contract_import": ContractImportSerializer(contract_import).data})
+
+
+class TerminPeriodRealizeView(TenantScopedAPIView):
+    """
+    POST /api/termin-periods/<id>/realize/
+    Body: {"amount_received": "12000000", "received_at": "2026-08-15"}
+    (received_at optional — defaults to today, same as
+    WorkOrderCloseView's own optional service_date pattern.)
+
+    The only write path onto amount_received/received_at at all —
+    TerminPeriodSerializer marks both read-only, same "this only
+    happens through its own explicit action" discipline already
+    proven by WorkOrderStage.start()/complete().
+    """
+    model = TerminPeriod
+
+    def post(self, request, pk):
+        period = self.get_object(pk)
+        raw_amount = request.data.get("amount_received")
+        if raw_amount in (None, ""):
+            return Response(
+                {"success": False, "message": "Nilai realisasi wajib diisi."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            # Converted explicitly, not left to save()'s own implicit
+            # coercion — Decimal("not-a-number") raises
+            # decimal.InvalidOperation, which is neither a ValueError
+            # nor a TypeError, and would otherwise surface as an
+            # unhandled 500 instead of a clean 400. Confirmed
+            # directly, not assumed, before writing this guard.
+            amount = Decimal(str(raw_amount))
+        except InvalidOperation:
+            return Response(
+                {"success": False, "message": "Nilai realisasi tidak valid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        received_at = request.data.get("received_at") or None
+        period.record_realization(amount, received_date=received_at)
+        return Response({"success": True, "termin_period": TerminPeriodSerializer(period).data})

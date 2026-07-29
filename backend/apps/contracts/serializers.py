@@ -3,13 +3,34 @@
 # =============================================================================
 from rest_framework import serializers
 
-from .models import Contract, ContractImport, ContractLineItem, ContractVehicle
+from .models import (Contract, ContractImport, ContractLineItem,
+                     ContractVehicle, TerminPeriod)
 
 
 def _user_org_ids(request):
     return request.user.memberships.filter(is_active=True).values_list(
         "organization_id", flat=True
     )
+
+
+class TerminPeriodSerializer(serializers.ModelSerializer):
+    is_realized = serializers.BooleanField(read_only=True)
+    is_overdue  = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model  = TerminPeriod
+        fields = [
+            "id", "contract", "sequence", "jatuh_tempo",
+            "amount_expected", "amount_received", "received_at",
+            "is_realized", "is_overdue", "created_at",
+        ]
+        # Entirely system-managed — generated in full at Contract
+        # creation, jatuh_tempo/amount_expected computed, never
+        # hand-typed. The only write path is the dedicated realize/
+        # endpoint (via record_realization()), same "this only
+        # happens through its own explicit action" discipline as
+        # WorkOrderStage.started_at/completed_at.
+        read_only_fields = fields
 
 
 class ContractLineItemSerializer(serializers.ModelSerializer):
@@ -48,17 +69,18 @@ class ContractVehicleSerializer(serializers.ModelSerializer):
 class ContractSerializer(serializers.ModelSerializer):
     customer_name    = serializers.CharField(source="customer.name", read_only=True)
     contract_vehicles = ContractVehicleSerializer(many=True, read_only=True)
+    termin_periods   = TerminPeriodSerializer(many=True, read_only=True)
     created_by_name  = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
 
     class Meta:
         model  = Contract
         fields = [
             "id", "customer", "customer_name", "title", "fiscal_year",
-            "termin_count", "status", "contract_vehicles",
+            "termin_count", "start_date", "status", "contract_vehicles", "termin_periods",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = [
-            "id", "customer_name", "contract_vehicles",
+            "id", "customer_name", "contract_vehicles", "termin_periods",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 
@@ -72,10 +94,11 @@ class ContractSerializer(serializers.ModelSerializer):
 
 
 class ContractListSerializer(ContractSerializer):
-    """Lighter version for list views — no nested vehicles/line items,
-    same reasoning as every other *ListSerializer in this codebase."""
+    """Lighter version for list views — no nested vehicles/line items/
+    termin periods, same reasoning as every other *ListSerializer in
+    this codebase."""
     class Meta(ContractSerializer.Meta):
-        fields = [f for f in ContractSerializer.Meta.fields if f != "contract_vehicles"]
+        fields = [f for f in ContractSerializer.Meta.fields if f not in ("contract_vehicles", "termin_periods")]
 
 
 class ContractImportSerializer(serializers.ModelSerializer):
