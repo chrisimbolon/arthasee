@@ -955,6 +955,24 @@ class DashboardSummaryTests(WorkOrderAPITestBase):
         self.assertNotIn("Body Repair", overdue_names)  # covered by its own override
         self.assertIn("Oli Mesin", overdue_names)        # falls back to the 2h default
 
+    def test_overdue_stage_exposes_the_real_work_order_id_not_just_its_number(self):
+        """
+        Caught before shipping, not after: an overdue stage entry
+        must carry the WorkOrder's real UUID, not only its human
+        number — without it, the frontend has no way to actually
+        link back to the real work order at all, and would silently
+        construct a broken link using the stage's own id instead.
+        """
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Body Repair", sequence=1,
+            started_at=timezone.now() - timedelta(hours=3),
+        )
+        resp = self.client.get("/api/dashboard/summary/")
+        entry = next(item for item in resp.data["overdue"]["stages"] if item["id"] == str(stage.id))
+        self.assertEqual(entry["work_order_id"], str(wo.id))
+        self.assertNotEqual(entry["work_order_id"], entry["id"])
+
     def test_summary_scoped_to_organization(self):
         other_org = Organization.objects.create(name="Bengkel Lain Dashboard", invoice_code="BLD")
         Mechanic.objects.create(organization=other_org, name="Orang Asing")

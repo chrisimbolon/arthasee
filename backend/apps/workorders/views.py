@@ -630,7 +630,8 @@ class DashboardSummaryView(TenantScopedAPIView):
         )
         overdue_stages = [
             {
-                "id": str(s.id), "name": s.name, "work_order_number": s.work_order.number,
+                "id": str(s.id), "name": s.name,
+                "work_order_id": str(s.work_order_id), "work_order_number": s.work_order.number,
                 "started_at": s.started_at, "hours_elapsed": self._hours_elapsed(s.started_at),
             }
             for s in stages_qs if s.is_overdue
