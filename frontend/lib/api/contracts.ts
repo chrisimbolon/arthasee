@@ -151,6 +151,15 @@ export const contractsApi = {
     const { data } = await api.post("/api/contracts/", payload);
     return data.contract;
   },
+  // Retroactive backfill for any Contract that predates the termin
+  // feature (created before generate_termin_periods() existed, or
+  // created directly some other way) — every Contract created
+  // through the normal create() call above already gets its periods
+  // automatically; this only exists for the ones that don't.
+  async generateTermin(id: string): Promise<Contract> {
+    const { data } = await api.post(`/api/contracts/${id}/generate-termin/`);
+    return data.contract;
+  },
 };
 
 export const contractImportsApi = {
