@@ -70,6 +70,38 @@ class ContractDetailView(TenantScopedAPIView):
         return Response({"success": True, "contract": ContractSerializer(contract).data})
 
 
+class ContractGenerateTerminView(TenantScopedAPIView):
+    """
+    POST /api/contracts/<id>/generate-termin/
+    Retroactive backfill, not a duplicate of what already happens
+    automatically at creation — real gap this closes: every Contract
+    created BEFORE this feature shipped has zero TerminPeriod rows,
+    since generate_termin_periods() only ever runs from
+    ContractListView.post() at the exact moment of creation, and has
+    no way to reach back and fix a Contract that already existed.
+    This is a genuine, permanent action, not a one-time script — the
+    same gap could recur (a Contract created some other way, a data
+    migration edge case), so this stays a real, repeatable endpoint
+    rather than a throwaway fix.
+
+    Rejects with 409 if the Contract already has periods —
+    generate_termin_periods() itself isn't safe to call twice
+    (would violate the (contract, sequence) unique constraint on the
+    second call), so this guard has to live here, not there.
+    """
+    model = Contract
+
+    def post(self, request, pk):
+        contract = self.get_object(pk)
+        if contract.termin_periods.exists():
+            return Response(
+                {"success": False, "message": "Contract ini sudah punya data termin."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        contract.generate_termin_periods()
+        return Response({"success": True, "contract": ContractSerializer(contract).data})
+
+
 class ContractImportUploadView(TenantScopedAPIView):
     """
     GET/POST /api/contracts/<contract_id>/imports/

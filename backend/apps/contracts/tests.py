@@ -595,6 +595,33 @@ class TerminPeriodGenerationTests(ContractsAPITestBase):
         self.assertTrue(all(Decimal(a) == Decimal("0") for a in amounts))
 
 
+class ContractGenerateTerminBackfillTests(ContractsAPITestBase):
+    """
+    The real gap this closes: self.contract (from the base fixture)
+    is created via direct ORM Contract.objects.create(), never
+    through ContractListView.post() — the exact same situation as
+    every real Contract that existed before this feature shipped.
+    Proven directly against Chris's own real screenshot: a genuine
+    pre-existing contract showing zero termin periods, with no way
+    to fix it until this endpoint existed.
+    """
+
+    def test_generates_periods_for_a_contract_that_predates_the_feature(self):
+        self.assertEqual(self.contract.termin_periods.count(), 0)
+        resp = self.client.post(f"/api/contracts/{self.contract.id}/generate-termin/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data["contract"]["termin_periods"]), 4)
+
+    def test_rejects_with_409_if_periods_already_exist(self):
+        """
+        generate_termin_periods() itself isn't safe to call twice —
+        this is the guard that actually prevents hitting that."""
+        self.contract.generate_termin_periods()
+        resp = self.client.post(f"/api/contracts/{self.contract.id}/generate-termin/")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.contract.termin_periods.count(), 4)  # unchanged, not duplicated
+
+
 class TerminPeriodRecalculationTests(ContractsAPITestBase):
     """
     Proves the actual live-recalculation hook in ContractImport.

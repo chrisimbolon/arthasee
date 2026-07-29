@@ -3,14 +3,15 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (ContractDetailView, ContractImportApplyView,
-                    ContractImportDetailView, ContractImportRejectView,
-                    ContractImportUploadView, ContractListView,
-                    TerminPeriodRealizeView)
+from .views import (ContractDetailView, ContractGenerateTerminView,
+                    ContractImportApplyView, ContractImportDetailView,
+                    ContractImportRejectView, ContractImportUploadView,
+                    ContractListView, TerminPeriodRealizeView)
 
 urlpatterns = [
     path("contracts/",                              ContractListView.as_view(),         name="contract-list"),
     path("contracts/<uuid:pk>/",                     ContractDetailView.as_view(),        name="contract-detail"),
+    path("contracts/<uuid:pk>/generate-termin/",     ContractGenerateTerminView.as_view(), name="contract-generate-termin"),
     path("contracts/<uuid:contract_id>/imports/",    ContractImportUploadView.as_view(),  name="contract-import-upload"),
     path("contract-imports/<uuid:pk>/",              ContractImportDetailView.as_view(),  name="contract-import-detail"),
     path("contract-imports/<uuid:pk>/apply/",        ContractImportApplyView.as_view(),   name="contract-import-apply"),
