@@ -15,8 +15,7 @@
 // app needs to: fill in gaps the source document itself can't
 // provide. Vehicle.manufacture_year is required on the backend, but
 // it appears nowhere in the real HPS document reviewed for this
-// project — so a brand-new vehicle in "added_vehicles" can't be
-// applied until a human types that in here.
+// project — so a brand-new vehicle in "added_vehicles" can't be applied until a human types that in here.
 // =============================================================================
 import {
   ContractImport, DiffAddedVehicle, ParsedDiff, contractImportsApi,
