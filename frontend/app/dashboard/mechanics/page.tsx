@@ -4,8 +4,7 @@
 // Made's own 28 Jul Owner Dashboard requirement — a real roster so
 // "mechanic headcount" stops being a fabricated number (the exact
 // gap Made himself flagged in Sansan's mockup: "kenapa mechanic
-// hanya 3 yg kerja? 3 dari 6"). Deliberately NOT login-capable —
-// mechanics still never log into the system at all.
+// hanya 3 yg kerja? 3 dari 6"). Deliberately NOT login-capable — mechanics still never log into the system at all.
 // =============================================================================
 import { Mechanic, mechanicsApi } from "@/lib/api/workorders";
 import { Loader2, Plus, Wrench, X } from "lucide-react";
