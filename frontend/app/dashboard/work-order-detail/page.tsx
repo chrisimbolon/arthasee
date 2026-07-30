@@ -290,8 +290,7 @@ function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics:
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Purely additive — a routine, single-visit repair never creates a
-  // stage at all, and this section renders nothing but a small,
+  // Purely additive — a routine, single-visit repair never creates a stage at all, and this section renders nothing but a small,
   // easy-to-ignore "+ Tambah Tahap" affordance in that case. Made's
   // own scoping: stages are for genuinely multi-phase jobs (heavy
   // collision/overhaul work), not something every job is expected to use.
