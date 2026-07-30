@@ -358,8 +358,7 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
   const [saving, setSaving] = useState(false);
 
   // Only the unstaged lines — anything grouped into a stage already
-  // renders inside its own StageCard above, and showing it twice
-  // here would be pure duplication, not a second, different view.
+  // renders inside its own StageCard above, and showing it twice here would be pure duplication, not a second, different view.
   const unstagedLines = wo.job_lines.filter((line) => !line.stage);
 
   const addLine = async () => {
