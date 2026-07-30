@@ -275,8 +275,7 @@ function EstimateDetailContent() {
   }, []);
 
   const handleApprove = async () => {
-    // A Rp 0 estimate is a legitimate edge case (e.g. testing, or a
-    // genuinely free courtesy check) but far more often it means
+    // A Rp 0 estimate is a legitimate edge case (e.g. testing, or a genuinely free courtesy check) but far more often it means
     // someone moving fast approved before actually filling in line
     // items — worth one honest pause before committing to it, same   reasoning as the material-line-deletion reason prompt.
 
