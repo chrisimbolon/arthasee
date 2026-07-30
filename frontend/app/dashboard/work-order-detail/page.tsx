@@ -439,8 +439,8 @@ function MaterialLinesSection({ wo, catalog, onUpdated }: { wo: WorkOrder; catal
   };
 
   const removeLine = async (lineId: string) => {
-    // Simple, honest prompt rather than silently defaulting — Made
-    // specifically described customer-cancelled parts (already
+    // Simple, honest prompt rather than silently defaulting — Made specifically described customer-cancelled parts (already
+    // 
     // installed, then removed mid-repair on a multi-day job) as a
     // real, recurring scenario distinct from a plain mistake.
     const customerCancelled = window.confirm(
