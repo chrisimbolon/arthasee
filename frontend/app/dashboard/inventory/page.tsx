@@ -4,8 +4,7 @@
 // New page, Sprint 1. Mirrors vehicles/page.tsx's structure
 // deliberately — same modal-for-create pattern, same table shape,
 // same className conventions (card, btn-rust, btn-ghost, input,
-// label, mono, pill) — so this doesn't read as a bolted-on page in
-// a different style.
+// label, mono, pill) — so this doesn't read as a bolted-on page in a different style.
 // =============================================================================
 import { Part, partsApi, StockAdjustment, stockAdjustmentsApi } from "@/lib/api/service";
 import { AlertTriangle, Loader2, Package, Plus, X } from "lucide-react";
