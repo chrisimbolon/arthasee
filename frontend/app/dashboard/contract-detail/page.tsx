@@ -2,8 +2,8 @@
 // =============================================================================
 // === frontend/app/dashboard/contract-detail/page.tsx ===
 // Same query-param + Suspense pattern as every other detail page in
-// this app — static export needs every route's HTML identical
-// regardless of ?id= value.
+// this app — static export needs every route's HTML identical regardless of ?id= value.
+// 
 //
 // This is the entry point into the whole contracts feature: shows a
 // Contract's current live state (its vehicles and their pre-
