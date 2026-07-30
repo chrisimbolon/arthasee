@@ -37,8 +37,7 @@ function money(v: string | number) {
 // LineItemsSection's own flat, interactive editing list below to
 // match this — that's the working, already-tested day-to-day
 // editing interface, and this print document is a new, additional
-// view built on top of the exact same underlying line_items, not a
-// replacement for how they get edited.
+// view built on top of the exact same underlying line_items, not a replacement for how they get edited.
 function QuotationLineTable({ title, items }: { title: string; items: Estimate["line_items"] }) {
   const total = items.reduce((sum, li) => sum + Number(li.subtotal), 0);
   return (
