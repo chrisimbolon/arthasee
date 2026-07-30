@@ -119,8 +119,7 @@ export default function ContractsPage() {
   }, []);
 
   const handleCreated = (contract: Contract) => {
-    // Straight into contract-detail — see file header comment for why
-    // this doesn't just close the modal and stay here.
+    // Straight into contract-detail — see file header comment for why this doesn't just close the modal and stay here.
     router.push(`/dashboard/contract-detail?id=${contract.id}`);
   };
 
