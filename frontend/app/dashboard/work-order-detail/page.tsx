@@ -503,8 +503,8 @@ function WorkOrderDetailContent() {
   // this WO shares the same roster, so this avoids N duplicate calls
   // for N stage cards. Includes inactive mechanics deliberately: an
   // already-assigned stage referencing a since-deactivated mechanic
-  // must still show their real name, not silently disappear from
-  // the picker's own source data.
+  // must still show their real name, not silently disappear from nthe picker's own source data.
+  
   useEffect(() => { mechanicsApi.list().then(setMechanics); }, []);
 
   const advanceStatus = async (status: "IN_PROGRESS" | "QC") => {
