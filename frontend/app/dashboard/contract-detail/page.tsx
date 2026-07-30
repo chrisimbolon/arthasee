@@ -208,8 +208,7 @@ function ContractDetailContent() {
   // interceptor), which a normal browser link click has no way to
   // attach at all. Fetching through the same axios instance (which
   // already carries that token) as a real Blob, then triggering the
-  // download manually, is the correct pattern here — a plain link
-  // would silently 401 instead of downloading anything.
+  // download manually, is the correct pattern here — a plain link would silently 401 instead of downloading anything.
   const handleExportTermin = async () => {
     setExportingTermin(true); setTerminError(null);
     try {
