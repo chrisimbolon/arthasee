@@ -25,6 +25,18 @@ export interface Invoice {
   year:                   number;
   customer_name_snapshot: string;
   license_plate_snapshot: string;
+  // Made's own explicit reason, confirmed 31 Jul: a specific
+  // mechanic must be identifiable on every invoice, even for
+  // routine work, so he can go back and question that person
+  // directly if the same car has an issue again. Frozen at
+  // invoice-creation time, same discipline as
+  // customer_name_snapshot/license_plate_snapshot — the Mechanic
+  // roster can change later without altering what an already-issued
+  // invoice says. The backend hard-blocks invoice creation entirely
+  // if the originating WorkOrder has no mechanic assigned, so this
+  // is never actually blank on a real invoice, though the type
+  // still allows it defensively.
+  mechanic_name_snapshot: string;
   status:                 InvoiceStatus;
   deposit_amount:         string;
   line_items:             InvoiceLineItem[];
