@@ -1,557 +1,622 @@
 "use client";
 // =============================================================================
-// === frontend/app/dashboard/estimate-detail/page.tsx ===
-// Same query-param pattern as vehicle-detail/work-order-detail —
-// static export needs every route's HTML identical regardless of
-// ?id= value, since real estimate UUIDs don't exist at build time.
+// === frontend/app/dashboard/vehicle-detail/page.tsx ===
+// Was app/dashboard/vehicles/[id]/page.tsx — moved from a dynamic
+// path segment to a query param specifically to support static
+// export. A dynamic route needs every possible URL known at build
+// time; real vehicle UUIDs only exist after a shop creates them, so
+// that's structurally impossible here. A query string doesn't have
+// that problem — the served HTML is identical regardless of ?id=
+// value, and the client-side JS reads it once loaded.
+//
+// RESTRUCTURED — confirmed with Made across several rounds of
+// follow-up calls:
+//   - "Catat Servis Baru" (the old free-text quick-entry form) is
+//     removed entirely. It used to exist as a competing pathway
+//     alongside "Buat Work Order", with nothing distinguishing when
+//     to use which — a real UX gap Sansan's review flagged directly.
+//     Work Order now genuinely covers everything that button used
+//     to (including backdating, via the optional service_date on
+//     close — see work-order-detail/page.tsx).
+//   - Riwayat Servis is now strictly read-only. "+ Gunakan Part dari
+//     Katalog" is gone from every entry, including pre-Work-Order
+//     legacy records — parts are only ever logged through an active
+//     Work Order now, never retroactively against a closed record.
+//   - The Work Order section defaults to active-only
+//     (OPEN/IN_PROGRESS/QC).
+//
+// SECOND ROUND — Sansan's remaining point, now resolved: a completed
+// WorkOrder used to still render as its own separate card behind a
+// history toggle in the Work Order section, disconnected from the
+// ServiceRecord it produced sitting in Riwayat Servis below — "two
+// disconnected sections" for one real job, exactly what he flagged.
+// Per PROJECT_STATE, WorkOrder and ServiceRecord stay two genuinely
+// separate models (deliberate, confirmed with Made) — so the fix is
+// a read-only link, not a data-model merge:
+//   - DONE WorkOrders are no longer shown in WorkOrdersSection at
+//     all — a done order's real, final form is the ServiceRecord it
+//     promoted into, which already has its own card below.
+//   - Every Riwayat Servis card now shows a small "WO #N" link
+//     (ServiceRecord.work_order_number) back to the WorkOrder that
+//     produced it, when one exists — one entry, one link, not two
+//     unrelated cards.
+//   - WorkOrdersSection's history toggle is now CANCELLED-only.
+//     Cancelled orders genuinely have nowhere else to live —
+//     WorkOrder.cancel() never creates a ServiceRecord, only
+//     close() does — so they'd vanish from view entirely if treated
+//     the same as DONE. They stay real, visible history, just in
+//     their own small section rather than implying they became a
+//     real visit.
 // =============================================================================
-import {
-  Estimate, EstimateLineKind, EstimateRejectionReason, estimateLineItemsApi, estimatesApi,
-} from "@/lib/api/estimates";
-import { organizationsApi } from "@/lib/api/organizations";
-import { Part, partsApi } from "@/lib/api/service";
-import { ArrowLeft, Download, Loader2, Plus, Printer, Trash2 } from "lucide-react";
+import { EstimateStatus, EstimateSummary, estimatesApi } from "@/lib/api/estimates";
+import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
+import { ServiceRecord, Vehicle, vehiclesApi } from "@/lib/api/service";
+import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
+import { formatDateID } from "@/lib/format";
+import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
-const STATUS_LABEL: Record<string, string> = {
-  PENDING: "Menunggu Persetujuan", APPROVED: "Disetujui", REJECTED: "Ditolak",
-};
-const STATUS_COLOR: Record<string, string> = {
-  PENDING: "var(--rust)", APPROVED: "#2e7d4f", REJECTED: "var(--danger)",
-};
-const REASON_LABEL: Record<string, string> = {
-  TOO_EXPENSIVE: "Harga Terlalu Mahal", WENT_ELSEWHERE: "Pilih Bengkel Lain",
-  POSTPONED: "Ditunda Dulu", NOT_NEEDED: "Diputuskan Tidak Perlu", OTHER: "Lainnya",
-};
-
-function money(v: string | number) {
-  return `Rp ${Number(v).toLocaleString("id-ID")}`;
+interface LaborLine {
+  key:         string;
+  description: string;
+  quantity:    string;
+  unit_price:  string;
 }
 
-// Made's own real, sketched structural input, 30 Jul follow-up
-// meeting: a real quotation document reads as two clearly separate
-// sections — Parts and Jasa (labor) — each with its own subtotal,
-// both rolling into one final total. Deliberately NOT restructuring
-// LineItemsSection's own flat, interactive editing list below to
-// match this — that's the working, already-tested day-to-day
-// editing interface, and this print document is a new, additional
-// view built on top of the exact same underlying line_items, not a
-// replacement for how they get edited.
-function QuotationLineTable({ title, items }: { title: string; items: Estimate["line_items"] }) {
-  const total = items.reduce((sum, li) => sum + Number(li.subtotal), 0);
+function PartUsageDisplay({ record }: { record: ServiceRecord }) {
+  if (record.part_usages.length === 0) return null;
   return (
-    <div style={{ marginBottom: 22 }}>
-      <h3 style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 10, textTransform: "uppercase", color: "var(--steel)" }}>
-        {title}
-      </h3>
-      <table className="data-table" style={{ width: "100%", marginBottom: 8 }}>
-        <thead>
-          <tr>
-            <th>Deskripsi</th>
-            <th style={{ textAlign: "right" }}>Jml</th>
-            <th style={{ textAlign: "right" }}>Harga Satuan</th>
-            <th style={{ textAlign: "right" }}>Subtotal</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.length === 0 ? (
-            <tr><td colSpan={4} style={{ textAlign: "center", padding: 14, color: "var(--steel)" }}>Belum ada item.</td></tr>
-          ) : items.map((li) => (
-            <tr key={li.id}>
-              <td>{li.description}</td>
-              <td className="mono" style={{ textAlign: "right" }}>{li.quantity}</td>
-              <td className="mono" style={{ textAlign: "right" }}>{money(li.unit_price)}</td>
-              <td className="mono" style={{ textAlign: "right" }}>{money(li.subtotal)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div style={{ display: "flex", justifyContent: "flex-end", fontSize: 13.5 }}>
-        <span style={{ color: "var(--steel)", marginRight: 10 }}>Total {title}</span>
-        <span className="mono" style={{ fontWeight: 600 }}>{money(total)}</span>
-      </div>
+    <div style={{ marginTop: record.parts_replaced ? 8 : 0, display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+      {record.part_usages.map((pu) => (
+        <div key={pu.id} className="mono" style={{ fontSize: 12.5, color: "var(--steel)", display: "flex", justifyContent: "space-between" }}>
+          <span>{pu.part_name} × {pu.quantity} {pu.unit}</span>
+          <span>@ Rp {Number(pu.unit_price_at_time).toLocaleString("id-ID")}</span>
+        </div>
+      ))}
     </div>
   );
 }
 
-function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName: string | null }) {
-  const partItems = estimate.line_items.filter((li) => li.kind === "part");
-  const laborItems = estimate.line_items.filter((li) => li.kind === "labor");
-
-  return (
-    <div className="card" style={{ maxWidth: 720, margin: "0 auto 20px", padding: 40 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
-        <div>
-          <div className="display" style={{ fontSize: 22 }}>{orgName || "Arthasee"}</div>
-          <div style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>QUOTATION / ESTIMASI</div>
-        </div>
-        <div style={{ textAlign: "right" }}>
-          <div className="mono" style={{ fontSize: 15, fontWeight: 700 }}>EST #{estimate.number}</div>
-          <div style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 4 }}>
-            {new Date(estimate.created_at).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" })}
-          </div>
-          <span style={{ display: "inline-block", marginTop: 8, fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: STATUS_COLOR[estimate.status] }}>
-            {STATUS_LABEL[estimate.status]}
-          </span>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid var(--line)" }}>
-        <div>
-          <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>Pelanggan</div>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>{estimate.customer_name}</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>Nomor Plat</div>
-          <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{estimate.vehicle_plate}</div>
-        </div>
-      </div>
-
-      {estimate.diagnosis_notes && (
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Catatan Diagnosa</div>
-          <p style={{ fontSize: 13.5 }}>{estimate.diagnosis_notes}</p>
-        </div>
-      )}
-
-      <QuotationLineTable title="Parts" items={partItems} />
-      <QuotationLineTable title="Jasa" items={laborItems} />
-
-      {/* estimate.total, not partsTotal + laborTotal recomputed here
-          — the API's own server-computed figure is the authoritative
-          source, same discipline as invoice-detail trusting
-          invoice.subtotal/balance_due directly rather than
-          recalculating client-side. */}
-      <div style={{ display: "flex", justifyContent: "flex-end", paddingTop: 14, borderTop: "1px solid var(--line)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", width: 260, fontSize: 17, fontWeight: 700 }}>
-          <span>Total</span>
-          <span className="mono">{money(estimate.total)}</span>
-        </div>
-      </div>
-
-      {estimate.created_by_name && (
-        <p style={{ fontSize: 12, color: "var(--steel)", marginTop: 32, textAlign: "right" }}>
-          Dibuat oleh {estimate.created_by_name}
-        </p>
-      )}
-    </div>
-  );
-}
-
-// Chris's own framing, 31 Jul: "estimasi is like a gate" — real
-// odometer capture belongs here, before any diagnosis/quote work.
-// Same editable-while-PENDING / read-only-otherwise pattern as
-// DiagnosisCard, kept as its own separate component rather than
-// merged into it — different concern, different validation rule.
-function OdometerCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: () => void }) {
-  const editable = estimate.status === "PENDING";
-  const [value, setValue] = useState(estimate.odometer_km_intake?.toString() ?? "");
+function CreateInvoiceModal({ record, onClose, onCreated }: {
+  record: ServiceRecord; onClose: () => void; onCreated: (invoiceId: string) => void;
+}) {
+  const [laborLines, setLaborLines] = useState<LaborLine[]>([
+    { key: crypto.randomUUID(), description: "", quantity: "1", unit_price: "" },
+  ]);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError]   = useState<string | null>(null);
 
-  const handleSave = async () => {
-    if (!value) return;
+  const addLine = () => setLaborLines((prev) => [...prev, { key: crypto.randomUUID(), description: "", quantity: "1", unit_price: "" }]);
+  const removeLine = (key: string) => setLaborLines((prev) => prev.filter((l) => l.key !== key));
+  const updateLine = (key: string, field: keyof Omit<LaborLine, "key">, value: string) =>
+    setLaborLines((prev) => prev.map((l) => (l.key === key ? { ...l, [field]: value } : l)));
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
     setSaving(true); setError(null);
+    const payload: LaborLinePayload[] = laborLines
+      .filter((l) => l.description && l.unit_price)
+      .map((l) => ({ description: l.description, quantity: Number(l.quantity) || 1, unit_price: Number(l.unit_price) }));
     try {
-      await estimatesApi.updateOdometer(estimate.id, Number(value));
-      onUpdated();
-    } catch (err) {
-      // Backend hard-block returns a real, specific message — surface
-      // it exactly, not a generic fallback, since the whole point is
-      // telling SA precisely why it was rejected.
-      const apiErrors = (err as { response?: { data?: { errors?: { odometer_km_intake?: string[] } } } })?.response?.data?.errors;
-      setError(apiErrors?.odometer_km_intake?.[0] ?? "Gagal menyimpan KM saat masuk.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="card" style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>KM Terakhir Service</div>
-          <div className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
-            {estimate.last_service_odometer_km != null ? `${estimate.last_service_odometer_km.toLocaleString("id-ID")} km` : "Belum ada riwayat"}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>KM Saat Masuk</div>
-          {editable ? (
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input className="input" type="number" min={0} style={{ width: 140 }} value={value} onChange={(e) => setValue(e.target.value)} />
-              <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleSave} disabled={saving}>
-                {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
-              </button>
-            </div>
-          ) : (
-            <div className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
-              {estimate.odometer_km_intake != null ? `${estimate.odometer_km_intake.toLocaleString("id-ID")} km` : "—"}
-            </div>
-          )}
-        </div>
-      </div>
-      {error && (
-        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginTop: 12 }}>
-          {error}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DiagnosisCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: () => void }) {
-  const editable = estimate.status === "PENDING";
-  const [notes, setNotes] = useState(estimate.diagnosis_notes);
-  const [saving, setSaving] = useState(false);
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await estimatesApi.updateNotes(estimate.id, notes);
-      onUpdated();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (!editable) {
-    return (
-      <div className="card" style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 8 }}>Catatan Diagnosa</div>
-        <p style={{ fontSize: 14 }}>{estimate.diagnosis_notes || "—"}</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="card" style={{ marginBottom: 20 }}>
-      <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 8 }}>Catatan Diagnosa</div>
-      <textarea className="input" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} style={{ marginBottom: 10 }} />
-      <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleSave} disabled={saving}>
-        {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
-      </button>
-    </div>
-  );
-}
-
-function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate; catalog: Part[]; onUpdated: () => void }) {
-  const editable = estimate.status === "PENDING";
-  const [kind, setKind] = useState<EstimateLineKind>("labor");
-  const [description, setDescription] = useState("");
-  const [partId, setPartId] = useState("");
-  const [quantity, setQuantity] = useState("1");
-  const [unitPrice, setUnitPrice] = useState("");
-  const [priceFocused, setPriceFocused] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  // Real gap caught in QA: selecting a Part previously only set
-  // partId — nothing ever read that part's own current price from
-  // the inventory catalog, so SA had to know and manually type it
-  // every time, completely disconnected from real inventory data.
-  // The field stays editable after auto-fill, not disabled — a
-  // genuine quoted price occasionally needs to differ from the
-  // current catalog price, same "real default, still overridable"
-  // pattern already used for RecordRealizationModal's own amount
-  // pre-fill.
-  //
-  // unitPrice itself always stays clean raw digits ("120000"), never
-  // a formatted display string — Part.unit_price can come back from
-  // the backend as "120000.00" (a real Decimal serialization, not a
-  // display value), so this rounds it to a plain integer string,
-  // matching the same "money() never shows Rupiah cents" convention
-  // already used everywhere else in this app.
-  const handlePartChange = (id: string) => {
-    setPartId(id);
-    const selected = catalog.find((p) => p.id === id);
-    setUnitPrice(selected ? String(Math.round(Number(selected.unit_price))) : "");
-  };
-
-  // Also clears a stale auto-filled price when switching away from
-  // Part — otherwise a Jasa entry could silently inherit whatever
-  // unrelated part's price was showing a moment ago.
-  const handleKindChange = (newKind: EstimateLineKind) => {
-    setKind(newKind);
-    setPartId(""); setDescription(""); setUnitPrice("");
-  };
-
-  const addLine = async () => {
-    if (kind === "labor" && (!description || !unitPrice)) return;
-    if (kind === "part" && (!partId || !unitPrice)) return;
-    setSaving(true);
-    try {
-      await estimateLineItemsApi.create(estimate.id, {
-        kind, description: kind === "part" ? (catalog.find((p) => p.id === partId)?.name ?? description) : description,
-        quantity: Number(quantity) || 1, unit_price: Number(unitPrice), part: kind === "part" ? partId : undefined,
-      });
-      setDescription(""); setPartId(""); setQuantity("1"); setUnitPrice("");
-      onUpdated();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const removeLine = async (id: string) => {
-    await estimateLineItemsApi.remove(id);
-    onUpdated();
-  };
-
-  return (
-    <div className="card" style={{ marginBottom: 20 }}>
-      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Item Estimasi</h3>
-      {estimate.line_items.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13.5, marginBottom: 12 }}>Belum ada item.</p>}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: editable ? 16 : 0 }}>
-        {estimate.line_items.map((li) => (
-          <div key={li.id} className="mono" style={{ fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>{li.description} × {li.quantity}</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              {money(li.subtotal)}
-              {editable && (
-                <button onClick={() => removeLine(li.id)} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}>
-                  <Trash2 size={14} />
-                </button>
-              )}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      {editable && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <select className="input" style={{ width: 90 }} value={kind} onChange={(e) => handleKindChange(e.target.value as EstimateLineKind)}>
-            <option value="labor">Jasa</option>
-            <option value="part">Part</option>
-          </select>
-          {kind === "part" ? (
-            <select className="input" style={{ flex: 1, minWidth: 160 }} value={partId} onChange={(e) => handlePartChange(e.target.value)}>
-              <option value="">— Pilih Part —</option>
-              {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.current_stock} {p.unit})</option>)}
-            </select>
-          ) : (
-            <input className="input" style={{ flex: 1, minWidth: 160 }} placeholder="Deskripsi jasa" value={description} onChange={(e) => setDescription(e.target.value)} />
-          )}
-          <input className="input" style={{ width: 60 }} type="number" min={1} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
-          <input
-            className="input" style={{ width: 120 }} type="text" inputMode="numeric" placeholder="Harga"
-            // Real, controllable formatting only — deliberately not
-            // type="number", whose display formatting is the
-            // browser's own OS-level locale behavior, outside the
-            // app's control (the exact odd "120000,00" rendering
-            // caught in QA). Shows plain raw digits while actively
-            // typing (avoids cursor-jump bugs that come with
-            // reformatting on every keystroke), then reformats with
-            // real thousands separators on blur — id-ID locale,
-            // period separator, no decimals, matching money()'s own
-            // convention used everywhere else in this app.
-            value={priceFocused || !unitPrice ? unitPrice : Number(unitPrice).toLocaleString("id-ID")}
-            onFocus={() => setPriceFocused(true)}
-            onBlur={() => setPriceFocused(false)}
-            onChange={(e) => setUnitPrice(e.target.value.replace(/[^0-9]/g, ""))}
-          />
-          <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={addLine} disabled={saving}>
-            <Plus size={13} /> Tambah
-          </button>
-        </div>
-      )}
-
-      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
-        <span style={{ fontSize: 15, fontWeight: 700 }}>Total: <span className="mono">{money(estimate.total)}</span></span>
-      </div>
-    </div>
-  );
-}
-
-function EstimateDetailContent() {
-  const searchParams = useSearchParams();
-  const estimateId = searchParams.get("id") ?? "";
-  const [estimate, setEstimate] = useState<Estimate | null>(null);
-  const [catalog, setCatalog] = useState<Part[]>([]);
-  const [orgName, setOrgName] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [downloadingPdf, setDownloadingPdf] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [rejectReason, setRejectReason] = useState<EstimateRejectionReason>("TOO_EXPENSIVE");
-  const [rejectNotes, setRejectNotes] = useState("");
-  const [rejecting, setRejecting] = useState(false);
-
-  const load = () => estimatesApi.get(estimateId).then(setEstimate).finally(() => setLoading(false));
-  useEffect(() => { if (estimateId) load(); }, [estimateId]);
-  useEffect(() => { partsApi.list().then(setCatalog); }, []);
-  useEffect(() => {
-    organizationsApi.mine().then((res) => { if (res) setOrgName(res.organization.name); });
-  }, []);
-
-  const handleApprove = async () => {
-    // A Rp 0 estimate is a legitimate edge case (e.g. testing, or a
-    // genuinely free courtesy check) but far more often it means
-    // someone moving fast approved before actually filling in line
-    // items — worth one honest pause before committing to it, same
-    // reasoning as the material-line-deletion reason prompt.
-    if (Number(estimate?.total ?? 0) === 0) {
-      const proceed = window.confirm("Estimasi ini belum punya item — lanjutkan?");
-      if (!proceed) return;
-    }
-    setBusy(true); setError(null);
-    try {
-      await estimatesApi.approve(estimateId);
-      load();
+      const invoice = await invoicesApi.create(record.id, payload);
+      onCreated(invoice.id);
     } catch (err) {
       const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
-      setError(apiMessage || "Gagal menyetujui estimasi.");
+      setError(apiMessage || "Gagal membuat invoice.");
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   };
 
-  const handleReject = async () => {
-    setBusy(true); setError(null);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, overflowY: "auto", padding: "40px 0" }}>
+      <div className="card" style={{ width: 560, background: "var(--paper-3)" }}>
+        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Buat Invoice</h2>
+        <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 16 }}>
+          {formatDateID(record.service_date)} — {record.issue_description.split("\n").filter((line) => line.trim() !== "").join(", ")}
+        </p>
+
+        {record.original_estimate_total && (
+          <div style={{ background: "var(--paper)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px 12px", marginBottom: 16, fontSize: 13 }}>
+            Awalnya diestimasi: <span className="mono" style={{ fontWeight: 600 }}>Rp {Number(record.original_estimate_total).toLocaleString("id-ID")}</span>
+            <span style={{ color: "var(--steel)" }}> — hanya referensi, pekerjaan bisa berubah selama perbaikan.</span>
+          </div>
+        )}
+
+        {record.part_usages.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div className="label" style={{ marginBottom: 6 }}>Part (dari catatan servis)</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {record.part_usages.map((pu) => (
+                <div key={pu.id} className="mono" style={{ fontSize: 13, display: "flex", justifyContent: "space-between", color: "var(--ink-soft)" }}>
+                  <span>{pu.part_name} × {pu.quantity} {pu.unit}</span>
+                  <span>Rp {(Number(pu.unit_price_at_time) * Number(pu.quantity)).toLocaleString("id-ID")}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
+
+        <form onSubmit={handleSubmit}>
+          <div className="label" style={{ marginBottom: 6 }}>Jasa</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+            {laborLines.map((line) => (
+              <div key={line.key} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input className="input" style={{ flex: 2 }} placeholder="Jasa Servis Rem" value={line.description} onChange={(e) => updateLine(line.key, "description", e.target.value)} />
+                <input className="input" style={{ width: 60 }} type="number" min={1} value={line.quantity} onChange={(e) => updateLine(line.key, "quantity", e.target.value)} />
+                <input className="input" style={{ flex: 1 }} type="number" min={0} placeholder="Harga" value={line.unit_price} onChange={(e) => updateLine(line.key, "unit_price", e.target.value)} />
+                <button type="button" onClick={() => removeLine(line.key)} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <button type="button" className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", marginBottom: 18 }} onClick={addLine}>
+            <Plus size={13} /> Tambah Jasa
+          </button>
+
+          <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 16 }}>
+            Invoice tidak bisa diedit setelah dibuat — periksa dulu sebelum menyimpan.
+          </p>
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="btn-rust" type="submit" disabled={saving}>
+              {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Buat Invoice"}
+            </button>
+            <button type="button" className="btn-ghost" onClick={onClose}>Batal</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+const WO_STATUS_LABEL: Record<WorkOrderStatus, string> = {
+  OPEN: "Terbuka", IN_PROGRESS: "Dikerjakan", QC: "Pemeriksaan Kualitas", DONE: "Selesai", CANCELLED: "Dibatalkan",
+};
+const WO_STATUS_COLOR: Record<WorkOrderStatus, string> = {
+  // Muted slate-blue, not var(--steel) — "Terbuka" was previously
+  // indistinguishable from ordinary muted text since it shared the
+  // exact same neutral gray. Deliberately kept lower-hierarchy than
+  // var(--rust) (the CTA color) — informational, not competing for
+  // attention with "Buat Estimasi"/"Buat Work Order".
+  OPEN: "#4a6d94", IN_PROGRESS: "var(--rust)", QC: "#b5860b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
+};
+const WO_OPEN_STATUSES: WorkOrderStatus[] = ["OPEN", "IN_PROGRESS", "QC"];
+
+function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
+  const router = useRouter();
+  const [orders, setOrders] = useState<WorkOrderSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const load = () => workOrdersApi.list(vehicleId).then(setOrders).finally(() => setLoading(false));
+  useEffect(() => { load(); }, [vehicleId]);
+
+  const createAndOpen = async () => {
+    setCreating(true);
     try {
-      await estimatesApi.reject(estimateId, rejectReason, rejectNotes);
-      setRejecting(false);
-      load();
-    } catch {
-      setError("Gagal menolak estimasi.");
+      const wo = await workOrdersApi.create(vehicleId);
+      router.push(`/dashboard/work-order-detail?id=${wo.id}`);
     } finally {
-      setBusy(false);
+      setCreating(false);
     }
   };
 
-  // Made's own urgent ask, 30 Jul follow-up: SA/cashier need a real
-  // PDF file so they can forward it themselves via their own
-  // WhatsApp — deliberately not automated sending, just a download.
-  // Not a plain <a href> — this API needs a bearer token in a
-  // header a normal link click can't attach, same reasoning already
-  // proven for the termin report's own export button.
-  const handleDownloadPdf = async () => {
-    setDownloadingPdf(true); setError(null);
+  // DONE orders are deliberately excluded here entirely, not just
+  // hidden behind the toggle — a completed order's real, final form
+  // is the ServiceRecord it promoted into via close(), which already
+  // renders below in Riwayat Servis with its own "WO #N" link back
+  // to this order. Showing it again here would be exactly the "two
+  // disconnected sections for one job" Sansan flagged.
+  const relevantOrders = orders.filter((wo) => wo.status !== "DONE");
+  const activeOrders    = relevantOrders.filter((wo) => WO_OPEN_STATUSES.includes(wo.status));
+  const cancelledOrders = relevantOrders.filter((wo) => wo.status === "CANCELLED");
+  // CANCELLED-only history, not "everything non-active" — a
+  // cancelled order genuinely has nowhere else to live (cancel()
+  // never creates a ServiceRecord, only close() does), so it stays
+  // real, visible history here rather than vanishing from the page.
+  const visibleOrders = showHistory ? relevantOrders : activeOrders;
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h2 style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          <ClipboardList size={16} /> Work Order
+        </h2>
+        <button className="btn-rust" onClick={createAndOpen} disabled={creating}>
+          {creating ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <><Plus size={16} /> Buat Work Order</>}
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ color: "var(--steel)", fontSize: 13.5 }}><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /></div>
+      ) : visibleOrders.length === 0 ? (
+        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>
+          {showHistory ? "Belum ada work order yang dibatalkan." : "Tidak ada work order aktif saat ini."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {visibleOrders.map((wo) => (
+            <Link key={wo.id} href={`/dashboard/work-order-detail?id=${wo.id}`} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
+              <span className="mono" style={{ fontSize: 13.5, fontWeight: 600 }}>WO #{wo.number}</span>
+              <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: WO_STATUS_COLOR[wo.status] }}>
+                {WO_STATUS_LABEL[wo.status]}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {cancelledOrders.length > 0 && (
+        <button
+          className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", marginTop: 10 }}
+          onClick={() => setShowHistory((v) => !v)}
+        >
+          {showHistory ? "Sembunyikan Riwayat Dibatalkan" : `Lihat Riwayat Dibatalkan (${cancelledOrders.length})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+const EST_STATUS_LABEL: Record<EstimateStatus, string> = {
+  PENDING: "Menunggu Persetujuan", APPROVED: "Disetujui", REJECTED: "Ditolak",
+};
+const EST_STATUS_COLOR: Record<EstimateStatus, string> = {
+  PENDING: "var(--rust)", APPROVED: "#2e7d4f", REJECTED: "var(--danger)",
+};
+
+function EstimatesSection({ vehicleId }: { vehicleId: string }) {
+  const router = useRouter();
+  const [estimates, setEstimates] = useState<EstimateSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const load = () => estimatesApi.list(vehicleId).then(setEstimates).finally(() => setLoading(false));
+  useEffect(() => { load(); }, [vehicleId]);
+
+  const createDraft = async () => {
+    setCreating(true);
     try {
-      const blob = await estimatesApi.downloadQuotationPdf(estimateId);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `Estimasi_${estimate?.number ?? estimateId}.pdf`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      setError("Gagal mengunduh PDF.");
+      const est = await estimatesApi.create(vehicleId);
+      router.push(`/dashboard/estimate-detail?id=${est.id}`);
     } finally {
-      setDownloadingPdf(false);
+      setCreating(false);
     }
   };
 
-  // Made's own urgent request: a real, downloadable PDF so SA/cashier
-  // can forward the quotation themselves via their own WhatsApp —
-  // deliberately not the automated WhatsApp integration, which is
-  // still on hold and unscoped separately. Same blob-download pattern
-  // already proven for the contracts termin export: fetch through
-  // the authenticated axios instance, trigger the browser download
-  // manually — a plain <a href> link would silently 401 instead,
-  // since this API needs a bearer token in a header a normal link
-  // click has no way to attach.
-  if (!estimateId) {
-    return <div style={{ color: "var(--danger)" }}>Estimasi tidak ditemukan — tidak ada ID yang diberikan.</div>;
-  }
-  if (loading || !estimate) {
-    return <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…</div>;
-  }
+  const pending = estimates.filter((e) => e.status === "PENDING");
+  const history = estimates.filter((e) => e.status !== "PENDING");
+  const visible = showHistory ? estimates : pending;
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <h2 style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          <FileSearch size={16} /> Estimasi
+        </h2>
+        <button className="btn-rust" onClick={createDraft} disabled={creating}>
+          {creating ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <><Plus size={16} /> Buat Estimasi</>}
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ color: "var(--steel)", fontSize: 13.5 }}><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /></div>
+      ) : visible.length === 0 ? (
+        <div className="card" style={{ textAlign: "center", color: "var(--steel)", padding: 24, fontSize: 13.5 }}>
+          {showHistory ? "Belum ada estimasi untuk kendaraan ini." : "Tidak ada estimasi yang menunggu persetujuan."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {visible.map((est) => (
+            <Link key={est.id} href={`/dashboard/estimate-detail?id=${est.id}`} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
+              <span className="mono" style={{ fontSize: 13.5, fontWeight: 600 }}>EST #{est.number}</span>
+              <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: EST_STATUS_COLOR[est.status] }}>
+                {EST_STATUS_LABEL[est.status]}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <button
+          className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", marginTop: 10 }}
+          onClick={() => setShowHistory((v) => !v)}
+        >
+          {showHistory ? "Sembunyikan Riwayat Estimasi" : `Lihat Riwayat Estimasi (${history.length})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+
+// ── Vehicle Timeline ──────────────────────────────────────────────
+// Sansan's "Digital Medical Record" mockup, built against what's
+// already real: work_order_number/invoice_id/invoice_total all trace
+// through existing reverse OneToOne relations, nothing new to
+// validate with Made here — this is a restyle plus one new backend
+// field (invoice_total), not a new data model.
+//
+// UpcomingServiceEntry is deliberately its own isolated component,
+// not inline logic — the explicit reason: KM stays the sole trigger
+// for the badge/color, by design (see the conversation that led
+// here). If date-based prediction ever gets added later, it only
+// ever appears as a second, clearly-labeled line inside THIS
+// component — nothing else in the timeline needs to change.
+
+function TimelineDot({ color, isLast, pulse }: { color: string; isLast: boolean; pulse?: boolean }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 24, flexShrink: 0 }}>
+      <div
+        style={{
+          width: 12, height: 12, borderRadius: "50%", background: color,
+          border: "2px solid var(--paper)", boxShadow: "0 0 0 1px var(--line)",
+          flexShrink: 0, marginTop: 4,
+          animation: pulse ? "timeline-pulse 1.8s ease-in-out infinite" : undefined,
+        }}
+      />
+      {!isLast && <div style={{ flex: 1, width: 2, background: "var(--line)", marginTop: 2, minHeight: 24 }} />}
+    </div>
+  );
+}
+
+function UpcomingServiceEntry({ vehicle, isLast }: { vehicle: Vehicle; isLast: boolean }) {
+  const due = vehicle.is_due_for_service;
+  const kmRemaining = vehicle.last_service_odometer_km != null
+    ? Math.max(0, (vehicle.last_service_odometer_km + 5000) - vehicle.current_odometer_km)
+    : null;
+
+  return (
+    <div style={{ display: "flex", gap: 12 }}>
+      <TimelineDot color={due ? "var(--rust)" : "var(--hazard)"} isLast={isLast} pulse={due} />
+      <div style={{ flex: 1, paddingBottom: 16 }}>
+        <div className="card" style={{ background: "var(--paper-3)", border: `1.5px dashed ${due ? "var(--rust)" : "var(--steel-lt)"}` }}>
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 4 }}>
+            Servis Berikutnya
+          </div>
+          {vehicle.last_service_odometer_km == null ? (
+            <p style={{ fontSize: 13.5, color: "var(--steel)" }}>Belum ada data servis untuk memperkirakan jadwal berikutnya.</p>
+          ) : due ? (
+            <p style={{ fontSize: 14, fontWeight: 600, color: "var(--rust)" }}>
+              Sudah waktunya servis — <span className="mono">{(vehicle.current_odometer_km - vehicle.last_service_odometer_km).toLocaleString("id-ID")} km</span> sejak servis terakhir.
+            </p>
+          ) : (
+            <p style={{ fontSize: 14 }}>
+              Sekitar <span className="mono" style={{ fontWeight: 600 }}>{kmRemaining?.toLocaleString("id-ID")} km</span> lagi (setiap 5.000 km).
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TimelineEntry({ record, isLast, onInvoice }: { record: ServiceRecord; isLast: boolean; onInvoice: (r: ServiceRecord) => void }) {
+  const dotColor = record.invoice_id ? "#2e7d4f" : "var(--steel-lt)";
+
+  return (
+    <div style={{ display: "flex", gap: 12 }}>
+      <TimelineDot color={dotColor} isLast={isLast} />
+      <div style={{ flex: 1, paddingBottom: 16 }}>
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{formatDateID(record.service_date)}</span>
+              {/* The actual fix for Sansan's "two disconnected
+                  sections" review: when this record came from a
+                  WorkOrder, link straight back to it here instead
+                  of it also showing up as its own separate card
+                  in the Work Order section above. One entry, one
+                  link — not two unrelated cards for the same job. */}
+              {record.work_order_number && (
+                <Link
+                  href={`/dashboard/work-order-detail?id=${record.work_order_id}`}
+                  className="btn-ghost"
+                  style={{ fontSize: 11, padding: "2px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
+                >
+                  <ClipboardList size={11} /> WO #{record.work_order_number}
+                </Link>
+              )}
+            </div>
+            <span className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{record.odometer_km.toLocaleString("id-ID")} km</span>
+          </div>
+          {/* issue_description joins multiple job lines with \n
+              (see WorkOrder.close()) — a plain <p> silently collapses
+              those into one run-on line in HTML, invisible with a
+              single job line but genuinely unreadable with several.
+              Splitting and rendering each as its own line here fixes
+              that without needing any backend change — the \n was
+              always there, this just stops discarding it. */}
+          {record.issue_description
+            .split("\n")
+            .filter((line) => line.trim() !== "")
+            .map((line, idx, arr) => (
+              <p
+                key={idx}
+                style={{
+                  fontSize: 14, margin: 0,
+                  marginBottom: idx < arr.length - 1 ? 3 : (record.parts_replaced ? 6 : 0),
+                }}
+              >
+                {line}
+              </p>
+            ))}
+          {record.parts_replaced && <p style={{ fontSize: 13, color: "var(--steel)" }}>Part diganti (catatan bebas): {record.parts_replaced}</p>}
+          {record.notes && <p style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>{record.notes}</p>}
+          <PartUsageDisplay record={record} />
+
+          <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            {record.invoice_id ? (
+              <Link href={`/dashboard/invoice-detail?id=${record.invoice_id}`} className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <Receipt size={13} /> Lihat Invoice
+              </Link>
+            ) : (
+              <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px" }} onClick={() => onInvoice(record)}>
+                <FileText size={13} /> Buat Invoice
+              </button>
+            )}
+            {record.invoice_total != null && (
+              <span className="mono" style={{ fontSize: 14, fontWeight: 600 }}>
+                Rp {Number(record.invoice_total).toLocaleString("id-ID")}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VehicleTimeline({ vehicle, onInvoice }: { vehicle: Vehicle; onInvoice: (r: ServiceRecord) => void }) {
+  const records = vehicle.service_records ?? [];
 
   return (
     <div>
-      {/* Print stylesheet — identical pattern to invoice-detail's own,
-          reused deliberately rather than reinvented: hides everything
-          outside the document itself (sidebar, back link, editing
-          tools, status controls) when actually printed/exported to
-          PDF via the browser. */}
       <style>{`
-        @media print {
-          .no-print { display: none !important; }
-          aside { display: none !important; }
-          body, main { margin: 0 !important; padding: 0 !important; }
-        }
+        @keyframes timeline-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
       `}</style>
-
-      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-        <Link href={`/dashboard/vehicle-detail?id=${estimate.vehicle}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)" }}>
-          <ArrowLeft size={14} /> Kembali ke Kendaraan
-        </Link>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn-ghost" onClick={handleDownloadPdf} disabled={downloadingPdf}>
-            {downloadingPdf ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={15} />}
-            Download PDF
-          </button>
-          <button className="btn-rust" onClick={() => window.print()}>
-            <Printer size={15} /> Cetak
-          </button>
+      <UpcomingServiceEntry vehicle={vehicle} isLast={records.length === 0} />
+      {records.length === 0 ? (
+        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ width: 24, flexShrink: 0 }} />
+          <div className="card" style={{ flex: 1, textAlign: "center", color: "var(--steel)", padding: 32 }}>
+            Belum ada riwayat servis untuk kendaraan ini.
+          </div>
         </div>
-      </div>
-
-      {error && <div className="no-print" style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
-
-      <PrintableQuotation estimate={estimate} orgName={orgName} />
-
-      <div className="no-print">
-        <OdometerCard estimate={estimate} onUpdated={load} />
-        <DiagnosisCard estimate={estimate} onUpdated={load} />
-        <LineItemsSection estimate={estimate} catalog={catalog} onUpdated={load} />
-
-        {estimate.status === "APPROVED" && estimate.work_order && (
-          <div className="card" style={{ textAlign: "center", padding: 24 }}>
-            <p style={{ fontSize: 14, marginBottom: 10 }}>Estimasi disetujui — work order telah dibuat.</p>
-            <Link href={`/dashboard/work-order-detail?id=${estimate.work_order}`} className="btn-rust" style={{ display: "inline-flex" }}>
-              Lihat Work Order
-            </Link>
-          </div>
-        )}
-
-        {estimate.status === "REJECTED" && (
-          <div className="card" style={{ padding: 20 }}>
-            <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 6 }}>Alasan Penolakan</div>
-            <p style={{ fontSize: 14, marginBottom: estimate.rejection_notes ? 6 : 0 }}>{REASON_LABEL[estimate.rejection_reason] ?? estimate.rejection_reason}</p>
-            {estimate.rejection_notes && <p style={{ fontSize: 13, color: "var(--steel)" }}>{estimate.rejection_notes}</p>}
-          </div>
-        )}
-
-        {estimate.status === "PENDING" && !rejecting && (
-          <div style={{ display: "flex", gap: 10 }}>
-            <button className="btn-rust" disabled={busy} onClick={handleApprove}>Setujui Estimasi</button>
-            <button className="btn-ghost" disabled={busy} onClick={() => setRejecting(true)}>Tolak</button>
-          </div>
-        )}
-
-        {estimate.status === "PENDING" && rejecting && (
-          <div className="card" style={{ padding: 20 }}>
-            <div style={{ marginBottom: 12 }}>
-              <label className="label">Alasan Penolakan</label>
-              <select className="input" value={rejectReason} onChange={(e) => setRejectReason(e.target.value as EstimateRejectionReason)}>
-                {Object.entries(REASON_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
-            </div>
-            <div style={{ marginBottom: 16 }}>
-              <label className="label">Catatan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
-              <input className="input" value={rejectNotes} onChange={(e) => setRejectNotes(e.target.value)} />
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <button className="btn-rust" disabled={busy} onClick={handleReject}>Konfirmasi Penolakan</button>
-              <button className="btn-ghost" disabled={busy} onClick={() => setRejecting(false)}>Batal</button>
-            </div>
-          </div>
-        )}
-      </div>
+      ) : (
+        records.map((r, idx) => (
+          <TimelineEntry key={r.id} record={r} isLast={idx === records.length - 1} onInvoice={onInvoice} />
+        ))
+      )}
     </div>
   );
 }
 
-export default function EstimateDetailPage() {
+function VehicleDetailContent() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const vehicleId = searchParams.get("id") ?? "";
+  const [vehicle, setVehicle] = useState<Vehicle | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [invoicingRecord, setInvoicingRecord] = useState<ServiceRecord | null>(null);
+
+  const load = () => vehiclesApi.get(vehicleId).then(setVehicle).finally(() => setLoading(false));
+  useEffect(() => {
+    if (vehicleId) load();
+  }, [vehicleId]);
+
+  if (!vehicleId) {
+    return <div style={{ color: "var(--danger)" }}>Kendaraan tidak ditemukan — tidak ada ID yang diberikan.</div>;
+  }
+
+  if (loading || !vehicle) {
+    return <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…</div>;
+  }
+
+  const stnkFields = [
+    { label: "Jenis/Model", value: vehicle.body_style },
+    { label: "Warna", value: vehicle.color },
+    { label: "No. Rangka", value: vehicle.chassis_number },
+    { label: "No. Mesin", value: vehicle.engine_number },
+    { label: "No. BPKB", value: vehicle.bpkb_number },
+  ].filter((f) => f.value);
+
+  return (
+    <div>
+      <Link href="/dashboard/vehicles" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)", marginBottom: 18 }}>
+        <ArrowLeft size={14} /> Kembali ke Kendaraan
+      </Link>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <div>
+          <span className="mono" style={{ fontSize: 26, fontWeight: 700, background: "var(--ink)", color: "var(--paper)", padding: "5px 12px", borderRadius: 5, display: "inline-block" }}>
+            {vehicle.plate_number}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {vehicle.is_due_for_service && (
+            <span className="pill due" style={{ fontSize: 13 }}><AlertTriangle size={13} /> Harus Segera Servis</span>
+          )}
+          {vehicle.is_registration_expiring_soon && (
+            <span className="pill due" style={{ fontSize: 13 }}><Calendar size={13} /> STNK Segera Habis</span>
+          )}
+        </div>
+      </div>
+
+      <p style={{ color: "var(--steel)", fontSize: 14, marginBottom: 24 }}>
+        {vehicle.model} · {vehicle.manufacture_year} · {vehicle.customer_name}
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 16 }}>
+        <div className="card">
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 6 }}>KM Sekarang</div>
+          <div className="mono" style={{ fontSize: 22, fontWeight: 600 }}>{vehicle.current_odometer_km.toLocaleString("id-ID")}</div>
+        </div>
+        <div className="card">
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 6 }}>Servis Terakhir</div>
+          <div className="mono" style={{ fontSize: 22, fontWeight: 600 }}>{formatDateID(vehicle.last_service_date)}</div>
+        </div>
+        <div className="card">
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 6 }}>STNK Berlaku Sampai</div>
+          <div className="mono" style={{ fontSize: 22, fontWeight: 600, color: vehicle.is_registration_expiring_soon ? "var(--danger)" : undefined }}>
+            {formatDateID(vehicle.registration_expiry)}
+          </div>
+        </div>
+      </div>
+
+      {stnkFields.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 10 }}>Detail STNK</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
+            {stnkFields.map((f) => (
+              <div key={f.label}>
+                <div style={{ fontSize: 11.5, color: "var(--steel)" }}>{f.label}</div>
+                <div className="mono" style={{ fontSize: 13.5 }}>{f.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <EstimatesSection vehicleId={vehicle.id} />
+      <WorkOrdersSection vehicleId={vehicle.id} />
+
+      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+        <Wrench size={16} /> Riwayat Servis
+      </h2>
+
+      <VehicleTimeline vehicle={vehicle} onInvoice={setInvoicingRecord} />
+
+      {invoicingRecord && (
+        <CreateInvoiceModal
+          record={invoicingRecord}
+          onClose={() => setInvoicingRecord(null)}
+          onCreated={(invoiceId) => router.push(`/dashboard/invoice-detail?id=${invoiceId}`)}
+        />
+      )}
+    </div>
+  );
+}
+
+// useSearchParams() requires a Suspense boundary on statically
+// exported/prerendered pages — without this, the build fails.
+export default function VehicleDetailPage() {
   return (
     <Suspense fallback={
       <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}>
         <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…
       </div>
     }>
-      <EstimateDetailContent />
+      <VehicleDetailContent />
     </Suspense>
   );
 }
