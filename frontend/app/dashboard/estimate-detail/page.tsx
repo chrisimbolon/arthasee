@@ -10,7 +10,7 @@ import {
 } from "@/lib/api/estimates";
 import { organizationsApi } from "@/lib/api/organizations";
 import { Part, partsApi } from "@/lib/api/service";
-import { ArrowLeft, Loader2, Plus, Printer, Trash2 } from "lucide-react";
+import { ArrowLeft, Download, Loader2, Plus, Printer, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -35,8 +35,10 @@ function money(v: string | number) {
 // sections — Parts and Jasa (labor) — each with its own subtotal,
 // both rolling into one final total. Deliberately NOT restructuring
 // LineItemsSection's own flat, interactive editing list below to
-// match this — that's the working, already-tested day-to-day editing interface, and this print document is a new, additional
-// view built on top of the exact same underlying line_items, not a replacement for how they get edited.
+// match this — that's the working, already-tested day-to-day
+// editing interface, and this print document is a new, additional
+// view built on top of the exact same underlying line_items, not a
+// replacement for how they get edited.
 function QuotationLineTable({ title, items }: { title: string; items: Estimate["line_items"] }) {
   const total = items.reduce((sum, li) => sum + Number(li.subtotal), 0);
   return (
@@ -259,6 +261,7 @@ function EstimateDetailContent() {
   const [catalog, setCatalog] = useState<Part[]>([]);
   const [orgName, setOrgName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState<EstimateRejectionReason>("TOO_EXPENSIVE");
@@ -273,10 +276,11 @@ function EstimateDetailContent() {
   }, []);
 
   const handleApprove = async () => {
-    // A Rp 0 estimate is a legitimate edge case (e.g. testing, or a genuinely free courtesy check) but far more often it means
+    // A Rp 0 estimate is a legitimate edge case (e.g. testing, or a
+    // genuinely free courtesy check) but far more often it means
     // someone moving fast approved before actually filling in line
-    // items — worth one honest pause before committing to it, same   reasoning as the material-line-deletion reason prompt.
-
+    // items — worth one honest pause before committing to it, same
+    // reasoning as the material-line-deletion reason prompt.
     if (Number(estimate?.total ?? 0) === 0) {
       const proceed = window.confirm("Estimasi ini belum punya item — lanjutkan?");
       if (!proceed) return;
@@ -306,6 +310,38 @@ function EstimateDetailContent() {
     }
   };
 
+  // Made's own urgent ask, 30 Jul follow-up: SA/cashier need a real
+  // PDF file so they can forward it themselves via their own
+  // WhatsApp — deliberately not automated sending, just a download.
+  // Not a plain <a href> — this API needs a bearer token in a
+  // header a normal link click can't attach, same reasoning already
+  // proven for the termin report's own export button.
+  const handleDownloadPdf = async () => {
+    setDownloadingPdf(true); setError(null);
+    try {
+      const blob = await estimatesApi.downloadQuotationPdf(estimateId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Estimasi_${estimate?.number ?? estimateId}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Gagal mengunduh PDF.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
+  // Made's own urgent request: a real, downloadable PDF so SA/cashier
+  // can forward the quotation themselves via their own WhatsApp —
+  // deliberately not the automated WhatsApp integration, which is
+  // still on hold and unscoped separately. Same blob-download pattern
+  // already proven for the contracts termin export: fetch through
+  // the authenticated axios instance, trigger the browser download
+  // manually — a plain <a href> link would silently 401 instead,
+  // since this API needs a bearer token in a header a normal link
+  // click has no way to attach.
   if (!estimateId) {
     return <div style={{ color: "var(--danger)" }}>Estimasi tidak ditemukan — tidak ada ID yang diberikan.</div>;
   }
@@ -332,9 +368,15 @@ function EstimateDetailContent() {
         <Link href={`/dashboard/vehicle-detail?id=${estimate.vehicle}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)" }}>
           <ArrowLeft size={14} /> Kembali ke Kendaraan
         </Link>
-        <button className="btn-rust" onClick={() => window.print()}>
-          <Printer size={15} /> Cetak
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn-ghost" onClick={handleDownloadPdf} disabled={downloadingPdf}>
+            {downloadingPdf ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={15} />}
+            Download PDF
+          </button>
+          <button className="btn-rust" onClick={() => window.print()}>
+            <Printer size={15} /> Cetak
+          </button>
+        </div>
       </div>
 
       {error && <div className="no-print" style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
