@@ -3,8 +3,8 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (DashboardSummaryView, MechanicDetailView, MechanicListView,
-                    WorkOrderCancelView, WorkOrderCloseView,
+from .views import (ActiveJobsView, DashboardSummaryView, MechanicDetailView,
+                    MechanicListView, WorkOrderCancelView, WorkOrderCloseView,
                     WorkOrderDetailView, WorkOrderJobLineAssignStageView,
                     WorkOrderJobLineListView, WorkOrderJobLineToggleView,
                     WorkOrderListView, WorkOrderMaterialLineDetailView,
@@ -14,6 +14,13 @@ from .views import (DashboardSummaryView, MechanicDetailView, MechanicListView,
 
 urlpatterns = [
     path("vehicles/<uuid:vehicle_id>/work-orders/", WorkOrderListView.as_view(), name="work-order-list"),
+
+    # B2 in the sprint review — a full roster of everything currently
+    # in motion, not just overdue. Listed before the <uuid:pk> route
+    # below on purpose, matching convention, even though uuid's own
+    # format validation means "active" was never actually going to
+    # match it by accident.
+    path("work-orders/active/", ActiveJobsView.as_view(), name="work-order-active"),
 
     path("work-orders/<uuid:pk>/",         WorkOrderDetailView.as_view(),       name="work-order-detail"),
     path("work-orders/<uuid:pk>/status/",  WorkOrderStatusUpdateView.as_view(), name="work-order-status"),

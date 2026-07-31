@@ -979,3 +979,99 @@ class DashboardSummaryTests(WorkOrderAPITestBase):
 
         resp = self.client.get("/api/dashboard/summary/")
         self.assertEqual(resp.data["mechanics"]["active"], 0)
+
+
+class ActiveJobsViewTests(WorkOrderAPITestBase):
+    """
+    B2 in the sprint review — a full roster of everything currently
+    in motion, not just the overdue subset the Owner Dashboard's own
+    summary already surfaces.
+    """
+
+    def test_only_open_status_work_orders_appear(self):
+        open_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        done_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        done_wo.close(closed_by=self.owner)
+        cancelled_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        cancelled_wo.cancel()
+
+        resp = self.client.get("/api/work-orders/active/")
+        ids = [r["id"] for r in resp.data["results"]]
+        self.assertIn(str(open_wo.id), ids)
+        self.assertNotIn(str(done_wo.id), ids)
+        self.assertNotIn(str(cancelled_wo.id), ids)
+
+    def test_current_stage_is_the_one_started_but_not_completed(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        completed_stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Body Repair", sequence=1,
+            started_at=timezone.now() - timedelta(hours=5), completed_at=timezone.now() - timedelta(hours=2),
+        )
+        in_motion_stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Painting", sequence=2,
+            assigned_to=mechanic, started_at=timezone.now() - timedelta(hours=1),
+        )
+        not_started_stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Reassembly", sequence=3,
+        )
+
+        resp = self.client.get("/api/work-orders/active/")
+        entry = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertEqual(entry["current_stage_name"], "Painting")
+        self.assertEqual(entry["current_stage_mechanic"], "Alex")
+
+    def test_no_current_stage_for_a_routine_work_order_with_no_stages(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        resp = self.client.get("/api/work-orders/active/")
+        entry = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertIsNone(entry["current_stage_name"])
+        self.assertIsNone(entry["current_stage_mechanic"])
+
+    def test_current_stage_mechanic_is_none_when_stage_unassigned(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Body Repair", sequence=1,
+            started_at=timezone.now(),
+        )
+        resp = self.client.get("/api/work-orders/active/")
+        entry = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertEqual(entry["current_stage_name"], "Body Repair")
+        self.assertIsNone(entry["current_stage_mechanic"])
+
+    def test_elapsed_since_prefers_work_started_at_over_created_at(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo.status = "IN_PROGRESS"
+        wo.work_started_at = timezone.now() - timedelta(hours=4)
+        wo.save(update_fields=["status", "work_started_at"])
+
+        resp = self.client.get("/api/work-orders/active/")
+        entry = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertAlmostEqual(entry["elapsed_hours"], 4.0, delta=0.1)
+
+    def test_results_sorted_longest_waiting_first(self):
+        recent = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        recent.status = "IN_PROGRESS"
+        recent.work_started_at = timezone.now() - timedelta(minutes=10)
+        recent.save(update_fields=["status", "work_started_at"])
+
+        old = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        old.status = "IN_PROGRESS"
+        old.work_started_at = timezone.now() - timedelta(hours=6)
+        old.save(update_fields=["status", "work_started_at"])
+
+        resp = self.client.get("/api/work-orders/active/")
+        ids_in_order = [r["id"] for r in resp.data["results"]]
+        self.assertLess(ids_in_order.index(str(old.id)), ids_in_order.index(str(recent.id)))
+
+    def test_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Active Jobs", invoice_code="BLAJ")
+        other_customer = Customer.objects.create(organization=other_org, name="Pelanggan Lain")
+        other_vehicle = Vehicle.objects.create(
+            organization=other_org, customer=other_customer, plate_number="X 1 XX",
+            model="Test", manufacture_year=2020,
+        )
+        WorkOrder.objects.create(organization=other_org, vehicle=other_vehicle)
+
+        resp = self.client.get("/api/work-orders/active/")
+        self.assertEqual(resp.data["count"], 0)

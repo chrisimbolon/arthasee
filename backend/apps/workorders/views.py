@@ -544,6 +544,12 @@ class MechanicDetailView(TenantScopedAPIView):
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
+def _hours_elapsed(started_at):
+    if started_at is None:
+        return None
+    return round((timezone.now() - started_at).total_seconds() / 3600, 1)
+
+
 class DashboardSummaryView(TenantScopedAPIView):
     """
     GET /api/dashboard/summary/?period=today|week|month|year
@@ -618,7 +624,7 @@ class DashboardSummaryView(TenantScopedAPIView):
         overdue_work_orders = [
             {
                 "id": str(wo.id), "number": wo.number, "vehicle_plate": wo.vehicle.plate_number,
-                "work_started_at": wo.work_started_at, "hours_elapsed": self._hours_elapsed(wo.work_started_at),
+                "work_started_at": wo.work_started_at, "hours_elapsed": _hours_elapsed(wo.work_started_at),
             }
             for wo in in_progress_qs if wo.is_overdue
         ]
@@ -632,7 +638,7 @@ class DashboardSummaryView(TenantScopedAPIView):
             {
                 "id": str(s.id), "name": s.name,
                 "work_order_id": str(s.work_order_id), "work_order_number": s.work_order.number,
-                "started_at": s.started_at, "hours_elapsed": self._hours_elapsed(s.started_at),
+                "started_at": s.started_at, "hours_elapsed": _hours_elapsed(s.started_at),
             }
             for s in stages_qs if s.is_overdue
         ]
@@ -655,7 +661,70 @@ class DashboardSummaryView(TenantScopedAPIView):
             return timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
         return timezone.now() - timedelta(days=days)
 
-    def _hours_elapsed(self, started_at):
-        if started_at is None:
+
+class ActiveJobsView(TenantScopedAPIView):
+    """
+    GET /api/work-orders/active/
+    B2 in the sprint review — a full roster of everything currently
+    in motion across the shop, not just the overdue subset the Owner
+    Dashboard's own summary already surfaces. Every WorkOrder still
+    in OPEN_STATUSES, ordered longest-waiting-first — the most
+    actionable ordering for exactly the kind of remote supervision
+    Made's described wanting throughout this whole project.
+
+    elapsed_since = work_started_at if set, else created_at — an
+    honest approximation, not perfect precision: a direct-entry
+    WorkOrder (no Estimate origin) never gets work_started_at
+    populated even once IN_PROGRESS (see WorkOrder.mark_started()'s
+    own docstring), so for that specific case this measures "time
+    since the job was created" rather than "time actually in
+    progress." Flagged here deliberately rather than silently
+    treated as exact — there's no other real timestamp on the model
+    to fall back to.
+    """
+    model = WorkOrder
+
+    def get(self, request):
+        work_orders = (
+            self.get_queryset()
+            .filter(status__in=OPEN_STATUSES)
+            .select_related("vehicle", "vehicle__customer")
+            .prefetch_related("stages", "stages__assigned_to")
+        )
+
+        results = []
+        for wo in work_orders:
+            current_stage = self._current_stage(wo)
+            elapsed_since = wo.work_started_at or wo.created_at
+            results.append({
+                "id": str(wo.id),
+                "number": wo.number,
+                "vehicle_plate": wo.vehicle.plate_number,
+                "customer_name": wo.vehicle.customer.name,
+                "status": wo.status,
+                "elapsed_since": elapsed_since,
+                "elapsed_hours": _hours_elapsed(elapsed_since),
+                "current_stage_name": current_stage.name if current_stage else None,
+                "current_stage_mechanic": (
+                    current_stage.assigned_to.name
+                    if current_stage and current_stage.assigned_to else None
+                ),
+                "is_overdue": wo.is_overdue,
+            })
+
+        results.sort(key=lambda r: r["elapsed_hours"], reverse=True)
+        return Response({"success": True, "count": len(results), "results": results})
+
+    def _current_stage(self, wo):
+        """
+        The stage currently "in motion" — started but not completed.
+        Returns None for a routine WorkOrder with no stages at all,
+        or one where every stage is either not yet started or
+        already completed. If more than one somehow qualifies (not
+        enforced at the DB level, though normal usage shouldn't
+        produce it), the most recently started one wins.
+        """
+        in_motion = [s for s in wo.stages.all() if s.started_at and not s.completed_at]
+        if not in_motion:
             return None
-        return round((timezone.now() - started_at).total_seconds() / 3600, 1)
+        return max(in_motion, key=lambda s: s.started_at)
