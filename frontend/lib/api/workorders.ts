@@ -258,6 +258,33 @@ export const mechanicsApi = {
   },
 };
 
+// B2 in the sprint review — a full roster of everything currently in
+// motion across the shop, not just the overdue subset the Owner
+// Dashboard's own summary already surfaces.
+export interface ActiveJob {
+  id:                     string;
+  number:                 string;
+  vehicle_plate:          string;
+  customer_name:          string;
+  status:                 WorkOrderStatus;
+  elapsed_since:          string;
+  // Deliberately an approximation for a direct-entry WorkOrder (no
+  // Estimate origin) — see the backend's own ActiveJobsView
+  // docstring for exactly why work_started_at can be null there,
+  // falling back to created_at instead.
+  elapsed_hours:          number;
+  current_stage_name:     string | null;
+  current_stage_mechanic: string | null;
+  is_overdue:             boolean;
+}
+
+export const activeJobsApi = {
+  async list(): Promise<ActiveJob[]> {
+    const { data } = await api.get("/api/work-orders/active/");
+    return data.results;
+  },
+};
+
 export const dashboardApi = {
   async summary(period: "today" | "week" | "month" | "year" = "today"): Promise<DashboardSummary> {
     const { data } = await api.get("/api/dashboard/summary/", { params: { period } });
