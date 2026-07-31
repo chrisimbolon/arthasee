@@ -57,4 +57,18 @@ export const invoicesApi = {
     const { data } = await api.patch(`/api/invoices/${id}/status/`, { status });
     return data.invoice;
   },
+  // Made's own ask, 31 Jul: a real, downloadable PDF for LUNAS
+  // invoices so SA/cashier can forward it themselves via their own
+  // WhatsApp — same manual-download pattern already built for
+  // Estimate quotations. Gated to PAID only, backend-side (confirmed
+  // with Chris) — this call will fail with a real 409 message if
+  // attempted on any other status; the caller should only expose the
+  // button when invoice.status === "PAID" in the first place.
+  // Returns a real Blob, not JSON — same reasoning as
+  // estimatesApi.downloadQuotationPdf: this API needs a bearer token
+  // in a header, which a plain <a href> link can't attach.
+  async downloadPdf(id: string): Promise<Blob> {
+    const { data } = await api.get(`/api/invoices/${id}/receipt.pdf`, { responseType: "blob" });
+    return data;
+  },
 };
