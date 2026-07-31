@@ -289,3 +289,98 @@ class EstimateRealTransactionTests(APITransactionTestCase):
         resp = self.client.post(f"/api/estimates/{estimate_id}/approve/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["estimate"]["status"], "APPROVED")
+
+
+class EstimateOdometerTests(EstimateAPITestBase):
+    """
+    Chris's own framing, 31 Jul: "estimasi is like a gate" — real
+    odometer capture belongs here, before any diagnosis/quote work.
+    Hard block, not a soft warning, per Chris's explicit call.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_last_service_odometer_km_reads_from_vehicle(self):
+        """
+        Not computed by this app at all — Vehicle.last_service_
+        odometer_km is already a real, correctly-maintained field
+        (kept in sync on every ServiceRecord.save()); this just
+        proves the serializer actually surfaces it.
+        """
+        self.vehicle.last_service_odometer_km = 25000
+        self.vehicle.save(update_fields=["last_service_odometer_km"])
+        resp = self.client.get(f"/api/estimates/{self.estimate.id}/")
+        self.assertEqual(resp.data["estimate"]["last_service_odometer_km"], 25000)
+
+    def test_hard_blocks_when_below_last_service_odometer(self):
+        self.vehicle.last_service_odometer_km = 25000
+        self.vehicle.save(update_fields=["last_service_odometer_km"])
+        resp = self.client.put(
+            f"/api/estimates/{self.estimate.id}/", {"odometer_km_intake": 24000}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("odometer_km_intake", resp.data["errors"])
+
+    def test_allows_when_exactly_equal_to_last_service_odometer(self):
+        """Boundary case — exactly equal must be allowed, not just
+        strictly greater. The validator uses '<', not '<=', on
+        purpose: a car legitimately re-entering at the same reading
+        it left at (e.g. a same-day comeback) is real, not invalid."""
+        self.vehicle.last_service_odometer_km = 25000
+        self.vehicle.save(update_fields=["last_service_odometer_km"])
+        resp = self.client.put(
+            f"/api/estimates/{self.estimate.id}/", {"odometer_km_intake": 25000}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_allows_when_above_last_service_odometer(self):
+        self.vehicle.last_service_odometer_km = 25000
+        self.vehicle.save(update_fields=["last_service_odometer_km"])
+        resp = self.client.put(
+            f"/api/estimates/{self.estimate.id}/", {"odometer_km_intake": 26500}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["estimate"]["odometer_km_intake"], 26500)
+
+    def test_no_validation_error_when_vehicle_has_no_service_history(self):
+        """
+        self.vehicle's own last_service_odometer_km is None by
+        default (never serviced) — nothing real to validate against,
+        so any value must be accepted rather than blocked.
+        """
+        resp = self.client.put(
+            f"/api/estimates/{self.estimate.id}/", {"odometer_km_intake": 100}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_cannot_update_odometer_after_estimate_decided(self):
+        """The general 'already decided' 409 check runs before the
+        allowed-fields filtering, so it applies to odometer_km_intake
+        exactly the same way it already applies to diagnosis_notes —
+        proving that's still true after extending the whitelist."""
+        self.estimate.reject()
+        resp = self.client.put(
+            f"/api/estimates/{self.estimate.id}/", {"odometer_km_intake": 30000}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+
+class EstimateOdometerCarryForwardTests(EstimateAPITestBase):
+    """Chris's explicit call, 31 Jul: carry forward automatically on
+    approval, no re-entry."""
+
+    def test_odometer_carries_forward_into_work_order_on_approve(self):
+        estimate = Estimate.objects.create(
+            organization=self.org, vehicle=self.vehicle, odometer_km_intake=27500,
+        )
+        work_order = estimate.approve(approved_by=self.owner)
+        self.assertEqual(work_order.odometer_km_intake, 27500)
+
+    def test_none_odometer_carries_forward_as_none(self):
+        """An estimate that never had this filled in shouldn't
+        silently invent a value on the resulting WorkOrder either."""
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        work_order = estimate.approve(approved_by=self.owner)
+        self.assertIsNone(work_order.odometer_km_intake)

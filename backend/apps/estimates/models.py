@@ -109,6 +109,18 @@ class Estimate(TenantScopedModel):
 
     diagnosis_notes = models.TextField(blank=True, verbose_name="Catatan Diagnosa")
 
+    # Chris's own framing, 31 Jul: "estimasi is like a gate" — the
+    # real odometer reading should be captured here, before any
+    # diagnosis/quote work happens, not left until WorkOrder creation
+    # (which only exists after approval). Nullable, matching
+    # WorkOrder.odometer_km_intake's own exact shape — not every
+    # estimate necessarily captures this immediately. Hard-block
+    # validation against Vehicle.last_service_odometer_km lives in
+    # the serializer (see validate_odometer_km_intake), since that's
+    # the real, only enforcement point — this field is never set any
+    # other way.
+    odometer_km_intake = models.PositiveIntegerField(null=True, blank=True, verbose_name="KM Saat Masuk")
+
     rejection_reason = models.CharField(max_length=20, choices=REASON_CHOICES, blank=True, verbose_name="Alasan Penolakan")
     rejection_notes   = models.TextField(blank=True, verbose_name="Catatan Penolakan")
 
@@ -174,6 +186,10 @@ class Estimate(TenantScopedModel):
                 # this is just a helpful starting point, not a link
                 # that stays synced.
                 notes=self.diagnosis_notes,
+                # Chris's explicit call, 31 Jul: carry forward
+                # automatically, no re-entry — this was already
+                # captured and validated once at estimate time.
+                odometer_km_intake=self.odometer_km_intake,
             )
             for line in self.line_items.all():
                 if line.kind == "labor":

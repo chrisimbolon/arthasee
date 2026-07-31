@@ -48,9 +48,12 @@ class EstimateListView(TenantScopedAPIView):
 class EstimateDetailView(TenantScopedAPIView):
     """
     GET/PUT /api/estimates/<id>/
-    PUT is narrow — only diagnosis_notes, and only while PENDING.
-    Approval/rejection go through their own dedicated endpoints,
-    since those carry real, one-way side effects.
+    PUT is narrow — only diagnosis_notes and odometer_km_intake, and
+    only while PENDING. Approval/rejection go through their own
+    dedicated endpoints, since those carry real, one-way side
+    effects. odometer_km_intake's own hard-block validation (can't
+    be less than Vehicle.last_service_odometer_km) lives in the
+    serializer, not here — this view stays a thin pass-through.
     """
     model = Estimate
 
@@ -65,7 +68,7 @@ class EstimateDetailView(TenantScopedAPIView):
                 {"success": False, "message": "Estimasi ini sudah diputuskan — tidak bisa diubah."},
                 status=status.HTTP_409_CONFLICT,
             )
-        allowed = {k: v for k, v in request.data.items() if k == "diagnosis_notes"}
+        allowed = {k: v for k, v in request.data.items() if k in ("diagnosis_notes", "odometer_km_intake")}
         serializer = EstimateSerializer(estimate, data=allowed, partial=True, context={"request": request})
         if serializer.is_valid():
             serializer.save()
