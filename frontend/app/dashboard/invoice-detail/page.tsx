@@ -7,7 +7,7 @@
 // =============================================================================
 import { Invoice, InvoiceStatus, invoicesApi } from "@/lib/api/invoicing";
 import { organizationsApi } from "@/lib/api/organizations";
-import { ArrowLeft, Loader2, Printer } from "lucide-react";
+import { ArrowLeft, Download, Loader2, Printer } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -30,6 +30,7 @@ function InvoiceDetailContent() {
   const [orgName, setOrgName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = () => invoicesApi.get(invoiceId).then(setInvoice).finally(() => setLoading(false));
@@ -50,6 +51,29 @@ function InvoiceDetailContent() {
       setError("Gagal mengubah status invoice.");
     } finally {
       setUpdating(false);
+    }
+  };
+
+  // Made's own ask, 31 Jul: a real PDF for LUNAS invoices so SA/
+  // cashier can forward it themselves via WhatsApp. Backend hard-
+  // gates to PAID only — this button is also only ever rendered when
+  // invoice.status === "PAID" (see below), but the real enforcement
+  // lives server-side, not here.
+  const handleDownloadPdf = async () => {
+    if (!invoice) return;
+    setDownloadingPdf(true); setError(null);
+    try {
+      const blob = await invoicesApi.downloadPdf(invoice.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Invoice_${invoice.number.replace(/\//g, "_")}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Gagal mengunduh PDF.");
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -78,9 +102,17 @@ function InvoiceDetailContent() {
         <Link href={`/dashboard/vehicle-detail?id=${invoice.vehicle_id}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)" }}>
           <ArrowLeft size={14} /> Kembali
         </Link>
-        <button className="btn-rust" onClick={() => window.print()}>
-          <Printer size={15} /> Cetak
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {invoice.status === "PAID" && (
+            <button className="btn-ghost" onClick={handleDownloadPdf} disabled={downloadingPdf}>
+              {downloadingPdf ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={15} />}
+              Download PDF
+            </button>
+          )}
+          <button className="btn-rust" onClick={() => window.print()}>
+            <Printer size={15} /> Cetak
+          </button>
+        </div>
       </div>
 
       {error && <div className="no-print" style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
