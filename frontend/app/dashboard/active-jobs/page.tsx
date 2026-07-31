@@ -16,7 +16,11 @@ const STATUS_LABEL: Record<WorkOrderStatus, string> = {
   OPEN: "Antrian", IN_PROGRESS: "Dikerjakan", QC: "QC", DONE: "Selesai", CANCELLED: "Dibatalkan",
 };
 const STATUS_COLOR: Record<WorkOrderStatus, string> = {
-  OPEN: "var(--steel)", IN_PROGRESS: "var(--rust)", QC: "#8a6d3b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
+  // Muted slate-blue, not var(--steel) — "Antrian" was previously
+  // indistinguishable from ordinary muted text. Same hex used
+  // consistently on vehicle-detail and work-order-detail's own OPEN
+  // status badges — a status color shouldn't differ screen to screen.
+  OPEN: "#4a6d94", IN_PROGRESS: "var(--rust)", QC: "#8a6d3b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
 };
 
 function formatHours(h: number) {
