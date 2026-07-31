@@ -51,12 +51,13 @@ function formatCompactDateTime(iso: string) {
   return `${datePart}, ${timePart}`;
 }
 
-function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void }) {
+function IntakeCard({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Mechanic[]; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
   const [form, setForm] = useState({
     odometer_km_intake: wo.odometer_km_intake?.toString() ?? "",
     received_by: wo.received_by,
     notes: wo.notes,
+    assigned_to: wo.assigned_to ?? "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState<string | null>(null);
@@ -68,6 +69,7 @@ function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void })
         odometer_km_intake: form.odometer_km_intake ? Number(form.odometer_km_intake) : undefined,
         received_by: form.received_by,
         notes: form.notes,
+        assigned_to: form.assigned_to || null,
       });
       onUpdated();
     } catch {
@@ -81,9 +83,14 @@ function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void })
     return (
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 10 }}>Detail Intake</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
           <div><div style={{ fontSize: 11.5, color: "var(--steel)" }}>KM Saat Masuk</div><div className="mono">{wo.odometer_km_intake ?? "—"}</div></div>
           <div><div style={{ fontSize: 11.5, color: "var(--steel)" }}>Diterima Oleh</div><div>{wo.received_by || "—"}</div></div>
+          {/* Made's own explicit reason, 31 Jul: a specific mechanic
+              must be identifiable on every job so he can go back and
+              question that person directly if the same car has an
+              issue again. */}
+          <div><div style={{ fontSize: 11.5, color: "var(--steel)" }}>Mekanik</div><div>{wo.assigned_to_name || "—"}</div></div>
           <div><div style={{ fontSize: 11.5, color: "var(--steel)" }}>Catatan</div><div>{wo.notes || "—"}</div></div>
         </div>
       </div>
@@ -103,6 +110,17 @@ function IntakeCard({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void })
           <label className="label">Diterima Oleh</label>
           <input className="input" value={form.received_by} onChange={(e) => setForm({ ...form, received_by: e.target.value })} placeholder="Nama staf" />
         </div>
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <label className="label">Mekanik Penanggung Jawab</label>
+        <select className="input" value={form.assigned_to} onChange={(e) => setForm({ ...form, assigned_to: e.target.value })}>
+          <option value="">— Belum ditentukan —</option>
+          {mechanics.map((m) => (
+            <option key={m.id} value={m.id} disabled={!m.is_active && m.id !== wo.assigned_to}>
+              {m.name}{!m.is_active ? " (nonaktif)" : ""}
+            </option>
+          ))}
+        </select>
       </div>
       <div style={{ marginBottom: 14 }}>
         <label className="label">Catatan</label>
@@ -599,7 +617,7 @@ function WorkOrderDetailContent() {
 
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
-      <IntakeCard wo={wo} onUpdated={load} />
+      <IntakeCard wo={wo} mechanics={mechanics} onUpdated={load} />
       <StagesSection wo={wo} mechanics={mechanics} onUpdated={load} />
       <JobLinesSection wo={wo} onUpdated={load} />
       <MaterialLinesSection wo={wo} catalog={catalog} onUpdated={load} />
