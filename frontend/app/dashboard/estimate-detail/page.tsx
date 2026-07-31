@@ -140,6 +140,68 @@ function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName
   );
 }
 
+// Chris's own framing, 31 Jul: "estimasi is like a gate" — real
+// odometer capture belongs here, before any diagnosis/quote work.
+// Same editable-while-PENDING / read-only-otherwise pattern as
+// DiagnosisCard, kept as its own separate component rather than
+// merged into it — different concern, different validation rule.
+function OdometerCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: () => void }) {
+  const editable = estimate.status === "PENDING";
+  const [value, setValue] = useState(estimate.odometer_km_intake?.toString() ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSave = async () => {
+    if (!value) return;
+    setSaving(true); setError(null);
+    try {
+      await estimatesApi.updateOdometer(estimate.id, Number(value));
+      onUpdated();
+    } catch (err) {
+      // Backend hard-block returns a real, specific message — surface
+      // it exactly, not a generic fallback, since the whole point is
+      // telling SA precisely why it was rejected.
+      const apiErrors = (err as { response?: { data?: { errors?: { odometer_km_intake?: string[] } } } })?.response?.data?.errors;
+      setError(apiErrors?.odometer_km_intake?.[0] ?? "Gagal menyimpan KM saat masuk.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>KM Terakhir Service</div>
+          <div className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
+            {estimate.last_service_odometer_km != null ? `${estimate.last_service_odometer_km.toLocaleString("id-ID")} km` : "Belum ada riwayat"}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>KM Saat Masuk</div>
+          {editable ? (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input className="input" type="number" min={0} style={{ width: 140 }} value={value} onChange={(e) => setValue(e.target.value)} />
+              <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleSave} disabled={saving}>
+                {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
+              </button>
+            </div>
+          ) : (
+            <div className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
+              {estimate.odometer_km_intake != null ? `${estimate.odometer_km_intake.toLocaleString("id-ID")} km` : "—"}
+            </div>
+          )}
+        </div>
+      </div>
+      {error && (
+        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginTop: 12 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DiagnosisCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: () => void }) {
   const editable = estimate.status === "PENDING";
   const [notes, setNotes] = useState(estimate.diagnosis_notes);
@@ -431,6 +493,7 @@ function EstimateDetailContent() {
       <PrintableQuotation estimate={estimate} orgName={orgName} />
 
       <div className="no-print">
+        <OdometerCard estimate={estimate} onUpdated={load} />
         <DiagnosisCard estimate={estimate} onUpdated={load} />
         <LineItemsSection estimate={estimate} catalog={catalog} onUpdated={load} />
 
