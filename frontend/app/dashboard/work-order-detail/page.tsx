@@ -23,7 +23,11 @@ const STATUS_LABEL: Record<WorkOrderStatus, string> = {
   OPEN: "Terbuka", IN_PROGRESS: "Dikerjakan", QC: "Pemeriksaan Kualitas", DONE: "Selesai", CANCELLED: "Dibatalkan",
 };
 const STATUS_COLOR: Record<WorkOrderStatus, string> = {
-  OPEN: "var(--steel)", IN_PROGRESS: "var(--rust)", QC: "#b5860b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
+  // Same muted slate-blue as vehicle-detail and active-jobs' own
+  // OPEN status badges — kept identical across all three so
+  // "Terbuka" reads as one consistent color everywhere, not
+  // different shades depending on which screen it's shown on.
+  OPEN: "#4a6d94", IN_PROGRESS: "var(--rust)", QC: "#b5860b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
 };
 const OPEN_STATUSES: WorkOrderStatus[] = ["OPEN", "IN_PROGRESS", "QC"];
 
@@ -290,7 +294,8 @@ function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics:
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Purely additive — a routine, single-visit repair never creates a stage at all, and this section renders nothing but a small,
+  // Purely additive — a routine, single-visit repair never creates a
+  // stage at all, and this section renders nothing but a small,
   // easy-to-ignore "+ Tambah Tahap" affordance in that case. Made's
   // own scoping: stages are for genuinely multi-phase jobs (heavy
   // collision/overhaul work), not something every job is expected to use.
@@ -358,7 +363,8 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
   const [saving, setSaving] = useState(false);
 
   // Only the unstaged lines — anything grouped into a stage already
-  // renders inside its own StageCard above, and showing it twice here would be pure duplication, not a second, different view.
+  // renders inside its own StageCard above, and showing it twice
+  // here would be pure duplication, not a second, different view.
   const unstagedLines = wo.job_lines.filter((line) => !line.stage);
 
   const addLine = async () => {
@@ -439,7 +445,8 @@ function MaterialLinesSection({ wo, catalog, onUpdated }: { wo: WorkOrder; catal
   };
 
   const removeLine = async (lineId: string) => {
-    // Simple, honest prompt rather than silently defaulting — Made specifically described customer-cancelled parts (already
+    // Simple, honest prompt rather than silently defaulting — Made
+    // specifically described customer-cancelled parts (already
     // installed, then removed mid-repair on a multi-day job) as a
     // real, recurring scenario distinct from a plain mistake.
     const customerCancelled = window.confirm(
@@ -503,8 +510,8 @@ function WorkOrderDetailContent() {
   // this WO shares the same roster, so this avoids N duplicate calls
   // for N stage cards. Includes inactive mechanics deliberately: an
   // already-assigned stage referencing a since-deactivated mechanic
-  // must still show their real name, not silently disappear from nthe picker's own source data.
-  
+  // must still show their real name, not silently disappear from
+  // the picker's own source data.
   useEffect(() => { mechanicsApi.list().then(setMechanics); }, []);
 
   const advanceStatus = async (status: "IN_PROGRESS" | "QC") => {
