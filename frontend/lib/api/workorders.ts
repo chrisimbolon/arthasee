@@ -100,6 +100,18 @@ export interface WorkOrder {
   // Made's own literal example: an oil change + brake pads taking
   // more than 2 hours. Computed on read, never stored.
   is_overdue:          boolean;
+  // Made's own explicit reason, confirmed 31 Jul: a specific
+  // mechanic must be identifiable on every job, even routine work,
+  // so he can go back and question that person directly if the same
+  // car has an issue again. Distinct from each WorkOrderStage's own
+  // assigned_to (see WorkOrderStage below) — that one only applies
+  // to heavy, multi-phase jobs; this is the single mechanic
+  // responsible for the job as a whole, the common case for most
+  // real work. Optional here — the real hard requirement ("no
+  // invoice without a mechanic assigned") is enforced at invoice-
+  // creation time on the backend, not here.
+  assigned_to:         string | null;
+  assigned_to_name:    string | null;
   service_record:      string | null;
   job_lines:           WorkOrderJobLine[];
   material_lines:      WorkOrderMaterialLine[];
@@ -118,6 +130,10 @@ export interface WorkOrderIntakePayload {
   odometer_km_intake?: number;
   received_by?:        string;
   notes?:               string;
+  // null explicitly clears the assignment, undefined leaves it
+  // untouched — same "omit vs. null" distinction already used
+  // elsewhere in this API.
+  assigned_to?:        string | null;
 }
 
 // The real backend for all four of Made's own numbered Owner
