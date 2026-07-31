@@ -220,6 +220,14 @@ class WorkOrderCloseTests(WorkOrderAPITestBase):
         against a WorkOrder-originated record.
         """
         from apps.invoicing.models import Invoice
+
+        # Invoice creation now hard-requires a mechanic (Made's own
+        # 31 Jul rule) — assigned here purely to satisfy that
+        # precondition, not because this test is actually about
+        # mechanic assignment.
+        mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        self.wo.assigned_to = mechanic
+        self.wo.save(update_fields=["assigned_to"])
         record = self.wo.close(closed_by=self.owner)
         invoice = Invoice.objects.create(service_record=record, created_by=self.owner)
         self.assertEqual(invoice.line_items.count(), 0)  # created directly, no line items added here
@@ -1075,3 +1083,55 @@ class ActiveJobsViewTests(WorkOrderAPITestBase):
 
         resp = self.client.get("/api/work-orders/active/")
         self.assertEqual(resp.data["count"], 0)
+
+
+class WorkOrderMechanicAssignmentTests(WorkOrderAPITestBase):
+    """
+    Made's own explicit reason, confirmed 31 Jul: a specific mechanic
+    must be identifiable on every job, even routine work, so he can
+    go back and question that person directly if the same car has an
+    issue again. Distinct from WorkOrderStage's own assigned_to,
+    tested separately elsewhere — this is the single mechanic
+    responsible for a job as a whole, not per-stage.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+
+    def test_assign_mechanic_via_put(self):
+        resp = self.client.put(
+            f"/api/work-orders/{self.wo.id}/", {"assigned_to": str(self.mechanic.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["work_order"]["assigned_to_name"], "Alex")
+
+    def test_cannot_assign_mechanic_from_a_different_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain WO Mekanik", invoice_code="BLWM")
+        other_mechanic = Mechanic.objects.create(organization=other_org, name="Orang Asing")
+        resp = self.client.put(
+            f"/api/work-orders/{self.wo.id}/", {"assigned_to": str(other_mechanic.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_deactivating_a_mechanic_does_not_delete_historical_assignment(self):
+        """
+        Same SET_NULL-vs-deactivate reasoning already proven for
+        WorkOrderStage.assigned_to — a mechanic leaving the roster
+        must never silently erase who actually worked a real job.
+        """
+        self.wo.assigned_to = self.mechanic
+        self.wo.save(update_fields=["assigned_to"])
+        self.mechanic.is_active = False
+        self.mechanic.save(update_fields=["is_active"])
+
+        self.wo.refresh_from_db()
+        self.assertEqual(self.wo.assigned_to_id, self.mechanic.id)
+
+    def test_unset_via_null(self):
+        self.wo.assigned_to = self.mechanic
+        self.wo.save(update_fields=["assigned_to"])
+        resp = self.client.put(f"/api/work-orders/{self.wo.id}/", {"assigned_to": None}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["work_order"]["assigned_to"])

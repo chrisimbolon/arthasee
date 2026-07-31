@@ -7,6 +7,7 @@ from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
+from apps.workorders.models import Mechanic, WorkOrder
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -30,11 +31,23 @@ class InvoicingAPITestBase(APITestCase):
             plate_number="BP 2219 AB", manufacture_year=2022,
             vehicle_type="Mobil", model="Honda Brio",
         )
-        self.service_record = ServiceRecord.objects.create(
-            organization=self.org, vehicle=self.vehicle,
-            service_date="2026-07-23", odometer_km=15003,
-            issue_description="Rem terasa rendah",
+        # Made's own explicit reason, confirmed 31 Jul: a specific
+        # mechanic must be identifiable on every invoice, even for
+        # routine work, so he can go back and question that person
+        # directly if the same car has an issue again. self.service_
+        # record is now created through a real WorkOrder.close() call
+        # — the only way a ServiceRecord ever actually comes into
+        # existence in production — with a mechanic already assigned,
+        # so every existing test in this file that creates an invoice
+        # from it keeps working exactly as before.
+        # InvoiceMechanicRequirementTests below deliberately builds
+        # its own service records without a mechanic, specifically to
+        # prove the hard block itself.
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
         )
+        self.service_record = work_order.close(closed_by=self.owner)
         self.part = Part.objects.create(
             organization=self.org, name="Kampas Rem", unit="set", unit_price=Decimal("250000.00"),
         )
@@ -143,11 +156,13 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
             plate_number=plate, manufacture_year=2022,
             vehicle_type="Mobil", model="Honda Brio",
         )
-        record = ServiceRecord.objects.create(
-            organization=self.org, vehicle=vehicle,
-            service_date="2026-07-23", odometer_km=1000,
-            issue_description="x",
+        # Reuses self.mechanic from the base fixture — same real
+        # WorkOrder.close() pattern, not a directly-created
+        # ServiceRecord with no originating WorkOrder.
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=vehicle, assigned_to=self.mechanic,
         )
+        record = work_order.close(closed_by=self.owner)
         return self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
 
     def test_sequence_increments_within_the_same_year(self):
@@ -182,11 +197,14 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
             plate_number="BP 9999 ZZ", manufacture_year=2022,
             vehicle_type="Mobil", model="Other Car",
         )
-        other_record = ServiceRecord.objects.create(
-            organization=other_org, vehicle=other_vehicle,
-            service_date="2026-07-23", odometer_km=1000,
-            issue_description="x",
+        # A mechanic scoped to other_org specifically, not self.mechanic
+        # (which belongs to self.org) — a real WorkOrder's mechanic
+        # must belong to the same organization as the WorkOrder itself.
+        other_mechanic = Mechanic.objects.create(organization=other_org, name="Budi")
+        other_work_order = WorkOrder.objects.create(
+            organization=other_org, vehicle=other_vehicle, assigned_to=other_mechanic,
         )
+        other_record = other_work_order.close(closed_by=other_owner)
         self.client.force_authenticate(user=other_owner)
         resp = self.client.post(f"/api/service-records/{other_record.id}/invoice/", {}, format="json")
         self.assertEqual(resp.data["invoice"]["sequence_number"], 1)
@@ -323,3 +341,84 @@ class InvoicePdfTests(InvoicingAPITestBase):
         self.client.force_authenticate(user=other_owner)
         resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
+    """
+    Made's own explicit reason, confirmed 31 Jul: a specific mechanic
+    must be identifiable on every invoice, even for routine work, so
+    he can go back and question that person directly if the same car
+    has an issue again. Hard-blocked, not a soft warning — deliberately
+    builds its own service records WITHOUT a mechanic assigned, since
+    the shared base fixture's own self.service_record now always has
+    one (see InvoicingAPITestBase's own setUp() for why).
+    """
+
+    def _work_order_without_mechanic(self):
+        work_order = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        return work_order.close(closed_by=self.owner)
+
+    def test_cannot_create_invoice_when_work_order_has_no_mechanic(self):
+        record = self._work_order_without_mechanic()
+        resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("mekanik", resp.data["message"].lower())
+
+    def test_failed_attempt_leaves_no_orphaned_invoice(self):
+        """Same rollback discipline already proven for the missing-
+        invoice_code case — a failed attempt must leave nothing
+        behind, not a half-created Invoice with no line items."""
+        record = self._work_order_without_mechanic()
+        self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertFalse(Invoice.objects.filter(service_record=record).exists())
+
+    def test_cannot_create_invoice_when_service_record_has_no_work_order_at_all(self):
+        """
+        Defensive edge case — a ServiceRecord created some other way
+        (direct ORM, an admin action, a future code path) with no
+        WorkOrder pointing back to it at all. getattr(..., None) must
+        treat this exactly the same as "no mechanic assigned," not
+        crash with RelatedObjectDoesNotExist.
+        """
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-31", odometer_km=5000,
+            issue_description="Dibuat langsung, tanpa work order",
+        )
+        resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_can_create_invoice_once_mechanic_is_assigned(self):
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
+        )
+        record = work_order.close(closed_by=self.owner)
+        resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["invoice"]["mechanic_name_snapshot"], "Alex")
+
+    def test_mechanic_snapshot_survives_later_mechanic_rename(self):
+        """
+        The core reason this is a snapshot rather than a live
+        reference — mirrors test_price_snapshot_survives_later_
+        part_price_change's own reasoning exactly, applied to the
+        mechanic's name instead of a part's price.
+        """
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = resp.data["invoice"]["id"]
+
+        self.mechanic.name = "Alex (Nama Baru)"
+        self.mechanic.save(update_fields=["name"])
+
+        recheck = self.client.get(f"/api/invoices/{invoice_id}/")
+        self.assertEqual(recheck.data["invoice"]["mechanic_name_snapshot"], "Alex")
+
+    def test_mechanic_snapshot_survives_later_mechanic_deactivation(self):
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = resp.data["invoice"]["id"]
+
+        self.mechanic.is_active = False
+        self.mechanic.save(update_fields=["is_active"])
+
+        recheck = self.client.get(f"/api/invoices/{invoice_id}/")
+        self.assertEqual(recheck.data["invoice"]["mechanic_name_snapshot"], "Alex")

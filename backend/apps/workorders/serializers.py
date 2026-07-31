@@ -113,6 +113,7 @@ class WorkOrderSerializer(serializers.ModelSerializer):
     customer_name    = serializers.CharField(source="vehicle.customer.name", read_only=True)
     created_by_name  = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
     is_overdue       = serializers.BooleanField(read_only=True)
+    assigned_to_name = serializers.CharField(source="assigned_to.name", read_only=True, default=None)
 
     class Meta:
         model  = WorkOrder
@@ -120,12 +121,14 @@ class WorkOrderSerializer(serializers.ModelSerializer):
             "id", "vehicle", "vehicle_plate", "customer_name",
             "number", "sequence_number", "status",
             "odometer_km_intake", "received_by", "notes", "work_started_at", "is_overdue",
+            "assigned_to", "assigned_to_name",
             "service_record", "job_lines", "material_lines", "stages",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "vehicle_plate", "customer_name", "number", "sequence_number", "status",
-            "work_started_at", "is_overdue", "service_record", "job_lines", "material_lines", "stages",
+            "work_started_at", "is_overdue", "assigned_to_name",
+            "service_record", "job_lines", "material_lines", "stages",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 
@@ -136,6 +139,16 @@ class WorkOrderSerializer(serializers.ModelSerializer):
         if vehicle.organization_id not in _user_org_ids(request):
             raise serializers.ValidationError("Kendaraan tidak ditemukan.")
         return vehicle
+
+    def validate_assigned_to(self, mechanic):
+        if mechanic is None:
+            return mechanic
+        request = self.context.get("request")
+        if request is None or request.user.role == "super_admin":
+            return mechanic
+        if mechanic.organization_id not in _user_org_ids(request):
+            raise serializers.ValidationError("Mekanik tidak ditemukan.")
+        return mechanic
 
 
 class WorkOrderListSerializer(WorkOrderSerializer):

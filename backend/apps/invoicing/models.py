@@ -105,6 +105,19 @@ class Invoice(TenantScopedModel):
 
     customer_name_snapshot = models.CharField(max_length=200, verbose_name="Nama Pelanggan")
     license_plate_snapshot = models.CharField(max_length=20, verbose_name="Nomor Plat")
+    # Made's own explicit reason, confirmed 31 Jul: a specific
+    # mechanic must be identifiable on every invoice, even for
+    # routine work, so he can go back and question that person
+    # directly if the same car has an issue again — same class of
+    # real accountability need as knowing which SA received a car at
+    # intake. Frozen at invoice-creation time, same discipline as
+    # customer_name_snapshot/license_plate_snapshot above: the
+    # Mechanic roster can change (someone leaves, gets renamed) and
+    # that must never silently alter what an already-issued invoice
+    # says. See save() below for where this is both populated AND
+    # hard-required — a plain field default can't enforce "this must
+    # exist," only an explicit check can.
+    mechanic_name_snapshot = models.CharField(max_length=200, verbose_name="Nama Mekanik")
 
     status          = models.CharField(max_length=20, choices=STATUS_CHOICES, default="DRAFT", verbose_name="Status")
     deposit_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name="Deposit")
@@ -149,6 +162,28 @@ class Invoice(TenantScopedModel):
                 self.customer_name_snapshot = self.service_record.vehicle.customer.name
             if not self.license_plate_snapshot:
                 self.license_plate_snapshot = self.service_record.vehicle.plate_number
+            if not self.mechanic_name_snapshot:
+                # getattr(..., None) — the same reverse-OneToOneField
+                # probe already used throughout this project (e.g.
+                # WorkOrder.mark_started()'s own estimate lookup):
+                # ServiceRecord.work_order is a reverse accessor, and
+                # Django raises RelatedObjectDoesNotExist (a subclass
+                # of AttributeError) rather than returning None when
+                # nothing points back to it — getattr's default
+                # argument absorbs exactly that case.
+                work_order = getattr(self.service_record, "work_order", None)
+                if work_order is None or work_order.assigned_to is None:
+                    # Fail loudly, not silently — Made's own explicit
+                    # requirement: no invoice without an identifiable
+                    # mechanic. Same "no safe generic fallback to
+                    # guess at" discipline as the invoice_code check
+                    # just below — there is no reasonable default
+                    # name to invent here.
+                    raise ValueError(
+                        "Work order untuk catatan servis ini belum memiliki "
+                        "mekanik penanggung jawab — tidak bisa membuat invoice."
+                    )
+                self.mechanic_name_snapshot = work_order.assigned_to.name
             if not self.number:
                 org = self._resolve_organization()
                 if not org.invoice_code:

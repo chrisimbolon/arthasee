@@ -68,10 +68,12 @@ class InvoiceCreateView(TenantScopedAPIView):
                         unit_price=line.get("unit_price", 0),
                     )
         except ValueError as e:
-            # Raised by Invoice.save() when the organization has no
-            # invoice_code configured — a real, actionable setup
-            # problem, not a server bug, so it belongs in a 400 the
-            # frontend can display, not a raw 500.
+            # Raised by Invoice.save() for either of two real,
+            # actionable setup problems, not a server bug — so both
+            # belong in a 400 the frontend can display, not a raw
+            # 500: the organization has no invoice_code configured,
+            # or (added 31 Jul, Made's own hard requirement) the
+            # originating WorkOrder has no mechanic assigned yet.
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(

@@ -40,14 +40,14 @@ class InvoiceSerializer(serializers.ModelSerializer):
         model  = Invoice
         fields = [
             "id", "service_record", "vehicle_id", "number", "sequence_number", "year",
-            "customer_name_snapshot", "license_plate_snapshot",
+            "customer_name_snapshot", "license_plate_snapshot", "mechanic_name_snapshot",
             "status", "deposit_amount", "line_items",
             "subtotal", "total", "balance_due",
             "created_by", "created_by_name", "created_at",
         ]
         read_only_fields = [
             "id", "vehicle_id", "number", "sequence_number", "year",
-            "customer_name_snapshot", "license_plate_snapshot",
+            "customer_name_snapshot", "license_plate_snapshot", "mechanic_name_snapshot",
             "line_items", "subtotal", "total", "balance_due",
             "created_by", "created_by_name", "created_at",
         ]

@@ -7,7 +7,7 @@ from decimal import Decimal
 from apps.authentication.models import CustomUser
 from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
-from apps.workorders.models import WorkOrder
+from apps.workorders.models import Mechanic, WorkOrder
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -439,11 +439,21 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         self.org.invoice_code = "AM"
         self.org.save(update_fields=["invoice_code"])
 
-        record = ServiceRecord.objects.create(
-            organization=self.org, vehicle=self.vehicle,
-            service_date="2026-07-20", odometer_km=20000,
-            issue_description="Ganti oli",
+        # Invoice creation now hard-requires a mechanic (Made's own
+        # 31 Jul rule) — record is created through a real
+        # WorkOrder.close() call, with a mechanic assigned, rather
+        # than a bare ServiceRecord with no originating WorkOrder at
+        # all. self.vehicle.current_odometer_km is already 20000
+        # (see this class's own setUp()), so close()'s own odometer
+        # fallback produces the exact same value the original bare
+        # creation specified explicitly — nothing else about this
+        # test's real intent changes.
+        mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=mechanic,
         )
+        record = work_order.close(service_date=date(2026, 7, 20), closed_by=self.owner)
+
         invoice = Invoice.objects.create(service_record=record, created_by=self.owner)
         InvoiceLineItem.objects.create(
             organization=self.org, invoice=invoice, kind="labor",

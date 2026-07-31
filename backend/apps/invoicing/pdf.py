@@ -118,7 +118,7 @@ def build_invoice_pdf(invoice, org_name):
                          padding: 3px 10px; text-align: center; }}
         .info-table {{ width: 100%; margin-bottom: 20px; border-bottom: 1px solid #d8d8d8; padding-bottom: 14px; }}
         .label {{ font-size: 8.5pt; color: #6b6b6b; text-transform: uppercase; }}
-        .value {{ font-size: 12pt; font-weight: bold; margin-top: 2px; }}
+        .value {{ font-size: 11pt; font-weight: bold; margin-top: 2px; }}
         .line-table {{ width: 100%; border-collapse: collapse; margin-bottom: 4px; }}
         .line-table th {{ text-align: left; font-size: 8.5pt; text-transform: uppercase;
                           color: #6b6b6b; border-bottom: 1px solid #d8d8d8; padding: 4px 0; }}
@@ -152,13 +152,17 @@ def build_invoice_pdf(invoice, org_name):
 
         <table class="info-table">
             <tr>
-                <td style="width: 50%;">
+                <td style="width: 34%;">
                     <div class="label">Pelanggan</div>
                     <div class="value">{invoice.customer_name_snapshot}</div>
                 </td>
-                <td style="width: 50%;">
+                <td style="width: 33%;">
                     <div class="label">Nomor Plat</div>
                     <div class="value">{invoice.license_plate_snapshot}</div>
+                </td>
+                <td style="width: 33%;">
+                    <div class="label">Mekanik</div>
+                    <div class="value">{invoice.mechanic_name_snapshot}</div>
                 </td>
             </tr>
         </table>

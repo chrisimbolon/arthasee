@@ -171,6 +171,29 @@ class WorkOrder(TenantScopedModel):
     received_by         = models.CharField(max_length=200, blank=True, verbose_name="Diterima Oleh")
     notes                = models.TextField(blank=True, verbose_name="Catatan")
 
+    # Made's own explicit reason, confirmed 31 Jul: a specific
+    # mechanic must be identifiable on every job, even a routine one
+    # (his own real example — draining and refilling engine oil) —
+    # so he can go back and question that person directly if the
+    # same car has a problem again. Deliberately distinct from
+    # WorkOrderStage.assigned_to below — that one only exists for
+    # heavy, multi-phase jobs and supports several different
+    # mechanics across different stages; this one is the single
+    # mechanic responsible for the job as a whole, the common case
+    # for the overwhelming majority of real work. The two coexist
+    # without conflict: a routine job only ever uses this field, a
+    # staged job can use both (this field for overall accountability,
+    # stages for who did which phase). Nullable at the DB level —
+    # the real hard requirement Made asked for ("no invoice creation
+    # without mechanic assigned") is enforced at invoice-creation
+    # time (see apps.invoicing.models.Invoice.save()), not here, so
+    # a WorkOrder can still legitimately exist and even close without
+    # one assigned yet.
+    assigned_to = models.ForeignKey(
+        Mechanic, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="work_orders", verbose_name="Mekanik Penanggung Jawab",
+    )
+
     # Made's own request: the exact clock time work actually began —
     # not just the date. Nullable and set at most once — see
     # mark_started() below for exactly when and why. Deliberately a

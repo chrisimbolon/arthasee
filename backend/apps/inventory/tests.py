@@ -7,6 +7,7 @@ from apps.authentication.models import CustomUser
 from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
+from apps.workorders.models import Mechanic, WorkOrder
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -299,11 +300,17 @@ class PartUsageFrozenAfterInvoiceTests(InventoryAPITestBase):
             plate_number="BP 7002 AA", manufacture_year=2020,
             vehicle_type="Mobil", model="Toyota Avanza",
         )
-        self.service_record = ServiceRecord.objects.create(
-            organization=self.org, vehicle=self.vehicle,
-            service_date="2026-07-24", odometer_km=10000,
-            issue_description="Ganti busi",
+        # Invoice creation now hard-requires a mechanic (Made's own
+        # 31 Jul rule) — self.service_record is created through a
+        # real WorkOrder.close() call, with a mechanic assigned, so
+        # the two tests below that create a real Invoice from it
+        # satisfy that precondition without this class needing to
+        # test mechanic assignment itself, which isn't its purpose.
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
         )
+        self.service_record = work_order.close(closed_by=self.owner)
 
     def test_can_add_part_usage_before_invoice_exists(self):
         """Sanity check the guard doesn't over-block the normal case."""

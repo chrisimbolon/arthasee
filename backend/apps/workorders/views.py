@@ -61,9 +61,10 @@ class WorkOrderDetailView(TenantScopedAPIView):
     """
     GET/PUT /api/work-orders/<id>/
     PUT is deliberately narrow — only odometer_km_intake, received_by,
-    notes are writable, and only while the order is still open. Status
-    changes go through the dedicated status/close/cancel endpoints
-    below, since those carry real side effects PUT shouldn't hide.
+    notes, assigned_to are writable, and only while the order is
+    still open. Status changes go through the dedicated status/close/
+    cancel endpoints below, since those carry real side effects PUT
+    shouldn't hide.
     """
     model = WorkOrder
 
@@ -78,7 +79,7 @@ class WorkOrderDetailView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan — tidak bisa diubah."},
                 status=status.HTTP_409_CONFLICT,
             )
-        allowed = {k: v for k, v in request.data.items() if k in ("odometer_km_intake", "received_by", "notes")}
+        allowed = {k: v for k, v in request.data.items() if k in ("odometer_km_intake", "received_by", "notes", "assigned_to")}
         serializer = WorkOrderSerializer(order, data=allowed, partial=True, context={"request": request})
         if serializer.is_valid():
             serializer.save()
