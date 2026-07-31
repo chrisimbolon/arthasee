@@ -4,13 +4,14 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Briefcase, Car, LayoutDashboard, LogOut, Package, Phone, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Package, Phone, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 const NAV = [
   { href: "/dashboard",           icon: LayoutDashboard, label: "Ringkasan" },
+  { href: "/dashboard/active-jobs", icon: Activity,       label: "Pekerjaan Aktif" },
   { href: "/dashboard/customers", icon: Users,            label: "Pelanggan" },
   { href: "/dashboard/vehicles",  icon: Car,              label: "Kendaraan" },
   { href: "/dashboard/inventory", icon: Package,          label: "Inventaris" },
