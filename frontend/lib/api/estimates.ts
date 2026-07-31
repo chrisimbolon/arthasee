@@ -29,6 +29,15 @@ export interface Estimate {
   sequence_number:   number;
   status:            EstimateStatus;
   diagnosis_notes:   string;
+  // Chris's own framing, 31 Jul: "estimasi is like a gate" — real
+  // odometer capture belongs here, before any diagnosis/quote work,
+  // not left until WorkOrder creation. odometer_km_intake is
+  // writable (only while PENDING, enforced backend-side);
+  // last_service_odometer_km is read-only, pulled directly from
+  // Vehicle.last_service_odometer_km — already correctly maintained
+  // elsewhere, not something this page computes itself.
+  odometer_km_intake:       number | null;
+  last_service_odometer_km: number | null;
   rejection_reason:  EstimateRejectionReason | "";
   rejection_notes:   string;
   work_order:        string | null;
@@ -57,6 +66,13 @@ export const estimatesApi = {
   },
   async updateNotes(id: string, diagnosisNotes: string): Promise<Estimate> {
     const { data } = await api.put(`/api/estimates/${id}/`, { diagnosis_notes: diagnosisNotes });
+    return data.estimate;
+  },
+  // Backend hard-blocks (400) if less than the vehicle's last
+  // recorded service odometer — the caller is responsible for
+  // surfacing that real validation message, not a generic one.
+  async updateOdometer(id: string, odometerKmIntake: number): Promise<Estimate> {
+    const { data } = await api.put(`/api/estimates/${id}/`, { odometer_km_intake: odometerKmIntake });
     return data.estimate;
   },
   async approve(id: string): Promise<Estimate> {
