@@ -179,7 +179,12 @@ const WO_STATUS_LABEL: Record<WorkOrderStatus, string> = {
   OPEN: "Terbuka", IN_PROGRESS: "Dikerjakan", QC: "Pemeriksaan Kualitas", DONE: "Selesai", CANCELLED: "Dibatalkan",
 };
 const WO_STATUS_COLOR: Record<WorkOrderStatus, string> = {
-  OPEN: "var(--steel)", IN_PROGRESS: "var(--rust)", QC: "#b5860b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
+  // Muted slate-blue, not var(--steel) — "Terbuka" was previously
+  // indistinguishable from ordinary muted text since it shared the
+  // exact same neutral gray. Deliberately kept lower-hierarchy than
+  // var(--rust) (the CTA color) — informational, not competing for
+  // attention with "Buat Estimasi"/"Buat Work Order".
+  OPEN: "#4a6d94", IN_PROGRESS: "var(--rust)", QC: "#b5860b", DONE: "#2e7d4f", CANCELLED: "var(--danger)",
 };
 const WO_OPEN_STATUSES: WorkOrderStatus[] = ["OPEN", "IN_PROGRESS", "QC"];
 
@@ -240,7 +245,7 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
           {visibleOrders.map((wo) => (
             <Link key={wo.id} href={`/dashboard/work-order-detail?id=${wo.id}`} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
               <span className="mono" style={{ fontSize: 13.5, fontWeight: 600 }}>WO #{wo.number}</span>
-              <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: WO_STATUS_COLOR[wo.status] }}>
+              <span style={{ fontSize: 11.5, fontWeight: 600, padding: "4px 12px", borderRadius: 20, color: "#fff", background: WO_STATUS_COLOR[wo.status] }}>
                 {WO_STATUS_LABEL[wo.status]}
               </span>
             </Link>
@@ -602,8 +607,8 @@ function VehicleDetailContent() {
   );
 }
 
-// useSearchParams() requires a Suspense boundary on statically exported/prerendered pages — without this, the build fails.
-
+// useSearchParams() requires a Suspense boundary on statically
+// exported/prerendered pages — without this, the build fails.
 export default function VehicleDetailPage() {
   return (
     <Suspense fallback={
