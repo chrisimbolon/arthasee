@@ -182,6 +182,7 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
   const [partId, setPartId] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [unitPrice, setUnitPrice] = useState("");
+  const [priceFocused, setPriceFocused] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // Real gap caught in QA: selecting a Part previously only set
@@ -193,10 +194,17 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
   // current catalog price, same "real default, still overridable"
   // pattern already used for RecordRealizationModal's own amount
   // pre-fill.
+  //
+  // unitPrice itself always stays clean raw digits ("120000"), never
+  // a formatted display string — Part.unit_price can come back from
+  // the backend as "120000.00" (a real Decimal serialization, not a
+  // display value), so this rounds it to a plain integer string,
+  // matching the same "money() never shows Rupiah cents" convention
+  // already used everywhere else in this app.
   const handlePartChange = (id: string) => {
     setPartId(id);
     const selected = catalog.find((p) => p.id === id);
-    setUnitPrice(selected ? selected.unit_price : "");
+    setUnitPrice(selected ? String(Math.round(Number(selected.unit_price))) : "");
   };
 
   // Also clears a stale auto-filled price when switching away from
@@ -263,7 +271,23 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
             <input className="input" style={{ flex: 1, minWidth: 160 }} placeholder="Deskripsi jasa" value={description} onChange={(e) => setDescription(e.target.value)} />
           )}
           <input className="input" style={{ width: 60 }} type="number" min={1} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
-          <input className="input" style={{ width: 110 }} type="number" min={0} placeholder="Harga" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} />
+          <input
+            className="input" style={{ width: 120 }} type="text" inputMode="numeric" placeholder="Harga"
+            // Real, controllable formatting only — deliberately not
+            // type="number", whose display formatting is the
+            // browser's own OS-level locale behavior, outside the
+            // app's control (the exact odd "120000,00" rendering
+            // caught in QA). Shows plain raw digits while actively
+            // typing (avoids cursor-jump bugs that come with
+            // reformatting on every keystroke), then reformats with
+            // real thousands separators on blur — id-ID locale,
+            // period separator, no decimals, matching money()'s own
+            // convention used everywhere else in this app.
+            value={priceFocused || !unitPrice ? unitPrice : Number(unitPrice).toLocaleString("id-ID")}
+            onFocus={() => setPriceFocused(true)}
+            onBlur={() => setPriceFocused(false)}
+            onChange={(e) => setUnitPrice(e.target.value.replace(/[^0-9]/g, ""))}
+          />
           <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={addLine} disabled={saving}>
             <Plus size={13} /> Tambah
           </button>
