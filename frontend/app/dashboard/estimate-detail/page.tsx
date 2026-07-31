@@ -184,6 +184,29 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
   const [unitPrice, setUnitPrice] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Real gap caught in QA: selecting a Part previously only set
+  // partId — nothing ever read that part's own current price from
+  // the inventory catalog, so SA had to know and manually type it
+  // every time, completely disconnected from real inventory data.
+  // The field stays editable after auto-fill, not disabled — a
+  // genuine quoted price occasionally needs to differ from the
+  // current catalog price, same "real default, still overridable"
+  // pattern already used for RecordRealizationModal's own amount
+  // pre-fill.
+  const handlePartChange = (id: string) => {
+    setPartId(id);
+    const selected = catalog.find((p) => p.id === id);
+    setUnitPrice(selected ? selected.unit_price : "");
+  };
+
+  // Also clears a stale auto-filled price when switching away from
+  // Part — otherwise a Jasa entry could silently inherit whatever
+  // unrelated part's price was showing a moment ago.
+  const handleKindChange = (newKind: EstimateLineKind) => {
+    setKind(newKind);
+    setPartId(""); setDescription(""); setUnitPrice("");
+  };
+
   const addLine = async () => {
     if (kind === "labor" && (!description || !unitPrice)) return;
     if (kind === "part" && (!partId || !unitPrice)) return;
@@ -227,12 +250,12 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
 
       {editable && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <select className="input" style={{ width: 90 }} value={kind} onChange={(e) => setKind(e.target.value as EstimateLineKind)}>
+          <select className="input" style={{ width: 90 }} value={kind} onChange={(e) => handleKindChange(e.target.value as EstimateLineKind)}>
             <option value="labor">Jasa</option>
             <option value="part">Part</option>
           </select>
           {kind === "part" ? (
-            <select className="input" style={{ flex: 1, minWidth: 160 }} value={partId} onChange={(e) => setPartId(e.target.value)}>
+            <select className="input" style={{ flex: 1, minWidth: 160 }} value={partId} onChange={(e) => handlePartChange(e.target.value)}>
               <option value="">— Pilih Part —</option>
               {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.current_stock} {p.unit})</option>)}
             </select>
