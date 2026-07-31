@@ -3,7 +3,8 @@
 # =============================================================================
 from django.urls import path
 
-from .views import InvoiceCreateView, InvoiceDetailView, InvoiceStatusUpdateView
+from .views import (InvoiceCreateView, InvoiceDetailView, InvoicePdfView,
+                    InvoiceStatusUpdateView)
 
 urlpatterns = [
     path("service-records/<uuid:service_record_id>/invoice/",
@@ -11,4 +12,5 @@ urlpatterns = [
 
     path("invoices/<uuid:pk>/",          InvoiceDetailView.as_view(),       name="invoice-detail"),
     path("invoices/<uuid:pk>/status/",   InvoiceStatusUpdateView.as_view(), name="invoice-status-update"),
+    path("invoices/<uuid:pk>/receipt.pdf", InvoicePdfView.as_view(),        name="invoice-pdf"),
 ]

@@ -232,3 +232,94 @@ class InvoiceTenantIsolationTests(InvoicingAPITestBase):
         self.client.force_authenticate(user=self.other_owner)
         resp = self.client.get(f"/api/invoices/{invoice_id}/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class InvoicePdfTests(InvoicingAPITestBase):
+    """
+    Made's own ask, 31 Jul: a real, downloadable PDF for LUNAS
+    invoices, gated hard to PAID only — confirmed with Chris. Can't
+    verify individual rendered cell values the way the Excel-based
+    tests do (no PDF-parsing library available here), so this proves
+    what's genuinely checkable: the actual gate itself (the real
+    point of this feature), that a real, valid PDF comes back for a
+    PAID invoice, and that the filename is safe.
+    """
+
+    def _create_and_pay(self):
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 150000}]},
+            format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "PAID"}, format="json")
+        return invoice_id
+
+    def test_returns_a_real_pdf_for_a_paid_invoice(self):
+        invoice_id = self._create_and_pay()
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        # %PDF is the real, standard magic-byte signature every valid
+        # PDF file starts with — proves this is a genuine rendered
+        # document, not empty or garbage bytes silently returned as
+        # a 200.
+        self.assertTrue(resp.content.startswith(b"%PDF"))
+
+    def test_blocked_for_draft_invoice(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("Lunas", resp.data["message"])
+
+    def test_blocked_for_issued_invoice(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_blocked_for_cancelled_invoice(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json")
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_filename_has_no_raw_slashes(self):
+        """
+        The exact real bug caught before shipping: invoice.number
+        genuinely contains slashes ("INV/REG/AM/0004/2026"), which
+        would break as a raw filename on a real filesystem.
+        """
+        invoice_id = self._create_and_pay()
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        disposition = resp["Content-Disposition"]
+        filename = disposition.split("filename=")[1]
+        self.assertNotIn("/", filename)
+
+    def test_org_b_cannot_download_org_a_invoice_pdf(self):
+        """
+        other_owner isn't part of InvoicingAPITestBase's own setUp()
+        — only InvoiceTenantIsolationTests defines it, in its own
+        setUp(), for a different test class entirely. Created locally
+        here instead, matching the same self-contained pattern
+        InvoiceNumberingTests.test_sequence_is_scoped_per_organization
+        already uses for exactly this situation.
+        """
+        invoice_id = self._create_and_pay()
+
+        other_org = Organization.objects.create(name="Bengkel Lain PDF", invoice_code="BLP")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherinvoicepdf@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=other_org, user=other_owner, role="owner", is_active=True,
+        )
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

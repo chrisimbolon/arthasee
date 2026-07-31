@@ -4,10 +4,12 @@
 from apps.core.views import TenantScopedAPIView
 from apps.service.models import ServiceRecord
 from django.db import transaction
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.response import Response
 
 from .models import Invoice, InvoiceLineItem
+from .pdf import build_invoice_pdf
 from .serializers import InvoiceSerializer
 
 
@@ -126,3 +128,45 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
         invoice.status = new_status
         invoice.save(update_fields=["status"])
         return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
+
+
+class InvoicePdfView(TenantScopedAPIView):
+    """
+    GET /api/invoices/<id>/receipt.pdf
+    Made's own ask, 31 Jul: a real, downloadable PDF for LUNAS
+    invoices, so SA/cashier can forward it themselves via their own
+    WhatsApp — same manual-download pattern already built for
+    Estimate quotations, not automated sending.
+
+    Confirmed with Chris: hard-gated to PAID only, not available for
+    any other status — a DRAFT/ISSUED invoice isn't yet a finished
+    receipt, and a CANCELLED one shouldn't be handed to a customer as
+    if it were still valid. Enforced here, not just hidden in the
+    frontend — a real API consumer hitting this URL directly must
+    still be blocked regardless of what any UI button shows.
+
+    Returns a raw HttpResponse, not a DRF Response — same reasoning
+    already established for ContractExportTerminView and
+    EstimateQuotationPdfView: a real file, not JSON, and DRF's own
+    finalize_response() passes any HttpResponseBase through unchanged.
+    """
+    model = Invoice
+
+    def get(self, request, pk):
+        invoice = self.get_object(pk)
+        if invoice.status != "PAID":
+            return Response(
+                {"success": False, "message": "PDF hanya tersedia untuk invoice yang sudah Lunas."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        pdf_bytes = build_invoice_pdf(invoice, org_name=invoice.organization.name)
+
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        # invoice.number genuinely contains slashes ("INV/REG/AM/0004/
+        # 2026") — would break as a raw filename on a real filesystem.
+        # Verified directly against the real format before writing
+        # this, not assumed safe — same class of bug already caught
+        # once before with a contract title.
+        safe_number = "".join(c if c.isalnum() or c in " -_" else "_" for c in invoice.number)
+        response["Content-Disposition"] = f'attachment; filename="Invoice_{safe_number}.pdf"'
+        return response
