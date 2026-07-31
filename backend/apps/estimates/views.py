@@ -1,13 +1,14 @@
 # =============================================================================
 # === backend/apps/estimates/views.py ===
 # =============================================================================
+from apps.core.views import TenantScopedAPIView
 from django.db import transaction
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.response import Response
 
-from apps.core.views import TenantScopedAPIView
-
 from .models import Estimate, EstimateLineItem
+from .pdf import build_quotation_pdf
 from .serializers import EstimateLineItemSerializer, EstimateSerializer
 
 OPEN_STATUS = "PENDING"
@@ -152,3 +153,38 @@ class EstimateLineItemDetailView(TenantScopedAPIView):
             )
         line.delete()
         return Response({"success": True, "message": "Baris dihapus."})
+
+
+class EstimateQuotationPdfView(TenantScopedAPIView):
+    """
+    GET /api/estimates/<id>/quotation.pdf
+    Made's own urgent ask, 30 Jul follow-up meeting: SA/cashier need
+    a real, downloadable PDF so they can forward it themselves via
+    their own WhatsApp — deliberately NOT the same thing as the
+    still-on-hold automated WhatsApp integration. This is a plain
+    file download; nothing here sends anything anywhere on its own.
+
+    Returns a raw HttpResponse, not a DRF Response, same reasoning
+    already established for ContractExportTerminView — this is a
+    real file, not JSON, and DRF's own finalize_response() passes
+    any HttpResponseBase through unchanged.
+
+    Available regardless of estimate.status, on purpose — Made's own
+    confirmed real trigger is "estimasi diterbitkan," not "estimasi
+    disetujui." The quotation is meant to go out the moment it's
+    issued, not gated behind approval.
+    """
+    model = Estimate
+
+    def get(self, request, pk):
+        estimate = self.get_object(pk)
+        pdf_bytes = build_quotation_pdf(estimate, org_name=estimate.organization.name)
+
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        # Sanitized the same way ContractExportTerminView's own
+        # filename is — a real plate number could in principle carry
+        # a character a filesystem chokes on, and there's no reason
+        # to trust that blindly just because it hasn't happened yet.
+        safe_plate = "".join(c if c.isalnum() or c in " -_" else "_" for c in estimate.vehicle.plate_number)
+        response["Content-Disposition"] = f'attachment; filename="Estimasi_{estimate.number}_{safe_plate}.pdf"'
+        return response
