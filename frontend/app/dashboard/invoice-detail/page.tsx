@@ -134,7 +134,7 @@ function InvoiceDetailContent() {
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 28, paddingBottom: 20, borderBottom: "1px solid var(--line)" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 28, paddingBottom: 20, borderBottom: "1px solid var(--line)" }}>
           <div>
             <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>Pelanggan</div>
             <div style={{ fontSize: 15, fontWeight: 600 }}>{invoice.customer_name_snapshot}</div>
@@ -142,6 +142,16 @@ function InvoiceDetailContent() {
           <div>
             <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>Nomor Plat</div>
             <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{invoice.license_plate_snapshot}</div>
+          </div>
+          {/* Made's own explicit reason, 31 Jul: a specific mechanic
+              must be identifiable on every invoice so he can go back
+              and question that person directly if the same car has
+              an issue again. Backend hard-blocks invoice creation
+              without one, so this is never actually blank here on a
+              real invoice. */}
+          <div>
+            <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>Mekanik</div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>{invoice.mechanic_name_snapshot}</div>
           </div>
         </div>
 
