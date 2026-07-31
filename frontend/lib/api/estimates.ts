@@ -67,6 +67,19 @@ export const estimatesApi = {
     const { data } = await api.post(`/api/estimates/${id}/reject/`, { reason, notes });
     return data.estimate;
   },
+  // Made's own urgent ask, 30 Jul follow-up: a real, downloadable
+  // PDF so SA/cashier can forward it themselves via their own
+  // WhatsApp — deliberately separate from the still-on-hold
+  // automated WhatsApp integration. Returns a real Blob, not JSON —
+  // same reasoning as contractsApi.exportTermin: this API
+  // authenticates with a bearer token in a header, which a plain
+  // <a href> link has no way to attach, so the caller fetches
+  // through this same authenticated axios instance and triggers the
+  // download manually.
+  async downloadQuotationPdf(id: string): Promise<Blob> {
+    const { data } = await api.get(`/api/estimates/${id}/quotation.pdf`, { responseType: "blob" });
+    return data;
+  },
 };
 
 export const estimateLineItemsApi = {
