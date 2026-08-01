@@ -13,7 +13,20 @@ import { Part, partsApi } from "@/lib/api/service";
 import { ArrowLeft, Download, Loader2, Plus, Printer, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+
+// Shared handle for any small editable card on this page (KM Saat
+// Masuk, Catatan dan Analisa) that has its own local "Simpan"
+// button. Chris's own explicit ask, 1 Aug QA: SA shouldn't have to
+// remember to click every small Simpan button before Setujui
+// Estimasi — the page itself flushes any real unsaved edit right
+// before approving. A genuine save failure (e.g. the odometer's own
+// hard-block validation) throws, so the caller can abort the
+// approval instead of silently discarding the value or approving
+// past a real validation error.
+interface FieldCardHandle {
+  flush: () => Promise<void>;
+}
 
 const STATUS_LABEL: Record<string, string> = {
   PENDING: "Menunggu Persetujuan", APPROVED: "Disetujui", REJECTED: "Ditolak",
@@ -112,7 +125,15 @@ function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName
       {estimate.diagnosis_notes && (
         <div style={{ marginBottom: 24 }}>
           <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Catatan dan Analisa</div>
-          <p style={{ fontSize: 13.5 }}>{estimate.diagnosis_notes}</p>
+          {/* Bug caught in 1 Aug QA: a textarea holding two real
+              lines ("Tenaga kurang" / "Asap tebal") was printing as
+              one run-on sentence with no separator at all — the
+              browser collapses \n by default unless told otherwise.
+              whiteSpace: "pre-line" preserves real line breaks while
+              still collapsing repeated spaces, same as any normal
+              paragraph — the correct middle ground vs. "pre", which
+              would also preserve accidental extra whitespace. */}
+          <p style={{ fontSize: 13.5, whiteSpace: "pre-line" }}>{estimate.diagnosis_notes}</p>
         </div>
       )}
 
@@ -145,11 +166,14 @@ function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName
 // Same editable-while-PENDING / read-only-otherwise pattern as
 // DiagnosisCard, kept as its own separate component rather than
 // merged into it — different concern, different validation rule.
-function OdometerCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: () => void }) {
+const OdometerCard = forwardRef<FieldCardHandle, { estimate: Estimate; onUpdated: () => void }>(
+  function OdometerCard({ estimate, onUpdated }, ref) {
   const editable = estimate.status === "PENDING";
   const [value, setValue] = useState(estimate.odometer_km_intake?.toString() ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isDirty = editable && value !== "" && value !== (estimate.odometer_km_intake?.toString() ?? "");
 
   const handleSave = async () => {
     if (!value) return;
@@ -163,10 +187,15 @@ function OdometerCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: 
       // telling SA precisely why it was rejected.
       const apiErrors = (err as { response?: { data?: { errors?: { odometer_km_intake?: string[] } } } })?.response?.data?.errors;
       setError(apiErrors?.odometer_km_intake?.[0] ?? "Gagal menyimpan KM saat masuk.");
+      throw err; // re-thrown so a flush() called from Setujui Estimasi can abort the approval, not swallow a real validation failure
     } finally {
       setSaving(false);
     }
   };
+
+  useImperativeHandle(ref, () => ({
+    flush: async () => { if (isDirty) await handleSave(); },
+  }));
 
   return (
     <div className="card" style={{ marginBottom: 20 }}>
@@ -200,12 +229,15 @@ function OdometerCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: 
       )}
     </div>
   );
-}
+});
 
-function DiagnosisCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated: () => void }) {
+const DiagnosisCard = forwardRef<FieldCardHandle, { estimate: Estimate; onUpdated: () => void }>(
+  function DiagnosisCard({ estimate, onUpdated }, ref) {
   const editable = estimate.status === "PENDING";
   const [notes, setNotes] = useState(estimate.diagnosis_notes);
   const [saving, setSaving] = useState(false);
+
+  const isDirty = editable && notes !== estimate.diagnosis_notes;
 
   const handleSave = async () => {
     setSaving(true);
@@ -216,6 +248,10 @@ function DiagnosisCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated:
       setSaving(false);
     }
   };
+
+  useImperativeHandle(ref, () => ({
+    flush: async () => { if (isDirty) await handleSave(); },
+  }));
 
   if (!editable) {
     return (
@@ -235,7 +271,7 @@ function DiagnosisCard({ estimate, onUpdated }: { estimate: Estimate; onUpdated:
       </button>
     </div>
   );
-}
+});
 
 function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate; catalog: Part[]; onUpdated: () => void }) {
   const editable = estimate.status === "PENDING";
@@ -376,6 +412,8 @@ function EstimateDetailContent() {
   const [rejectReason, setRejectReason] = useState<EstimateRejectionReason>("TOO_EXPENSIVE");
   const [rejectNotes, setRejectNotes] = useState("");
   const [rejecting, setRejecting] = useState(false);
+  const odometerRef = useRef<FieldCardHandle>(null);
+  const diagnosisRef = useRef<FieldCardHandle>(null);
 
   const load = () => estimatesApi.get(estimateId).then(setEstimate).finally(() => setLoading(false));
   useEffect(() => { if (estimateId) load(); }, [estimateId]);
@@ -387,6 +425,23 @@ function EstimateDetailContent() {
   const handleApprove = async () => {
     // A Rp 0 estimate is a legitimate edge case (e.g. testing, or a
     // genuinely free courtesy check) but far more often it means
+    // Chris's own explicit ask, 1 Aug QA: three separate small
+    // "Simpan" buttons on this page (KM Saat Masuk, Catatan dan
+    // Analisa) made it too easy to lose a real typed value if
+    // Setujui Estimasi got clicked first, before either. Flush both
+    // right here rather than trusting SA to remember every button —
+    // a no-op if nothing's actually unsaved, and a genuine failure
+    // (e.g. the odometer's own hard-block) aborts the approval
+    // outright instead of silently discarding the value.
+    setError(null);
+    try {
+      await odometerRef.current?.flush();
+      await diagnosisRef.current?.flush();
+    } catch {
+      setError("Ada perubahan (KM atau catatan) yang gagal disimpan — perbaiki dulu sebelum menyetujui.");
+      return;
+    }
+
     // someone moving fast approved before actually filling in line
     // items — worth one honest pause before committing to it, same
     // reasoning as the material-line-deletion reason prompt.
@@ -458,6 +513,12 @@ function EstimateDetailContent() {
     return <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…</div>;
   }
 
+  // Same "has anything real been added yet" check already used for
+  // the Rp 0 approve-confirmation below — a real Parts or Jasa line
+  // is what makes this an actual document worth sending, not just
+  // an empty PENDING estimate carrying a header and Rp 0 everywhere.
+  const hasContent = Number(estimate.total) > 0;
+
   return (
     <div>
       {/* Print stylesheet — identical pattern to invoice-detail's own,
@@ -478,11 +539,30 @@ function EstimateDetailContent() {
           <ArrowLeft size={14} /> Kembali ke Kendaraan
         </Link>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn-ghost" onClick={handleDownloadPdf} disabled={downloadingPdf}>
+          {/* Chris's own explicit call, 1 Aug QA: a Rp 0 estimate
+              with no real Parts/Jasa lines has nothing to actually
+              communicate — downloading/printing it produces a blank
+              shell, and it's too easy for SA to click either button
+              on a fresh estimate before adding anything. Disabled
+              (not hidden) with a tooltip, so the button's presence
+              still signals the feature exists, just not yet
+              usable — same choice already made for other guarded
+              actions in this app (frozen-after-invoice, etc). */}
+          <button
+            className="btn-ghost"
+            onClick={handleDownloadPdf}
+            disabled={downloadingPdf || !hasContent}
+            title={!hasContent ? "Tambah item Parts/Jasa terlebih dahulu" : undefined}
+          >
             {downloadingPdf ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={15} />}
             Download PDF
           </button>
-          <button className="btn-rust" onClick={() => window.print()}>
+          <button
+            className="btn-rust"
+            onClick={() => window.print()}
+            disabled={!hasContent}
+            title={!hasContent ? "Tambah item Parts/Jasa terlebih dahulu" : undefined}
+          >
             <Printer size={15} /> Cetak
           </button>
         </div>
@@ -493,8 +573,8 @@ function EstimateDetailContent() {
       <PrintableQuotation estimate={estimate} orgName={orgName} />
 
       <div className="no-print">
-        <OdometerCard estimate={estimate} onUpdated={load} />
-        <DiagnosisCard estimate={estimate} onUpdated={load} />
+        <OdometerCard ref={odometerRef} estimate={estimate} onUpdated={load} />
+        <DiagnosisCard ref={diagnosisRef} estimate={estimate} onUpdated={load} />
         <LineItemsSection estimate={estimate} catalog={catalog} onUpdated={load} />
 
         {estimate.status === "APPROVED" && estimate.work_order && (
