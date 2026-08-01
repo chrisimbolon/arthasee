@@ -257,7 +257,15 @@ const DiagnosisCard = forwardRef<FieldCardHandle, { estimate: Estimate; onUpdate
     return (
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 14, color: "var(--ink)", fontWeight: 700, marginBottom: 8 }}>Catatan dan Analisa</div>
-        <p style={{ fontSize: 14 }}>{estimate.diagnosis_notes || "—"}</p>
+        {/* Same bug, same fix, as PrintableQuotation's own Catatan
+            dan Analisa above — caught separately in 1 Aug QA because
+            this is a genuinely different render path (the read-only
+            view shown once an estimate is APPROVED/REJECTED, not the
+            printed document), not a duplicate of the earlier fix.
+            whiteSpace: "pre-line" preserves real line breaks
+            ("Asap tebal" / "Rem kurang kuat") while still collapsing
+            accidental repeated whitespace, same reasoning as before. */}
+        <p style={{ fontSize: 14, whiteSpace: "pre-line" }}>{estimate.diagnosis_notes || "—"}</p>
       </div>
     );
   }
