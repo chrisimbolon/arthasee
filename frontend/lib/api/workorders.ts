@@ -190,6 +190,22 @@ export const workOrdersApi = {
     const { data } = await api.post(`/api/work-orders/${id}/cancel/`);
     return data.work_order;
   },
+  // Made's own confirmed answer, 1 Aug: an internal, no-price job
+  // ticket for the mechanic, available the moment "Mulai Dikerjakan"
+  // is clicked. Returns a real Blob, not JSON — same reasoning as
+  // estimatesApi.downloadQuotationPdf: this API authenticates with a
+  // bearer token in a header, which a plain <a href> has no way to
+  // attach, so the caller fetches through this same authenticated
+  // axios instance and triggers the download manually. Backend hard-
+  // gates on status !== "OPEN" (409 otherwise) — deliberately NOT
+  // work_started_at, which is Estimate-only and stays null forever
+  // for a direct-entry WorkOrder. This method doesn't duplicate that
+  // check; the caller is expected to only offer it once wo.status
+  // has left "OPEN".
+  async downloadJobTicketPdf(id: string): Promise<Blob> {
+    const { data } = await api.get(`/api/work-orders/${id}/job-ticket.pdf`, { responseType: "blob" });
+    return data;
+  },
 };
 
 export const workOrderJobLinesApi = {
