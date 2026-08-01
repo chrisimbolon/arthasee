@@ -6,12 +6,14 @@ from datetime import date, timedelta
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import StockAdjustment
 from django.db import transaction
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
 from .models import (Mechanic, WorkOrder, WorkOrderJobLine,
                      WorkOrderMaterialLine, WorkOrderStage)
+from .pdf import build_job_ticket_pdf
 from .serializers import (MechanicSerializer, WorkOrderJobLineSerializer,
                           WorkOrderListSerializer,
                           WorkOrderMaterialLineSerializer, WorkOrderSerializer,
@@ -111,6 +113,55 @@ class WorkOrderDetailView(TenantScopedAPIView):
             serializer.save()
             return Response({"success": True, "work_order": WorkOrderSerializer(order).data})
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkOrderJobTicketPdfView(TenantScopedAPIView):
+    """
+    GET /api/work-orders/<id>/job-ticket.pdf
+
+    Made's own confirmed answer, 1 Aug: this is an internal, no-price
+    shop-floor job ticket for the mechanic, printed the moment "Mulai
+    Dikerjakan" is clicked — not before. That's a real, enforced
+    gate here, not just a hidden frontend button: a WorkOrder that
+    hasn't started yet has nothing real to print (no work_started_at
+    to show, and printing an empty ticket early risks it going stale
+    or getting handed to the wrong mechanic before the job is even
+    assigned for real). Mirrors the same "backend is the real
+    enforcement, frontend just disables proactively" split already
+    established for the vehicle-lock guard (see EstimateListView.post
+    and WorkOrderListView.post above).
+
+    Returns a raw HttpResponse, not a DRF Response — same reasoning
+    as EstimateQuotationPdfView: a real file, not JSON.
+    """
+    model = WorkOrder
+
+    def get(self, request, pk):
+        work_order = self.get_object(pk)
+        # Chris's own catch, 1 Aug: WorkOrder.mark_started() is
+        # deliberately a no-op for a WorkOrder with no Estimate
+        # origin (see that method's own docstring) — work_started_at
+        # stays null forever for a direct-entry WorkOrder even after
+        # "Mulai Dikerjakan" is clicked. Gating this endpoint on
+        # work_started_at would leave it permanently 409 for the
+        # majority of real jobs. The real trigger is the status
+        # transition itself (OPEN -> IN_PROGRESS), which fires
+        # unconditionally regardless of Estimate origin — that's the
+        # actual signal to gate on.
+        if work_order.status == "OPEN":
+            return Response(
+                {"success": False, "message": "Job ticket tersedia setelah work order mulai dikerjakan."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        pdf_bytes = build_job_ticket_pdf(work_order, org_name=work_order.organization.name)
+
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        # Sanitized the same way EstimateQuotationPdfView's own
+        # filename is — no reason to trust a real plate number won't
+        # ever carry a character a filesystem chokes on.
+        safe_plate = "".join(c if c.isalnum() or c in " -_" else "_" for c in work_order.vehicle.plate_number)
+        response["Content-Disposition"] = f'attachment; filename="WO_{work_order.number}_{safe_plate}.pdf"'
+        return response
 
 
 class WorkOrderStatusUpdateView(TenantScopedAPIView):

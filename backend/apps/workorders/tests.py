@@ -643,6 +643,157 @@ class WorkOrderStartedAtTests(WorkOrderAPITestBase):
             self.assertEqual(self.wo.work_started_at, original)
 
 
+class WorkOrderJobTicketPdfTests(WorkOrderAPITestBase):
+    """
+    Chris's own confirmed answers, 1 Aug: an internal, no-price job
+    ticket for the mechanic, available the moment "Mulai Dikerjakan"
+    is clicked.
+
+    The gate is deliberately status != "OPEN", NOT work_started_at —
+    caught mid-build, and directly follows from what
+    WorkOrderStartedAtTests.test_moving_to_in_progress_without_
+    estimate_origin_leaves_it_null already proves: work_started_at is
+    Estimate-only and stays null forever for a direct-entry WorkOrder
+    (the majority of real jobs). Gating on that field would have left
+    the endpoint permanently 409 for most work orders — this class
+    exists specifically to catch that regression if it's ever
+    reintroduced, the same reasoning EstimateRealTransactionTests
+    exists for its own once-real bug.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_returns_409_while_still_open(self):
+        resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-ticket.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_available_once_in_progress_even_without_estimate_origin(self):
+        """
+        The actual regression test for the bug this class exists to
+        prevent: a plain, direct-entry WorkOrder (no Estimate, the
+        real default case) moved to IN_PROGRESS via the real status
+        endpoint. work_started_at stays null (confirmed separately by
+        WorkOrderStartedAtTests) — this must still succeed anyway.
+        """
+        patch_resp = self.client.patch(
+            f"/api/work-orders/{self.wo.id}/status/", {"status": "IN_PROGRESS"}, format="json",
+        )
+        self.assertIsNone(patch_resp.data["work_order"]["work_started_at"])
+
+        resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-ticket.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        self.assertTrue(resp.content.startswith(b"%PDF"))
+
+    def test_available_during_qc(self):
+        self.wo.status = "QC"
+        self.wo.save(update_fields=["status"])
+        resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-ticket.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_available_after_done(self):
+        """A finished job's ticket should still be retrievable — e.g.
+        Made wanting to reprint a record after the fact."""
+        self.wo.close(closed_by=self.owner)
+        resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-ticket.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_known_edge_case_cancelled_straight_from_open_is_still_printable(self):
+        """
+        Documents a real, deliberately-accepted edge case rather than
+        silently patching around it: a WorkOrder cancelled directly
+        from OPEN (e.g. customer changed their mind before any work
+        began) ends up with status="CANCELLED" — which is not "OPEN"
+        — so this endpoint allows it through. There's no separate
+        field distinguishing "was genuinely IN_PROGRESS at some
+        point, then cancelled" from "went straight OPEN -> CANCELLED"
+        for a direct-entry WorkOrder (work_started_at is null in both
+        cases either way, per the same Estimate-only restriction).
+        Accepted rather than engineered around: printing an
+        essentially-empty ticket for a same-day cancellation is
+        harmless, and adding a new field just to distinguish this
+        felt like solving a problem nobody's actually reported yet.
+        """
+        self.wo.cancel()
+        resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-ticket.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_cannot_access_a_different_organizations_work_order(self):
+        other_org = Organization.objects.create(name="Bengkel Lain WO Ticket", invoice_code="BLWT")
+        other_customer = Customer.objects.create(organization=other_org, name="Pelanggan Lain")
+        other_vehicle = Vehicle.objects.create(
+            organization=other_org, customer=other_customer, plate_number="BP 7001 AA",
+            vehicle_type="Mobil", model="Test", manufacture_year=2020,
+        )
+        other_wo = WorkOrder.objects.create(organization=other_org, vehicle=other_vehicle, status="IN_PROGRESS")
+        resp = self.client.get(f"/api/work-orders/{other_wo.id}/job-ticket.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class WorkOrderJobTicketPdfContentTests(APITestCase):
+    """
+    Unit-level tests against apps.workorders.pdf's own pure functions
+    directly — deliberately not going through a full PDF render for
+    these, so they don't depend on xhtml2pdf actually being
+    installed/working in whatever environment runs them, matching
+    the honest "could not be tested end-to-end here" caveat already
+    on both pdf.py modules. The one full-render smoke test
+    (test_available_once_in_progress_even_without_estimate_origin
+    above) still exists to catch a genuinely broken render; these
+    exist to prove the specific no-price rule Made was explicit
+    about, at the string level where it's cheap and exact to check.
+    """
+
+    def test_price_suffix_is_stripped_from_labor_line_description(self):
+        from apps.workorders.pdf import _strip_price_suffix
+        self.assertEqual(
+            _strip_price_suffix("Setel Rem (estimasi Rp 200.000)"), "Setel Rem",
+        )
+
+    def test_price_suffix_stripping_is_case_insensitive_and_trims_whitespace(self):
+        from apps.workorders.pdf import _strip_price_suffix
+        self.assertEqual(
+            _strip_price_suffix("Ganti Oli   (ESTIMASI RP 1.500.000)  "), "Ganti Oli",
+        )
+
+    def test_description_with_no_price_suffix_is_left_unchanged(self):
+        """A direct-entry job line (no Estimate origin) never has this
+        suffix at all — must pass through untouched, not stripped of
+        real, legitimate text that merely happens to end differently."""
+        from apps.workorders.pdf import _strip_price_suffix
+        self.assertEqual(_strip_price_suffix("Ganti kampas rem depan"), "Ganti kampas rem depan")
+
+    def test_material_rows_never_include_price_or_subtotal(self):
+        """
+        The real assertion behind Made's "no prices anywhere on this
+        document" rule, checked directly against the rendered HTML
+        fragment rather than trusting the Python source not to
+        regress — WorkOrderMaterialLine legitimately carries both
+        unit_price_at_time and a computed subtotal, and it would be
+        an easy, silent mistake to accidentally render one of them
+        later while adding some other field.
+        """
+        from decimal import Decimal
+        from unittest.mock import MagicMock
+
+        from apps.workorders.pdf import _material_rows
+
+        line = MagicMock()
+        line.part.name = "Kampas Rem"
+        line.part.unit = "set"
+        line.quantity = Decimal("2.00")
+        line.unit_price_at_time = Decimal("250000.00")
+
+        html = _material_rows([line])
+        self.assertIn("Kampas Rem", html)
+        self.assertIn("2 set", html)
+        self.assertNotIn("Rp", html)
+        self.assertNotIn("250000", html)
+        self.assertNotIn("250.000", html)
+
+
 class WorkOrderStageTests(WorkOrderAPITestBase):
     """
     Made's own request: a custom, per-repair breakdown of heavy jobs

@@ -7,7 +7,8 @@ from .views import (ActiveJobsView, DashboardSummaryView, MechanicDetailView,
                     MechanicListView, WorkOrderCancelView, WorkOrderCloseView,
                     WorkOrderDetailView, WorkOrderJobLineAssignStageView,
                     WorkOrderJobLineListView, WorkOrderJobLineToggleView,
-                    WorkOrderListView, WorkOrderMaterialLineDetailView,
+                    WorkOrderJobTicketPdfView, WorkOrderListView,
+                    WorkOrderMaterialLineDetailView,
                     WorkOrderMaterialLineListView, WorkOrderStageCompleteView,
                     WorkOrderStageDetailView, WorkOrderStageListView,
                     WorkOrderStageStartView, WorkOrderStatusUpdateView)
@@ -26,6 +27,13 @@ urlpatterns = [
     path("work-orders/<uuid:pk>/status/",  WorkOrderStatusUpdateView.as_view(), name="work-order-status"),
     path("work-orders/<uuid:pk>/close/",   WorkOrderCloseView.as_view(),        name="work-order-close"),
     path("work-orders/<uuid:pk>/cancel/",  WorkOrderCancelView.as_view(),       name="work-order-cancel"),
+
+    # Made's own confirmed answer, 1 Aug: internal, no-price job
+    # ticket for the mechanic, available once status leaves "OPEN".
+    # No trailing slash — matches EstimateQuotationPdfView's own
+    # "quotation.pdf" route exactly, same real-file-not-JSON reasoning.
+    path("work-orders/<uuid:pk>/job-ticket.pdf",
+         WorkOrderJobTicketPdfView.as_view(), name="work-order-job-ticket-pdf"),
 
     path("work-orders/<uuid:work_order_id>/job-lines/",
          WorkOrderJobLineListView.as_view(), name="work-order-job-line-list"),
