@@ -14,7 +14,7 @@ import {
   workOrderStagesApi,
   WorkOrderStatus,
 } from "@/lib/api/workorders";
-import { AlertTriangle, ArrowLeft, Check, Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Download, Loader2, Plus, Printer, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -520,6 +520,7 @@ function WorkOrderDetailContent() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [closeDate, setCloseDate] = useState(new Date().toISOString().slice(0, 10));
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const load = () => workOrdersApi.get(workOrderId).then(setWo).finally(() => setLoading(false));
   useEffect(() => { if (workOrderId) load(); }, [workOrderId]);
@@ -569,6 +570,57 @@ function WorkOrderDetailContent() {
     }
   };
 
+  // Made's own confirmed answer, 1 Aug: an internal, no-price job
+  // ticket for the mechanic, available the moment "Mulai Dikerjakan"
+  // is clicked. Gated on wo.status !== "OPEN", NOT wo.work_started_at
+  // — that field is deliberately Estimate-only (see WorkOrder.
+  // mark_started() on the backend) and stays null forever for a
+  // direct-entry WorkOrder, which is the majority of real jobs.
+  // Caught this the hard way mid-build: gating on work_started_at
+  // would've left this permanently disabled for most work orders.
+  const handleDownloadPdf = async () => {
+    if (!wo) return;
+    setDownloadingPdf(true); setError(null);
+    try {
+      const blob = await workOrdersApi.downloadJobTicketPdf(wo.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `WO_${wo.number}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Gagal mengunduh job ticket.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
+  // Chris's own explicit ask, 1 Aug: unlike estimate-detail/invoice-
+  // detail, this page has no dedicated print-styled layout — it's
+  // all live editable forms (selects, checkboxes, delete icons). A
+  // raw window.print() here would print that messy interactive UI
+  // verbatim, not a clean ticket. Rather than building and
+  // maintaining a second, React-only copy of the exact same layout
+  // already built once in workorders/pdf.py, "Cetak" opens the same
+  // PDF in a new tab instead — one real source of truth, and the
+  // browser's own PDF viewer handles printing from there. Genuinely
+  // simpler than Estimasi/Invoice's own two-copies-of-the-same-
+  // layout pattern, not a shortcut around it.
+  const handlePrint = async () => {
+    if (!wo) return;
+    setDownloadingPdf(true); setError(null);
+    try {
+      const blob = await workOrdersApi.downloadJobTicketPdf(wo.id);
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+    } catch {
+      setError("Gagal membuka job ticket.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
   if (!workOrderId) {
     return <div style={{ color: "var(--danger)" }}>Work order tidak ditemukan — tidak ada ID yang diberikan.</div>;
   }
@@ -578,9 +630,38 @@ function WorkOrderDetailContent() {
 
   return (
     <div>
-      <Link href={`/dashboard/vehicle-detail?id=${wo.vehicle}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)", marginBottom: 18 }}>
-        <ArrowLeft size={14} /> Kembali ke Kendaraan
-      </Link>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <Link href={`/dashboard/vehicle-detail?id=${wo.vehicle}`} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13.5, color: "var(--steel)" }}>
+          <ArrowLeft size={14} /> Kembali ke Kendaraan
+        </Link>
+        {/* Chris's own explicit ask, 1 Aug: a real, printable/
+            downloadable job ticket for the mechanic — gated on
+            wo.status !== "OPEN", not wo.work_started_at (that field
+            is Estimate-only, see the backend's own mark_started()).
+            Backend enforces this for real (409 if still OPEN);
+            disabled-with-tooltip here just keeps SA from hitting
+            that error in the common case, same pattern as the PDF
+            gate on estimate-detail. */}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            className="btn-ghost"
+            onClick={handleDownloadPdf}
+            disabled={downloadingPdf || wo.status === "OPEN"}
+            title={wo.status === "OPEN" ? "Tersedia setelah Mulai Dikerjakan" : undefined}
+          >
+            {downloadingPdf ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={15} />}
+            Download PDF
+          </button>
+          <button
+            className="btn-rust"
+            onClick={handlePrint}
+            disabled={downloadingPdf || wo.status === "OPEN"}
+            title={wo.status === "OPEN" ? "Tersedia setelah Mulai Dikerjakan" : undefined}
+          >
+            <Printer size={15} /> Cetak
+          </button>
+        </div>
+      </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
         <div>
