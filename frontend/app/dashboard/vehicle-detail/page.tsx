@@ -188,7 +188,27 @@ const WO_STATUS_COLOR: Record<WorkOrderStatus, string> = {
 };
 const WO_OPEN_STATUSES: WorkOrderStatus[] = ["OPEN", "IN_PROGRESS", "QC"];
 
-function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
+function WorkOrdersSection({
+  vehicleId, disableCreate, disabledReason, onActiveOrderChange,
+}: {
+  vehicleId: string;
+  // Chris's own explicit ask, 1 Aug QA: a real gap surfaced live — a
+  // vehicle already mid-repair still let SA create a second,
+  // independent WorkOrder or Estimate for it. Proactive-only here —
+  // the real enforcement is the matching 409 guard now added to both
+  // WorkOrderListView.post() and EstimateListView.post() on the
+  // backend; this just keeps SA from hitting that error in the
+  // common case by disabling the button before the click happens.
+  disableCreate?: boolean;
+  disabledReason?: string;
+  // Reports this section's own "is there an active WorkOrder right
+  // now" state up to the parent, so EstimatesSection (a sibling, not
+  // a child) can disable its own "Buat Estimasi" button in response
+  // — the two sections each own their own fetched list, so this is
+  // the simplest way to cross-inform them without a new shared API
+  // call or lifting both lists wholesale into the parent.
+  onActiveOrderChange?: (hasActive: boolean, activeNumber: string | null) => void;
+}) {
   const router = useRouter();
   const [orders, setOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -197,6 +217,13 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
 
   const load = () => workOrdersApi.list(vehicleId).then(setOrders).finally(() => setLoading(false));
   useEffect(() => { load(); }, [vehicleId]);
+
+  useEffect(() => {
+    if (!onActiveOrderChange) return;
+    const active = orders.find((wo) => WO_OPEN_STATUSES.includes(wo.status));
+    onActiveOrderChange(!!active, active ? active.number : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orders]);
 
   const createAndOpen = async () => {
     setCreating(true);
@@ -229,7 +256,12 @@ function WorkOrdersSection({ vehicleId }: { vehicleId: string }) {
         <h2 style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
           <ClipboardList size={16} /> Work Order
         </h2>
-        <button className="btn-rust" onClick={createAndOpen} disabled={creating}>
+        <button
+          className="btn-rust"
+          onClick={createAndOpen}
+          disabled={creating || disableCreate}
+          title={disableCreate ? disabledReason : undefined}
+        >
           {creating ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <><Plus size={16} /> Buat Work Order</>}
         </button>
       </div>
@@ -272,7 +304,19 @@ const EST_STATUS_COLOR: Record<EstimateStatus, string> = {
   PENDING: "var(--rust)", APPROVED: "#2e7d4f", REJECTED: "var(--danger)",
 };
 
-function EstimatesSection({ vehicleId }: { vehicleId: string }) {
+function EstimatesSection({
+  vehicleId, disableCreate, disabledReason, onPendingChange,
+}: {
+  vehicleId: string;
+  disableCreate?: boolean;
+  disabledReason?: string;
+  // Reports this section's own "is there a PENDING estimate right
+  // now" state up to the parent, so WorkOrdersSection (a sibling)
+  // can disable its own "Buat Work Order" button in response — same
+  // cross-informing pattern as WorkOrdersSection's own
+  // onActiveOrderChange, mirrored in the other direction.
+  onPendingChange?: (hasPending: boolean, pendingNumber: string | null) => void;
+}) {
   const router = useRouter();
   const [estimates, setEstimates] = useState<EstimateSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -281,6 +325,14 @@ function EstimatesSection({ vehicleId }: { vehicleId: string }) {
 
   const load = () => estimatesApi.list(vehicleId).then(setEstimates).finally(() => setLoading(false));
   useEffect(() => { load(); }, [vehicleId]);
+
+  const pending = estimates.filter((e) => e.status === "PENDING");
+
+  useEffect(() => {
+    if (!onPendingChange) return;
+    onPendingChange(pending.length > 0, pending.length > 0 ? pending[0].number : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estimates]);
 
   const createDraft = async () => {
     setCreating(true);
@@ -292,7 +344,6 @@ function EstimatesSection({ vehicleId }: { vehicleId: string }) {
     }
   };
 
-  const pending = estimates.filter((e) => e.status === "PENDING");
   const history = estimates.filter((e) => e.status !== "PENDING");
   const visible = showHistory ? estimates : pending;
 
@@ -302,7 +353,12 @@ function EstimatesSection({ vehicleId }: { vehicleId: string }) {
         <h2 style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
           <FileSearch size={16} /> Estimasi
         </h2>
-        <button className="btn-rust" onClick={createDraft} disabled={creating}>
+        <button
+          className="btn-rust"
+          onClick={createDraft}
+          disabled={creating || disableCreate}
+          title={disableCreate ? disabledReason : undefined}
+        >
           {creating ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <><Plus size={16} /> Buat Estimasi</>}
         </button>
       </div>
@@ -508,6 +564,14 @@ function VehicleDetailContent() {
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [loading, setLoading] = useState(true);
   const [invoicingRecord, setInvoicingRecord] = useState<ServiceRecord | null>(null);
+  // Chris's own explicit ask, 1 Aug QA: one vehicle, one active job
+  // at a time. Each holds the sibling section's own "is there
+  // already one of these in flight" state, reported up via the
+  // callback props below — neither section needs the other's full
+  // fetched list, just this one boolean + the number to show in the
+  // tooltip.
+  const [activeWorkOrder, setActiveWorkOrder] = useState<{ has: boolean; number: string | null }>({ has: false, number: null });
+  const [pendingEstimate, setPendingEstimate] = useState<{ has: boolean; number: string | null }>({ has: false, number: null });
 
   const load = () => vehiclesApi.get(vehicleId).then(setVehicle).finally(() => setLoading(false));
   useEffect(() => {
@@ -587,8 +651,24 @@ function VehicleDetailContent() {
         </div>
       )}
 
-      <EstimatesSection vehicleId={vehicle.id} />
-      <WorkOrdersSection vehicleId={vehicle.id} />
+      <EstimatesSection
+        vehicleId={vehicle.id}
+        disableCreate={activeWorkOrder.has}
+        disabledReason={activeWorkOrder.has ? `Kendaraan ini sedang dikerjakan (WO #${activeWorkOrder.number})` : undefined}
+        onPendingChange={(has, number) => setPendingEstimate({ has, number })}
+      />
+      <WorkOrdersSection
+        vehicleId={vehicle.id}
+        disableCreate={activeWorkOrder.has || pendingEstimate.has}
+        disabledReason={
+          activeWorkOrder.has
+            ? `Kendaraan ini sudah punya work order aktif (WO #${activeWorkOrder.number})`
+            : pendingEstimate.has
+            ? `Kendaraan ini punya estimasi menunggu persetujuan (EST #${pendingEstimate.number})`
+            : undefined
+        }
+        onActiveOrderChange={(has, number) => setActiveWorkOrder({ has, number })}
+      />
 
       <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
         <Wrench size={16} /> Riwayat Servis
