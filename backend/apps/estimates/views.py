@@ -24,6 +24,39 @@ class EstimateListView(TenantScopedAPIView):
         return Response({"success": True, "count": estimates.count(), "results": serializer.data})
 
     def post(self, request, vehicle_id):
+        # Chris's own explicit ask, 1 Aug QA: a real gap surfaced live
+        # on vehicle-detail — "Buat Estimasi" stayed enabled even
+        # while a WorkOrder for the same vehicle was already
+        # IN_PROGRESS, which let SA spin up a second, independent job
+        # for a car already mid-repair. A second PENDING Estimate for
+        # the same vehicle is the milder version of the identical
+        # problem (Estimate.approve() would eventually create its own
+        # second WorkOrder), so both are checked here, not just the
+        # WorkOrder case. This is the real enforcement layer — the
+        # frontend disables both buttons proactively too, but a slow
+        # double-click or a second browser tab must still be caught
+        # here, not just hidden in the UI.
+        #
+        # Local imports: apps.estimates has no other reason to depend
+        # on apps.workorders at module level, matching the same
+        # cross-app convention Estimate.approve() itself already
+        # established (see models.py) rather than introducing a new
+        # module-level dependency between the two apps.
+        from apps.workorders.models import WorkOrder
+        from apps.workorders.views import \
+            OPEN_STATUSES as WORKORDER_OPEN_STATUSES
+
+        if WorkOrder.objects.filter(vehicle_id=vehicle_id, status__in=WORKORDER_OPEN_STATUSES).exists():
+            return Response(
+                {"success": False, "message": "Kendaraan ini sedang dikerjakan — selesaikan atau batalkan work order aktifnya dulu sebelum membuat estimasi baru."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if Estimate.objects.filter(vehicle_id=vehicle_id, status="PENDING").exists():
+            return Response(
+                {"success": False, "message": "Kendaraan ini sudah punya estimasi yang menunggu persetujuan."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         payload = dict(request.data)
         payload["vehicle"] = vehicle_id
         serializer = EstimateSerializer(data=payload, context={"request": request})

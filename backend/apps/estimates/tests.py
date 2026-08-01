@@ -49,10 +49,134 @@ class EstimateNumberingTests(EstimateAPITestBase):
         self.assertEqual(resp.data["estimate"]["number"], "1")
 
     def test_sequence_increments(self):
+        """
+        Two DIFFERENT vehicles, deliberately — not the same vehicle
+        twice. EstimateSequence is one row per organization, not per
+        vehicle (same shape as WorkOrderSequence), so this is
+        actually the more accurate way to prove numbering doesn't
+        reset. It's also now a real requirement: the same-vehicle-
+        twice version of this test would hit the new "one vehicle,
+        one active job at a time" guard (see
+        EstimateVehicleLockGuardTests below) and get a 409 instead of
+        a second Estimate.
+        """
+        second_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5502 AA", manufacture_year=2021,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
         first = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
-        second = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        second = self.client.post(f"/api/vehicles/{second_vehicle.id}/estimates/", {}, format="json")
         self.assertEqual(first.data["estimate"]["sequence_number"], 1)
         self.assertEqual(second.data["estimate"]["sequence_number"], 2)
+
+
+class EstimateVehicleLockGuardTests(EstimateAPITestBase):
+    """
+    Chris's own explicit ask, 1 Aug QA: a real gap surfaced live on
+    vehicle-detail — "Buat Estimasi" stayed enabled even while a
+    WorkOrder for the same vehicle was already IN_PROGRESS, letting
+    SA create a second, independent Estimate for a car already
+    mid-repair (which would eventually promote into its own second
+    WorkOrder via approve()). The rule: one vehicle, one active job
+    (an active WorkOrder OR a PENDING Estimate) at a time.
+
+    Mirror-image of WorkOrderVehicleLockGuardTests in
+    apps.workorders.tests, which covers WorkOrderListView.post()'s
+    own half of the exact same rule — kept as two separate classes,
+    each testing its own real enforcement point, rather than one
+    combined class straddling two apps.
+    """
+
+    def test_cannot_create_estimate_while_vehicle_has_an_open_work_order(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="OPEN")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(resp.data["success"])
+
+    def test_cannot_create_estimate_while_vehicle_has_an_in_progress_work_order(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="IN_PROGRESS")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_cannot_create_estimate_while_vehicle_has_a_qc_work_order(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="QC")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_can_create_estimate_after_the_work_order_is_done(self):
+        done_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        done_wo.close(closed_by=self.owner)
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_can_create_estimate_after_the_work_order_is_cancelled(self):
+        cancelled_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        cancelled_wo.cancel()
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_cannot_create_estimate_while_vehicle_already_has_a_pending_estimate(self):
+        """
+        The milder, same-app version of the identical problem: two
+        PENDING Estimates on one vehicle at once, each capable of
+        independently promoting into its own WorkOrder via approve().
+        """
+        Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_approved_estimate_itself_does_not_block_once_its_work_order_is_closed(self):
+        """
+        Proves the guard's own-app check is scoped to status=
+        "PENDING" specifically, not "any Estimate exists for this
+        vehicle at all." Estimate.approve() promotes it straight
+        into a real WorkOrder, which becomes the new, separate
+        blocker (caught by the WorkOrder-status half of this same
+        guard) in its own right — closing that WorkOrder removes the
+        only real block left, and a fresh Estimate creation succeeds.
+        """
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        work_order = estimate.approve(approved_by=self.owner)
+        work_order.close(closed_by=self.owner)
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_can_create_estimate_when_previous_one_is_rejected(self):
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        estimate.reject(reason="NOT_NEEDED")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_guard_does_not_block_a_different_vehicle(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="IN_PROGRESS")
+        other_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5503 AA", manufacture_year=2021,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        resp = self.client.post(f"/api/vehicles/{other_vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_guard_scoped_to_organization(self):
+        """
+        Real defense-in-depth check, same reasoning as the mirrored
+        test in WorkOrderVehicleLockGuardTests: an active WorkOrder
+        on a same-numbered vehicle in a DIFFERENT organization must
+        never block this one. The WorkOrder half of this guard
+        queries WorkOrder.objects directly (not through
+        self.get_queryset()), so this is worth proving explicitly
+        rather than trusting it by inheritance alone.
+        """
+        other_org = Organization.objects.create(name="Bengkel Lain Est Lock", invoice_code="BLEL")
+        other_customer = Customer.objects.create(organization=other_org, name="Pelanggan Lain")
+        other_vehicle = Vehicle.objects.create(
+            organization=other_org, customer=other_customer, plate_number="BP 5501 AA",  # same plate on purpose
+            vehicle_type="Mobil", model="Test", manufacture_year=2020,
+        )
+        WorkOrder.objects.create(organization=other_org, vehicle=other_vehicle, status="IN_PROGRESS")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
 
 class EstimateLineItemTests(EstimateAPITestBase):
