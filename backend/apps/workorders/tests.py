@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest.mock import PropertyMock, patch
 
 from apps.authentication.models import CustomUser
+from apps.estimates.models import Estimate
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
@@ -53,10 +54,138 @@ class WorkOrderNumberingTests(WorkOrderAPITestBase):
         self.assertEqual(resp.data["work_order"]["sequence_number"], 1)
 
     def test_sequence_increments_and_does_not_reset(self):
+        """
+        Two DIFFERENT vehicles, deliberately — not the same vehicle
+        twice. WorkOrderSequence is one row per organization, not per
+        vehicle (see WorkOrderSequence's own docstring), so this is
+        actually the more accurate way to prove numbering doesn't
+        reset. It's also now a real requirement, not just a style
+        choice: the same-vehicle-twice version of this test would
+        hit the new "one vehicle, one active job at a time" guard
+        (see WorkOrderVehicleLockGuardTests below) and get a 409
+        instead of a second WorkOrder.
+        """
+        second_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 1451 AB", manufacture_year=2022,
+            vehicle_type="Mobil", model="Mitsubishi Xtrada",
+        )
         first = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
-        second = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        second = self.client.post(f"/api/vehicles/{second_vehicle.id}/work-orders/", {}, format="json")
         self.assertEqual(first.data["work_order"]["sequence_number"], 1)
         self.assertEqual(second.data["work_order"]["sequence_number"], 2)
+
+
+class WorkOrderVehicleLockGuardTests(WorkOrderAPITestBase):
+    """
+    Chris's own explicit ask, 1 Aug QA: a real gap surfaced live on
+    vehicle-detail — both "Buat Estimasi" and "Buat Work Order"
+    stayed enabled even while a WorkOrder for that same vehicle was
+    already IN_PROGRESS, letting SA create a second, independent job
+    for a car already mid-repair. The rule: one vehicle, one active
+    job (an active WorkOrder OR a PENDING Estimate) at a time.
+
+    This class only covers WorkOrderListView.post()'s own half of the
+    guard — the mirror-image check inside EstimateListView.post()
+    (blocking a new Estimate while a WorkOrder or another PENDING
+    Estimate is already active) belongs in apps.estimates.tests
+    instead, matching how every other cross-app rule in this project
+    is already tested at each of its own real enforcement points
+    rather than once for both.
+    """
+
+    def test_cannot_create_work_order_while_vehicle_has_an_open_work_order(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="OPEN")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(resp.data["success"])
+
+    def test_cannot_create_work_order_while_vehicle_has_an_in_progress_work_order(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="IN_PROGRESS")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_cannot_create_work_order_while_vehicle_has_a_qc_work_order(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="QC")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_can_create_work_order_after_the_previous_one_is_done(self):
+        done_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        done_wo.close(closed_by=self.owner)
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_can_create_work_order_after_the_previous_one_is_cancelled(self):
+        cancelled_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        cancelled_wo.cancel()
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_cannot_create_work_order_while_vehicle_has_a_pending_estimate(self):
+        """
+        The milder version of the same problem: a PENDING Estimate
+        would eventually create its own WorkOrder via approve() — so
+        this is checked here too, not just an existing active
+        WorkOrder.
+        """
+        Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_approved_estimate_itself_does_not_block_once_its_work_order_is_closed(self):
+        """
+        Proves the guard's Estimate check is scoped to status=
+        "PENDING" specifically, not "any Estimate exists for this
+        vehicle at all." Estimate.approve() promotes it straight
+        into a real WorkOrder (see Estimate.approve() in models.py),
+        which becomes the new, separate blocker in its own right —
+        closing that WorkOrder removes the only real block left, and
+        a fresh creation succeeds. If the guard were wrongly checking
+        "any Estimate" instead of "PENDING Estimate," this would
+        still 409 even after the WorkOrder it produced is done.
+        """
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        work_order = estimate.approve(approved_by=self.owner)
+        work_order.close(closed_by=self.owner)
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_can_create_work_order_when_estimate_is_rejected(self):
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        estimate.reject(reason="NOT_NEEDED")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_guard_does_not_block_a_different_vehicle(self):
+        WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="IN_PROGRESS")
+        other_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 2000 AA", manufacture_year=2022,
+            vehicle_type="Mobil", model="Test Car",
+        )
+        resp = self.client.post(f"/api/vehicles/{other_vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_guard_scoped_to_organization_not_just_vehicle_status(self):
+        """
+        Real defense-in-depth check: an active WorkOrder on the same-
+        numbered vehicle in a DIFFERENT organization must never block
+        this one — TenantScopedAPIView's own scoping already
+        guarantees this everywhere else, but the guard's own query
+        filters directly on WorkOrder.objects (not self.get_queryset()
+        in EstimateListView's half of this check), so it's worth
+        proving explicitly rather than trusting it by inheritance.
+        """
+        other_org = Organization.objects.create(name="Bengkel Lain WO Lock", invoice_code="BLWL")
+        other_customer = Customer.objects.create(organization=other_org, name="Pelanggan Lain")
+        other_vehicle = Vehicle.objects.create(
+            organization=other_org, customer=other_customer, plate_number="BP 1451 AA",  # same plate on purpose
+            vehicle_type="Mobil", model="Test", manufacture_year=2020,
+        )
+        WorkOrder.objects.create(organization=other_org, vehicle=other_vehicle, status="IN_PROGRESS")
+        resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
 
 class WorkOrderJobLineTests(WorkOrderAPITestBase):
@@ -369,6 +498,18 @@ class WorkOrderRealTransactionTests(APITransactionTestCase):
             plate_number="BP 9001 AA", manufacture_year=2022,
             vehicle_type="Mobil", model="Test Car",
         )
+        # Second vehicle, needed by test_second_work_order_gets_next_
+        # sequence_via_real_http_requests below — same reasoning as
+        # WorkOrderNumberingTests.test_sequence_increments_and_does_
+        # not_reset: proving org-scoped sequencing now genuinely
+        # requires two different vehicles, since a second WorkOrder
+        # on the SAME vehicle would correctly hit the new "one
+        # vehicle, one active job" guard instead.
+        self.second_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 9002 AA", manufacture_year=2022,
+            vehicle_type="Mobil", model="Test Car",
+        )
         self.client.force_authenticate(user=self.owner)
 
     def test_create_work_order_via_real_http_request_without_implicit_transaction(self):
@@ -378,7 +519,7 @@ class WorkOrderRealTransactionTests(APITransactionTestCase):
 
     def test_second_work_order_gets_next_sequence_via_real_http_requests(self):
         first = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
-        second = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
+        second = self.client.post(f"/api/vehicles/{self.second_vehicle.id}/work-orders/", {}, format="json")
         self.assertEqual(first.data["work_order"]["sequence_number"], 1)
         self.assertEqual(second.data["work_order"]["sequence_number"], 2)
 

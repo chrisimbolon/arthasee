@@ -33,6 +33,32 @@ class WorkOrderListView(TenantScopedAPIView):
         return Response({"success": True, "count": orders.count(), "results": serializer.data})
 
     def post(self, request, vehicle_id):
+        # Mirror-image guard of EstimateListView.post() — same real
+        # gap, the other creation path: a vehicle already mid-repair
+        # (an active WorkOrder) or already carrying a PENDING Estimate
+        # shouldn't be able to get a second, independent WorkOrder
+        # created directly. This is the real enforcement layer; the
+        # frontend disables the "Buat Work Order" button proactively
+        # too, but a slow double-click or a second browser tab must
+        # still be caught here.
+        #
+        # Local import: apps.workorders has no other reason to depend
+        # on apps.estimates at module level — Estimate.approve()
+        # already established the convention of importing across
+        # these two apps locally rather than at module scope.
+        from apps.estimates.models import Estimate
+
+        if self.get_queryset().filter(vehicle_id=vehicle_id, status__in=OPEN_STATUSES).exists():
+            return Response(
+                {"success": False, "message": "Kendaraan ini sudah punya work order aktif — selesaikan atau batalkan dulu sebelum membuat yang baru."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if Estimate.objects.filter(vehicle_id=vehicle_id, status="PENDING").exists():
+            return Response(
+                {"success": False, "message": "Kendaraan ini punya estimasi yang menunggu persetujuan — selesaikan itu dulu sebelum membuat work order baru."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         payload = dict(request.data)
         payload["vehicle"] = vehicle_id
         serializer = WorkOrderSerializer(data=payload, context={"request": request})
