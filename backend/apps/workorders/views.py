@@ -336,6 +336,59 @@ class WorkOrderJobLineAssignStageView(TenantScopedAPIView):
         return Response({"success": True, "job_line": WorkOrderJobLineSerializer(line).data})
 
 
+class WorkOrderJobLineDetailView(TenantScopedAPIView):
+    """
+    PUT/DELETE /api/work-orders/job-lines/<id>/
+
+    Chris's own explicit ask, 2 Aug — caught live from a real screen-
+    shot: a job line typed with a typo ("Pemasangan Kembal") had no
+    way to ever be fixed. Only toggle() and assign-stage() existed
+    before this; a description, once saved, was permanent, and there
+    was no way to remove a wrongly-added line either.
+
+    Mirrors WorkOrderMaterialLineDetailView's own DELETE pattern in
+    shape, but genuinely simpler — a job line touches no inventory,
+    so there's no stock to reverse and no "reason" to record.
+
+    Locking uses WorkOrderJobLine.is_locked (see models.py) rather
+    than repeating the OPEN_STATUSES check inline — that property
+    also covers the stage-completed case toggle()/assign-stage()
+    above don't currently check, which is deliberate: this is a new,
+    stricter lock introduced specifically for edit/delete, not a
+    silent tightening of those two pre-existing endpoints.
+    """
+    model = WorkOrderJobLine
+
+    def put(self, request, pk):
+        line = self.get_object(pk)
+        if line.is_locked:
+            return Response(
+                {"success": False, "message": "Item ini sudah selesai atau work order sudah ditutup — tidak bisa diubah."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        description = request.data.get("description", "")
+        if isinstance(description, str):
+            description = description.strip()
+        if not description:
+            return Response(
+                {"success": False, "errors": {"description": ["Deskripsi tidak boleh kosong."]}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        line.description = description
+        line.save(update_fields=["description"])
+        return Response({"success": True, "job_line": WorkOrderJobLineSerializer(line).data})
+
+    def delete(self, request, pk):
+        line = self.get_object(pk)
+        if line.is_locked:
+            return Response(
+                {"success": False, "message": "Item ini sudah selesai atau work order sudah ditutup — tidak bisa dihapus."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        line.delete()
+        return Response({"success": True, "message": "Item dihapus."})
+
+
 class WorkOrderStageListView(TenantScopedAPIView):
     """
     GET/POST /api/work-orders/<work_order_id>/stages/

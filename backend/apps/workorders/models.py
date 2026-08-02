@@ -544,6 +544,32 @@ class WorkOrderJobLine(TenantScopedModel):
     def _resolve_organization(self):
         return self.work_order.organization
 
+    @property
+    def is_locked(self):
+        """
+        Chris's own explicit ask, 2 Aug: a job line had no way to fix
+        a typo or remove a wrongly-added item at all — only toggle()
+        and stage-reassignment existed. Editable/deletable while
+        genuinely in flight, frozen once the work it describes is
+        actually done — same "frozen record" discipline already
+        applied to Invoice snapshots and a closed WorkOrder elsewhere
+        in this codebase.
+
+        Two separate lock conditions, not one: the whole WorkOrder
+        being DONE/CANCELLED locks everything (matches the existing
+        OPEN_STATUSES check already used by toggle()/assign-stage()),
+        but a line grouped under its own already-COMPLETED stage
+        locks too, even while the WorkOrder overall still has other,
+        genuinely open stages left — a finished stage's own checklist
+        shouldn't stay editable just because a sibling stage is still
+        in progress.
+        """
+        if self.work_order.status in ("DONE", "CANCELLED"):
+            return True
+        if self.stage_id and self.stage.completed_at is not None:
+            return True
+        return False
+
 
 class WorkOrderMaterialLine(TenantScopedModel):
     """

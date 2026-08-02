@@ -21,10 +21,12 @@ class MechanicSerializer(serializers.ModelSerializer):
 
 
 class WorkOrderJobLineSerializer(serializers.ModelSerializer):
+    is_locked = serializers.BooleanField(read_only=True)
+
     class Meta:
         model  = WorkOrderJobLine
-        fields = ["id", "work_order", "stage", "description", "is_done", "created_at"]
-        read_only_fields = ["id", "created_at"]
+        fields = ["id", "work_order", "stage", "description", "is_done", "is_locked", "created_at"]
+        read_only_fields = ["id", "is_locked", "created_at"]
 
     def validate_stage(self, stage):
         """

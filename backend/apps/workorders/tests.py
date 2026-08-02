@@ -217,6 +217,103 @@ class WorkOrderJobLineTests(WorkOrderAPITestBase):
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
 
 
+class WorkOrderJobLineEditDeleteTests(WorkOrderAPITestBase):
+    """
+    Chris's own explicit ask, 2 Aug — caught live from a real
+    screenshot: a job line typed with a typo ("Pemasangan Kembal")
+    had no way to ever be fixed, and no way to remove a wrongly-added
+    item either. Only create() and toggle() existed before this.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self.line = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, description="Ganti kampas rem",
+        )
+
+    def test_can_edit_description_of_an_open_job_line(self):
+        resp = self.client.put(
+            f"/api/work-orders/job-lines/{self.line.id}/",
+            {"description": "Ganti kampas rem depan"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["job_line"]["description"], "Ganti kampas rem depan")
+        self.line.refresh_from_db()
+        self.assertEqual(self.line.description, "Ganti kampas rem depan")
+
+    def test_editing_with_an_empty_description_is_rejected(self):
+        resp = self.client.put(
+            f"/api/work-orders/job-lines/{self.line.id}/",
+            {"description": "   "}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.line.refresh_from_db()
+        self.assertEqual(self.line.description, "Ganti kampas rem")
+
+    def test_can_delete_an_open_job_line(self):
+        resp = self.client.delete(f"/api/work-orders/job-lines/{self.line.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(WorkOrderJobLine.objects.filter(id=self.line.id).exists())
+
+    def test_cannot_edit_job_line_once_work_order_is_done(self):
+        self.wo.close(closed_by=self.owner)
+        resp = self.client.put(
+            f"/api/work-orders/job-lines/{self.line.id}/",
+            {"description": "x"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_cannot_delete_job_line_once_work_order_is_cancelled(self):
+        self.wo.cancel()
+        resp = self.client.delete(f"/api/work-orders/job-lines/{self.line.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertTrue(WorkOrderJobLine.objects.filter(id=self.line.id).exists())
+
+    def test_cannot_edit_job_line_whose_own_stage_is_completed_even_if_work_order_still_open(self):
+        """
+        The real reason is_locked has two conditions, not one: a
+        finished stage's own checklist shouldn't stay editable just
+        because a sibling stage on the same, still-open WorkOrder is
+        genuinely in progress.
+        """
+        self.wo.status = "IN_PROGRESS"
+        self.wo.save(update_fields=["status"])
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Bongkar Gardan", sequence=1,
+        )
+        staged_line = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=stage, description="Kuras Cairan",
+        )
+        stage.complete()
+        stage.save()
+
+        resp = self.client.put(
+            f"/api/work-orders/job-lines/{staged_line.id}/",
+            {"description": "Kuras Cairan (revisi)"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        # The unstaged line from setUp, on the same still-OPEN-overall
+        # WorkOrder, must remain genuinely editable — proves this is a
+        # per-line lock, not an accidental whole-WorkOrder lock.
+        other_resp = self.client.put(
+            f"/api/work-orders/job-lines/{self.line.id}/",
+            {"description": "Ganti kampas rem depan"}, format="json",
+        )
+        self.assertEqual(other_resp.status_code, status.HTTP_200_OK)
+
+    def test_is_locked_is_false_by_default_on_a_fresh_open_line(self):
+        self.assertFalse(self.line.is_locked)
+
+    def test_is_locked_reflects_correctly_via_the_api(self):
+        list_resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-lines/")
+        self.assertFalse(list_resp.data["results"][0]["is_locked"])
+
+        self.wo.cancel()
+        list_resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-lines/")
+        self.assertTrue(list_resp.data["results"][0]["is_locked"])
+
+
 class WorkOrderMaterialLineTests(WorkOrderAPITestBase):
 
     def setUp(self):

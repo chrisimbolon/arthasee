@@ -6,9 +6,9 @@ from django.urls import path
 from .views import (ActiveJobsView, DashboardSummaryView, MechanicDetailView,
                     MechanicListView, WorkOrderCancelView, WorkOrderCloseView,
                     WorkOrderDetailView, WorkOrderJobLineAssignStageView,
-                    WorkOrderJobLineListView, WorkOrderJobLineToggleView,
-                    WorkOrderJobTicketPdfView, WorkOrderListView,
-                    WorkOrderMaterialLineDetailView,
+                    WorkOrderJobLineDetailView, WorkOrderJobLineListView,
+                    WorkOrderJobLineToggleView, WorkOrderJobTicketPdfView,
+                    WorkOrderListView, WorkOrderMaterialLineDetailView,
                     WorkOrderMaterialLineListView, WorkOrderStageCompleteView,
                     WorkOrderStageDetailView, WorkOrderStageListView,
                     WorkOrderStageStartView, WorkOrderStatusUpdateView)
@@ -37,6 +37,10 @@ urlpatterns = [
 
     path("work-orders/<uuid:work_order_id>/job-lines/",
          WorkOrderJobLineListView.as_view(), name="work-order-job-line-list"),
+    # Chris's own explicit ask, 2 Aug: a job line had no edit or
+    # delete path at all before this — only toggle/assign-stage did.
+    path("work-orders/job-lines/<uuid:pk>/",
+         WorkOrderJobLineDetailView.as_view(), name="work-order-job-line-detail"),
     path("work-orders/job-lines/<uuid:pk>/toggle/",
          WorkOrderJobLineToggleView.as_view(), name="work-order-job-line-toggle"),
     path("work-orders/job-lines/<uuid:pk>/assign-stage/",
