@@ -7,7 +7,7 @@ from decimal import Decimal
 from apps.authentication.models import CustomUser
 from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
-from apps.workorders.models import Mechanic, WorkOrder
+from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -393,10 +393,17 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=self.vehicle, odometer_km_intake=20000,
         )
-        # Chris's own catch, 2 Aug — caught live in production:
-        # WorkOrder.close() now correctly rejects closing directly
-        # from OPEN — a real precondition, not test boilerplate.
+        # Made's own confirmed real-world rule, 2 Aug — Chris
+        # witnessed it directly at Arya Motor: EVERY job goes through
+        # QC before being marked done. WorkOrder.close() now
+        # correctly rejects closing directly from OPEN or IN_PROGRESS
+        # — a real precondition, not test boilerplate.
         work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+        )
+        work_order.status = "QC"
         work_order.save(update_fields=["status"])
         record = work_order.close(service_date=date(2026, 7, 20), closed_by=self.owner)
 
@@ -458,6 +465,11 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
             organization=self.org, vehicle=self.vehicle, assigned_to=mechanic,
         )
         work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+        )
+        work_order.status = "QC"
         work_order.save(update_fields=["status"])
         record = work_order.close(service_date=date(2026, 7, 20), closed_by=self.owner)
 
