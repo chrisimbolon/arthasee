@@ -50,6 +50,14 @@ class Customer(TenantScopedModel):
     id        = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name      = models.CharField(max_length=200, verbose_name="Nama Pelanggan")
     phone     = models.CharField(max_length=20, blank=True, verbose_name="Nomor Telepon")
+    # Chris's own explicit call, 2 Aug — Fase 2 (customer tracking
+    # links): not used by the token-link flow itself (a TrackingLink
+    # is tied to a WorkOrder, not a Customer), but Made needs
+    # somewhere real to record a client's email during intake for
+    # Fase 2.5 (real accounts, magic-link verification — deliberately
+    # parked, not built now). blank=True, same as phone above — never
+    # required at intake, a real walk-in customer may not have one.
+    email     = models.EmailField(blank=True, verbose_name="Email")
     stnk_name = models.CharField(
         max_length=200, blank=True, verbose_name="Nama di STNK",
         help_text="Nama pemilik terdaftar di STNK, jika berbeda dari nama pelanggan.",
