@@ -458,6 +458,68 @@ class WorkOrderCloseTests(WorkOrderAPITestBase):
         # separate empty_wo, unaffected by this.
         self._ready_to_close(self.wo)
 
+    def test_close_backfills_a_stage_that_was_never_started_or_completed(self):
+        """
+        The actual regression test for the bug caught via a real
+        customer-facing tracking link: WO #23 showed "Selesai"
+        overall while its own "Overhaul" stage still sat at
+        "Menunggu" — never explicitly started/completed via "Mulai
+        Tahap"/"Selesaikan Tahap", even though the real work under it
+        was done.
+        """
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+        )
+        self.assertIsNone(stage.started_at)
+        self.assertIsNone(stage.completed_at)
+
+        self.wo.close(closed_by=self.owner)
+
+        stage.refresh_from_db()
+        self.assertIsNotNone(stage.started_at)
+        self.assertIsNotNone(stage.completed_at)
+
+    def test_close_never_overwrites_a_stages_real_earlier_timestamps(self):
+        """
+        A stage genuinely completed for real, hours before the
+        WorkOrder itself closes, must keep its own real, earlier
+        timestamps — the backfill is only for stages that were never
+        actually closed out, not a blanket "reset every timestamp to
+        now" on every close().
+        """
+        real_started = timezone.now() - timedelta(hours=3)
+        real_completed = timezone.now() - timedelta(hours=1)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+            started_at=real_started, completed_at=real_completed,
+        )
+
+        self.wo.close(closed_by=self.owner)
+
+        stage.refresh_from_db()
+        self.assertEqual(stage.started_at, real_started)
+        self.assertEqual(stage.completed_at, real_completed)
+
+    def test_close_only_backfills_completed_at_for_a_stage_already_genuinely_started(self):
+        """
+        Partial case: a stage genuinely started for real but never
+        explicitly completed — close() must preserve the real
+        started_at and only backfill the missing completed_at, not
+        silently move the start time forward too.
+        """
+        real_started = timezone.now() - timedelta(hours=2)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+            started_at=real_started,
+        )
+
+        self.wo.close(closed_by=self.owner)
+
+        stage.refresh_from_db()
+        self.assertEqual(stage.started_at, real_started)
+        self.assertIsNotNone(stage.completed_at)
+        self.assertGreater(stage.completed_at, real_started)
+
     def test_stock_is_deducted_exactly_once_across_open_and_close(self):
         """
         The core claim: stock started at 10, one material line used 2

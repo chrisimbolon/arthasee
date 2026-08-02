@@ -332,6 +332,51 @@ class WorkOrder(TenantScopedModel):
             job_lines = list(self.job_lines.all())
             material_lines = list(self.material_lines.select_related("part").all())
 
+            # Chris's own catch, 2 Aug — caught live via a real
+            # customer-facing tracking link: a WorkOrder could reach
+            # DONE while one of its own stages still sat at "Menunggu"
+            # (never explicitly started/completed via "Mulai Tahap"/
+            # "Selesaikan Tahap") — stage lifecycle and job-line
+            # completion are two entirely separate, unlinked concepts
+            # in this codebase, and nothing wired them together.
+            # Internally this was mostly invisible (SA/Made see the
+            # real checked job lines regardless of a stage's own
+            # formal status), but the public tracking page only shows
+            # stage-level status — a customer would see "Selesai" on
+            # the overall job sitting right next to a stage that says
+            # "Menunggu," a real, visible contradiction.
+            #
+            # Deliberately NOT calling stage.start()/stage.complete()
+            # here — both require self.status == "IN_PROGRESS" (see
+            # WorkOrderStage.start()'s own docstring), but by this
+            # point in close() the WorkOrder is already at QC (that
+            # transition is itself required before close() can even
+            # run — see the IN_PROGRESS check above). Setting the
+            # timestamps directly instead, same first-time-wins spirit
+            # as start()/complete() themselves: a stage genuinely
+            # already completed keeps its real, earlier timestamp;
+            # only a stage still open gets backfilled, and it gets
+            # both started_at and completed_at together since there's
+            # no real way to know when it actually began — same
+            # reasoning complete()'s own auto-start fallback already
+            # uses. bulk_update(), not a loop of .save() calls — same
+            # "no per-instance side effects to preserve" reasoning
+            # already established for PartUsage.bulk_create() below.
+            now = timezone.now()
+            stages_to_backfill = []
+            for stage in self.stages.all():
+                changed = False
+                if stage.started_at is None:
+                    stage.started_at = now
+                    changed = True
+                if stage.completed_at is None:
+                    stage.completed_at = now
+                    changed = True
+                if changed:
+                    stages_to_backfill.append(stage)
+            if stages_to_backfill:
+                WorkOrderStage.objects.bulk_update(stages_to_backfill, ["started_at", "completed_at"])
+
             issue_description = "\n".join(line.description for line in job_lines)
             parts_replaced = ", ".join(line.part.name for line in material_lines)
 
