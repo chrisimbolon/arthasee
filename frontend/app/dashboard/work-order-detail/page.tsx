@@ -141,9 +141,20 @@ function IntakeCard({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Me
 // JobLinesSection's unstaged list, rather than duplicating the same
 // inline-edit state machine in two places — the two render locations
 // only ever differed in sizing (compact vs. not), never in behavior.
-function JobLineRow({ line, editable, onToggle, onUpdated, compact }: {
+function JobLineRow({ line, editable, canToggle, onToggle, onUpdated, compact }: {
   line: WorkOrderJobLine;
   editable: boolean;
+  // Chris's own catch, 2 Aug — caught live in production: the
+  // checkbox itself had no gate requiring the WorkOrder to have
+  // actually started. A fresh OPEN WorkOrder could still have its
+  // job lines ticked "done" before "Mulai WO Sekarang" was ever
+  // clicked — the checkbox equivalent of the Selesaikan Work Order
+  // bug fixed earlier. Deliberately a SEPARATE gate from `editable`:
+  // fixing a typo or removing a wrongly-added line should still be
+  // possible while OPEN (that's the whole point of the edit/delete
+  // feature), but marking something "done" implies real work
+  // happened, which can't be true yet.
+  canToggle: boolean;
   onToggle: (id: string) => void;
   onUpdated: () => void;
   compact?: boolean;
@@ -162,6 +173,7 @@ function JobLineRow({ line, editable, onToggle, onUpdated, compact }: {
   // backend is still the actual enforcement either way (409 on a
   // stale client).
   const canModify = editable && !line.is_locked;
+  const canCheck = canToggle && !line.is_locked;
 
   const startEdit = () => { setValue(line.description); setError(null); setIsEditing(true); };
   const cancelEdit = () => { setValue(line.description); setError(null); setIsEditing(false); };
@@ -225,13 +237,14 @@ function JobLineRow({ line, editable, onToggle, onUpdated, compact }: {
     <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 10 }}>
         <button
-          onClick={() => canModify && onToggle(line.id)}
-          disabled={!canModify}
+          onClick={() => canCheck && onToggle(line.id)}
+          disabled={!canCheck}
+          title={!canToggle && editable ? "Tersedia setelah WO mulai dikerjakan" : undefined}
           style={{
             width: boxSize, height: boxSize, borderRadius: boxRadius, border: "1px solid var(--line)",
             background: line.is_done ? "var(--rust)" : "transparent",
             display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-            cursor: canModify ? "pointer" : "default",
+            cursor: canCheck ? "pointer" : "default",
           }}
         >
           {line.is_done && <Check size={iconSize} color="#fff" />}
@@ -255,8 +268,8 @@ function JobLineRow({ line, editable, onToggle, onUpdated, compact }: {
   );
 }
 
-function StageCard({ stage, mechanics, editable, onUpdated }: {
-  stage: WorkOrderStage; mechanics: Mechanic[]; editable: boolean; onUpdated: () => void;
+function StageCard({ stage, mechanics, editable, canToggle, onUpdated }: {
+  stage: WorkOrderStage; mechanics: Mechanic[]; editable: boolean; canToggle: boolean; onUpdated: () => void;
 }) {
   const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
@@ -391,7 +404,7 @@ function StageCard({ stage, mechanics, editable, onUpdated }: {
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: editable ? 10 : 0 }}>
         {stage.job_lines.length === 0 && <p style={{ fontSize: 12.5, color: "var(--steel)" }}>Belum ada item di tahap ini.</p>}
         {stage.job_lines.map((line) => (
-          <JobLineRow key={line.id} line={line} editable={editable} onToggle={toggle} onUpdated={onUpdated} compact />
+          <JobLineRow key={line.id} line={line} editable={editable} canToggle={canToggle} onToggle={toggle} onUpdated={onUpdated} compact />
         ))}
       </div>
 
@@ -413,6 +426,12 @@ function StageCard({ stage, mechanics, editable, onUpdated }: {
 
 function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Mechanic[]; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
+  // Chris's own catch, 2 Aug: a job line's checkbox must not be
+  // usable until the WorkOrder has actually left OPEN — same real
+  // rule as the "Selesaikan Work Order" fix, one level down. Editing
+  // text (canModify inside JobLineRow) stays available while OPEN;
+  // only marking something "done" requires real work to have begun.
+  const canToggle = wo.status !== "OPEN";
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -447,7 +466,7 @@ function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics:
         <>
           <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Tahap Pengerjaan</h3>
           {wo.stages.map((stage) => (
-            <StageCard key={stage.id} stage={stage} mechanics={mechanics} editable={editable} onUpdated={onUpdated} />
+            <StageCard key={stage.id} stage={stage} mechanics={mechanics} editable={editable} canToggle={canToggle} onUpdated={onUpdated} />
           ))}
         </>
       )}
@@ -483,6 +502,14 @@ function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics:
 
 function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
+  // Chris's own catch, 2 Aug — caught live from a real screenshot
+  // (WO #22, "Bongkar kaburator" struck through while still OPEN,
+  // "Mulai WO Sekarang" never clicked): the checkbox needs its own
+  // gate, separate from `editable`. Text edit/delete stay available
+  // while OPEN (fixing a typo before work starts is still valid);
+  // marking something "done" implies real work happened, which
+  // can't be true yet.
+  const canToggle = wo.status !== "OPEN";
   const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -516,7 +543,7 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
       {unstagedLines.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13.5, marginBottom: 12 }}>Belum ada item pekerjaan.</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: editable ? 14 : 0 }}>
         {unstagedLines.map((line) => (
-          <JobLineRow key={line.id} line={line} editable={editable} onToggle={toggle} onUpdated={onUpdated} />
+          <JobLineRow key={line.id} line={line} editable={editable} canToggle={canToggle} onToggle={toggle} onUpdated={onUpdated} />
         ))}
       </div>
       {editable && (
