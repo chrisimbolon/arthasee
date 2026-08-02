@@ -242,7 +242,13 @@ function JobLineRow({ line, editable, canToggle, onToggle, onUpdated, compact }:
           title={!canToggle && editable ? "Tersedia setelah WO mulai dikerjakan" : undefined}
           style={{
             width: boxSize, height: boxSize, borderRadius: boxRadius, border: "1px solid var(--line)",
-            background: line.is_done ? "var(--rust)" : "transparent",
+            // Chris's own explicit ask, 2 Aug: rust reads as a
+            // warning/in-progress color elsewhere in this app (see
+            // STATUS_COLOR's own IN_PROGRESS above) — "done" should
+            // read as done. #2e7d4f is the same green already used
+            // for a completed stage's border and a PAID invoice
+            // badge, not a new color invented just for this.
+            background: line.is_done ? "#2e7d4f" : "transparent",
             display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
             cursor: canCheck ? "pointer" : "default",
           }}
