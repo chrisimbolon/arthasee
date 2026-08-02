@@ -817,18 +817,31 @@ function WorkOrderDetailContent() {
           {wo.status === "IN_PROGRESS" && (
             <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("QC")}>Ajukan Pemeriksaan</button>
           )}
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <label className="label" style={{ marginBottom: 0 }}>Tanggal Servis</label>
-            <input
-              className="input" type="date" style={{ padding: "6px 10px", fontSize: 13, width: 150 }}
-              value={closeDate} onChange={(e) => setCloseDate(e.target.value)}
-              // Defaults to today but editable — this is what lets a
-              // Work Order genuinely replace the old free-text quick
-              // entry: backdating a visit that happened days ago,
-              // not just logging one that just finished.
-            />
-          </div>
-          <button className="btn-rust" disabled={busy} onClick={handleClose}>Selesaikan Work Order</button>
+          {/* Chris's own catch, 2 Aug: this used to render
+              unconditionally for every OPEN_STATUSES status,
+              including a fresh OPEN WorkOrder that never even
+              clicked "Mulai Dikerjakan" — letting a job jump straight
+              to DONE with zero actual work recorded. Same real
+              enforcement backing this on the backend now
+              (WorkOrder.close() itself rejects status="OPEN" with a
+              409), this is just the proactive layer that stops SA
+              from seeing a button with no valid action behind it. */}
+          {wo.status !== "OPEN" && (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label className="label" style={{ marginBottom: 0 }}>Tanggal Servis</label>
+                <input
+                  className="input" type="date" style={{ padding: "6px 10px", fontSize: 13, width: 150 }}
+                  value={closeDate} onChange={(e) => setCloseDate(e.target.value)}
+                  // Defaults to today but editable — this is what lets a
+                  // Work Order genuinely replace the old free-text quick
+                  // entry: backdating a visit that happened days ago,
+                  // not just logging one that just finished.
+                />
+              </div>
+              <button className="btn-rust" disabled={busy} onClick={handleClose}>Selesaikan Work Order</button>
+            </>
+          )}
           <button className="btn-ghost" disabled={busy} onClick={handleCancel}>Batalkan</button>
         </div>
       )}
