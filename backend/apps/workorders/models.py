@@ -316,6 +316,17 @@ class WorkOrder(TenantScopedModel):
         # enforcement — this check is what actually stops it.
         if self.status == "OPEN":
             raise ValueError('Work order harus "Mulai Dikerjakan" terlebih dahulu sebelum bisa diselesaikan.')
+        # Made's own confirmed real-world rule, 2 Aug — Chris
+        # witnessed it directly at Arya Motor: EVERY job goes through
+        # QC before being marked done, even a routine oil change or
+        # spark plug replacement. Made himself personally does QC on
+        # simple jobs — there's no "too small to inspect" exception in
+        # the real shop, so there isn't one here either. Closing
+        # directly from IN_PROGRESS, skipping "Ajukan Pemeriksaan"
+        # entirely, is exactly as wrong as closing directly from OPEN
+        # was — just one step further down the same pipeline.
+        if self.status == "IN_PROGRESS":
+            raise ValueError('Work order harus melalui "Ajukan Pemeriksaan" terlebih dahulu sebelum bisa diselesaikan.')
 
         with transaction.atomic():
             job_lines = list(self.job_lines.all())

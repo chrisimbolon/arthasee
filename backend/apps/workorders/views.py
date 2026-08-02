@@ -195,6 +195,23 @@ class WorkOrderStatusUpdateView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
                 status=status.HTTP_409_CONFLICT,
             )
+        # Chris's own explicit ask, 2 Aug — caught live in production:
+        # "Ajukan Pemeriksaan" and "Selesaikan Work Order" sat side by
+        # side with no ordering signal, and nothing stopped a
+        # mechanic submitting a job for QC before the actual work was
+        # ever checked off. Real rule: you can't ask for an inspection
+        # of work that isn't marked done yet. Scoped specifically to
+        # the IN_PROGRESS -> QC transition, not every status write —
+        # OPEN -> IN_PROGRESS has no job lines to check yet by
+        # definition. A WorkOrder with zero job lines is also blocked
+        # here (`not job_lines.exists()`) — nothing to have verified.
+        if new_status == "QC":
+            job_lines = order.job_lines.all()
+            if not job_lines.exists() or job_lines.filter(is_done=False).exists():
+                return Response(
+                    {"success": False, "message": "Selesaikan semua item pekerjaan dulu sebelum mengajukan pemeriksaan."},
+                    status=status.HTTP_409_CONFLICT,
+                )
         order.status = new_status
         update_fields = ["status", "updated_at"]
         if new_status == "IN_PROGRESS":
