@@ -3,6 +3,7 @@
 # =============================================================================
 from datetime import timedelta
 from decimal import Decimal
+from io import StringIO
 from unittest.mock import PropertyMock, patch
 
 from apps.authentication.models import CustomUser
@@ -10,6 +11,7 @@ from apps.estimates.models import Estimate
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase, APITransactionTestCase
@@ -593,6 +595,127 @@ class WorkOrderCloseTests(WorkOrderAPITestBase):
         invoice = Invoice.objects.create(service_record=record, created_by=self.owner)
         self.assertEqual(invoice.line_items.count(), 0)  # created directly, no line items added here
         self.assertTrue(invoice.number.startswith("INV/REG/AM/"))
+
+
+class BackfillStageTimestampsCommandTests(WorkOrderAPITestBase):
+    """
+    Chris's own catch, 3 Aug: the WorkOrder.close() fix only prevents
+    NEW stage-timestamp gaps going forward — it can't reach back and
+    fix a WorkOrder that was already DONE before that fix shipped
+    (confirmed live: WO #23 kept showing "Menunggu" on the public
+    tracking page after the code fix was deployed). This command is
+    the other half — a one-time backfill pass over existing data.
+    """
+
+    def setUp(self):
+        # WorkOrderAPITestBase itself never creates a WorkOrder — only
+        # WorkOrderCloseTests' own setUp does that, and this class
+        # doesn't inherit from it. Caught by a real 6-test failure
+        # (AttributeError: no attribute 'wo') the first time this ran.
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def _run_command(self):
+        out = StringIO()
+        call_command("backfill_stage_timestamps", stdout=out)
+        return out.getvalue()
+
+    def test_backfills_a_stage_left_open_on_an_already_done_work_order(self):
+        self._ready_to_close(self.wo)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+        )
+        self.wo.close(closed_by=self.owner)
+        # Simulating the real bug: a WorkOrder closed BEFORE the
+        # close()-side fix existed. Directly resetting the stage back
+        # to null here, bypassing close()'s own new backfill logic,
+        # so this test genuinely proves the command's own independent
+        # fix — not accidentally re-testing close() itself.
+        stage.started_at = None
+        stage.completed_at = None
+        stage.save(update_fields=["started_at", "completed_at"])
+
+        self._run_command()
+
+        stage.refresh_from_db()
+        self.assertIsNotNone(stage.started_at)
+        self.assertIsNotNone(stage.completed_at)
+
+    def test_backfilled_timestamp_matches_the_work_orders_own_updated_at(self):
+        self._ready_to_close(self.wo)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+        )
+        self.wo.close(closed_by=self.owner)
+        stage.started_at = None
+        stage.completed_at = None
+        stage.save(update_fields=["started_at", "completed_at"])
+        self.wo.refresh_from_db()
+
+        self._run_command()
+
+        stage.refresh_from_db()
+        self.assertEqual(stage.started_at, self.wo.updated_at)
+        self.assertEqual(stage.completed_at, self.wo.updated_at)
+
+    def test_never_overwrites_a_stages_real_existing_timestamps(self):
+        self._ready_to_close(self.wo)
+        real_started = timezone.now() - timedelta(hours=3)
+        real_completed = timezone.now() - timedelta(hours=1)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+            started_at=real_started, completed_at=real_completed,
+        )
+        self.wo.close(closed_by=self.owner)
+
+        self._run_command()
+
+        stage.refresh_from_db()
+        self.assertEqual(stage.started_at, real_started)
+        self.assertEqual(stage.completed_at, real_completed)
+
+    def test_does_not_touch_a_work_order_that_is_not_done(self):
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+        )
+        # self.wo is still OPEN — not DONE — at this point.
+        self._run_command()
+
+        stage.refresh_from_db()
+        self.assertIsNone(stage.started_at)
+        self.assertIsNone(stage.completed_at)
+
+    def test_is_safe_to_run_more_than_once(self):
+        self._ready_to_close(self.wo)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+        )
+        self.wo.close(closed_by=self.owner)
+        stage.started_at = None
+        stage.completed_at = None
+        stage.save(update_fields=["started_at", "completed_at"])
+
+        self._run_command()
+        stage.refresh_from_db()
+        first_started, first_completed = stage.started_at, stage.completed_at
+
+        self._run_command()
+        stage.refresh_from_db()
+        self.assertEqual(stage.started_at, first_started)
+        self.assertEqual(stage.completed_at, first_completed)
+
+    def test_reports_a_real_summary(self):
+        self._ready_to_close(self.wo)
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+        )
+        self.wo.close(closed_by=self.owner)
+        stage.started_at = None
+        stage.completed_at = None
+        stage.save(update_fields=["started_at", "completed_at"])
+
+        output = self._run_command()
+        self.assertIn("1", output)  # 1 stage, 1 work order
 
 
 class WorkOrderCancelTests(WorkOrderAPITestBase):
