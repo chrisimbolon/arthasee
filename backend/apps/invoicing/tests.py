@@ -47,6 +47,12 @@ class InvoicingAPITestBase(APITestCase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
         )
+        # Chris's own catch, 2 Aug — caught live in production:
+        # WorkOrder.close() now correctly rejects closing directly
+        # from OPEN (see apps.workorders.models.WorkOrder.close()) —
+        # a real precondition, not test boilerplate to skip.
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         self.service_record = work_order.close(closed_by=self.owner)
         self.part = Part.objects.create(
             organization=self.org, name="Kampas Rem", unit="set", unit_price=Decimal("250000.00"),
@@ -162,6 +168,8 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=vehicle, assigned_to=self.mechanic,
         )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         record = work_order.close(closed_by=self.owner)
         return self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
 
@@ -204,6 +212,8 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
         other_work_order = WorkOrder.objects.create(
             organization=other_org, vehicle=other_vehicle, assigned_to=other_mechanic,
         )
+        other_work_order.status = "IN_PROGRESS"
+        other_work_order.save(update_fields=["status"])
         other_record = other_work_order.close(closed_by=other_owner)
         self.client.force_authenticate(user=other_owner)
         resp = self.client.post(f"/api/service-records/{other_record.id}/invoice/", {}, format="json")
@@ -356,6 +366,8 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
 
     def _work_order_without_mechanic(self):
         work_order = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         return work_order.close(closed_by=self.owner)
 
     def test_cannot_create_invoice_when_work_order_has_no_mechanic(self):
@@ -392,6 +404,8 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
         )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         record = work_order.close(closed_by=self.owner)
         resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)

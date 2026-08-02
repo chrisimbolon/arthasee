@@ -44,6 +44,23 @@ class WorkOrderAPITestBase(APITestCase):
         )
         self.client.force_authenticate(user=self.owner)
 
+    def _started(self, wo):
+        """
+        Chris's own catch, 2 Aug — caught live in production:
+        WorkOrder.close() now correctly rejects closing directly from
+        OPEN (see models.py) — a job must have actually been marked
+        "Mulai Dikerjakan" before it can be marked done. Every
+        existing test in this file that closes a WorkOrder purely as
+        setup (its real focus is stock deduction, ServiceRecord
+        creation, dashboard counts, etc. — not the OPEN->DONE rule
+        itself) needs this first. Bypasses the real status endpoint
+        deliberately — these tests aren't testing that transition,
+        just need a real, valid precondition satisfied quickly.
+        """
+        wo.status = "IN_PROGRESS"
+        wo.save(update_fields=["status"])
+        return wo
+
 
 class WorkOrderNumberingTests(WorkOrderAPITestBase):
 
@@ -112,6 +129,7 @@ class WorkOrderVehicleLockGuardTests(WorkOrderAPITestBase):
 
     def test_can_create_work_order_after_the_previous_one_is_done(self):
         done_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self._started(done_wo)
         done_wo.close(closed_by=self.owner)
         resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
@@ -147,6 +165,7 @@ class WorkOrderVehicleLockGuardTests(WorkOrderAPITestBase):
         """
         estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
         work_order = estimate.approve(approved_by=self.owner)
+        self._started(work_order)
         work_order.close(closed_by=self.owner)
         resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/work-orders/", {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
@@ -257,6 +276,7 @@ class WorkOrderJobLineEditDeleteTests(WorkOrderAPITestBase):
         self.assertFalse(WorkOrderJobLine.objects.filter(id=self.line.id).exists())
 
     def test_cannot_edit_job_line_once_work_order_is_done(self):
+        self._started(self.wo)
         self.wo.close(closed_by=self.owner)
         resp = self.client.put(
             f"/api/work-orders/job-lines/{self.line.id}/",
@@ -360,6 +380,7 @@ class WorkOrderMaterialLineTests(WorkOrderAPITestBase):
             {"part": str(self.part.id), "quantity": "1.00"}, format="json",
         )
         line_id = create.data["material_line"]["id"]
+        self._started(self.wo)
         self.wo.close(closed_by=self.owner)
         delete = self.client.delete(f"/api/work-orders/material-lines/{line_id}/")
         self.assertEqual(delete.status_code, status.HTTP_409_CONFLICT)
@@ -384,6 +405,11 @@ class WorkOrderCloseTests(WorkOrderAPITestBase):
         WorkOrderMaterialLine.objects.create(
             organization=self.org, work_order=self.wo, part=self.part, quantity=Decimal("2.00"),
         )
+        # Every test in this class closes self.wo — a real
+        # precondition now that WorkOrder.close() correctly rejects
+        # OPEN (see models.py). test_cannot_close_a_cancelled_work_
+        # order uses its own separate empty_wo, unaffected by this.
+        self._started(self.wo)
 
     def test_stock_is_deducted_exactly_once_across_open_and_close(self):
         """
@@ -486,6 +512,7 @@ class WorkOrderCancelTests(WorkOrderAPITestBase):
         self.assertIn(self.wo.number, adjustment.notes)
 
     def test_cannot_cancel_an_already_done_work_order(self):
+        self._started(self.wo)
         self.wo.close(closed_by=self.owner)
         with self.assertRaises(ValueError):
             self.wo.cancel()
@@ -793,6 +820,7 @@ class WorkOrderJobTicketPdfTests(WorkOrderAPITestBase):
     def test_available_after_done(self):
         """A finished job's ticket should still be retrievable — e.g.
         Made wanting to reprint a record after the fact."""
+        self._started(self.wo)
         self.wo.close(closed_by=self.owner)
         resp = self.client.get(f"/api/work-orders/{self.wo.id}/job-ticket.pdf")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -1070,6 +1098,7 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         self.assertTrue(WorkOrderJobLine.objects.filter(id=line.id).exists())
 
     def test_cannot_create_stage_on_a_done_work_order(self):
+        self._started(self.wo)
         self.wo.close(closed_by=self.owner)
         resp = self.client.post(
             f"/api/work-orders/{self.wo.id}/stages/", {"name": "Body Repair"}, format="json",
@@ -1314,6 +1343,7 @@ class DashboardSummaryTests(WorkOrderAPITestBase):
 
     def test_vehicles_cleared_counts_only_done_work_orders_in_period(self):
         wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self._started(wo)
         wo.close(closed_by=self.owner)
 
         resp = self.client.get("/api/dashboard/summary/?period=today")
@@ -1388,6 +1418,7 @@ class ActiveJobsViewTests(WorkOrderAPITestBase):
     def test_only_open_status_work_orders_appear(self):
         open_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
         done_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self._started(done_wo)
         done_wo.close(closed_by=self.owner)
         cancelled_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
         cancelled_wo.cancel()

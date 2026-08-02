@@ -106,6 +106,12 @@ class EstimateVehicleLockGuardTests(EstimateAPITestBase):
 
     def test_can_create_estimate_after_the_work_order_is_done(self):
         done_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        # Chris's own catch, 2 Aug — caught live in production:
+        # WorkOrder.close() now correctly rejects closing directly
+        # from OPEN (see apps.workorders.models.WorkOrder.close()) —
+        # a real precondition, not test boilerplate to skip.
+        done_wo.status = "IN_PROGRESS"
+        done_wo.save(update_fields=["status"])
         done_wo.close(closed_by=self.owner)
         resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
@@ -138,6 +144,8 @@ class EstimateVehicleLockGuardTests(EstimateAPITestBase):
         """
         estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
         work_order = estimate.approve(approved_by=self.owner)
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         work_order.close(closed_by=self.owner)
         resp = self.client.post(f"/api/vehicles/{self.vehicle.id}/estimates/", {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)

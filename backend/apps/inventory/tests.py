@@ -310,6 +310,12 @@ class PartUsageFrozenAfterInvoiceTests(InventoryAPITestBase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
         )
+        # Chris's own catch, 2 Aug — caught live in production:
+        # WorkOrder.close() now correctly rejects closing directly
+        # from OPEN (see apps.workorders.models.WorkOrder.close()) —
+        # a real precondition, not test boilerplate to skip.
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         self.service_record = work_order.close(closed_by=self.owner)
 
     def test_can_add_part_usage_before_invoice_exists(self):

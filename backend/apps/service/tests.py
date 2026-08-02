@@ -393,6 +393,11 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=self.vehicle, odometer_km_intake=20000,
         )
+        # Chris's own catch, 2 Aug — caught live in production:
+        # WorkOrder.close() now correctly rejects closing directly
+        # from OPEN — a real precondition, not test boilerplate.
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         record = work_order.close(service_date=date(2026, 7, 20), closed_by=self.owner)
 
         resp = self.client.get(f"/api/vehicles/{self.vehicle.id}/")
@@ -452,6 +457,8 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=self.vehicle, assigned_to=mechanic,
         )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
         record = work_order.close(service_date=date(2026, 7, 20), closed_by=self.owner)
 
         invoice = Invoice.objects.create(service_record=record, created_by=self.owner)

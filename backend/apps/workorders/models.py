@@ -303,6 +303,19 @@ class WorkOrder(TenantScopedModel):
             raise ValueError("Work order ini sudah selesai.")
         if self.status == "CANCELLED":
             raise ValueError("Work order yang sudah dibatalkan tidak bisa diselesaikan.")
+        # Chris's own catch, 2 Aug — caught live in production: a
+        # WorkOrder could jump straight from OPEN to DONE, skipping
+        # "Mulai Dikerjakan" entirely. Nothing here previously
+        # required a job to have actually started before being
+        # closed — a real workflow-integrity gap, not a cosmetic one:
+        # "Selesaikan Work Order" and its own Tanggal Servis field
+        # both rendered fully enabled the moment a WorkOrder existed,
+        # regardless of status. Blocking OPEN here is the real fix;
+        # the frontend also stops rendering "Selesaikan Work Order"
+        # at all while OPEN, but that's the proactive layer, not the
+        # enforcement — this check is what actually stops it.
+        if self.status == "OPEN":
+            raise ValueError('Work order harus "Mulai Dikerjakan" terlebih dahulu sebelum bisa diselesaikan.')
 
         with transaction.atomic():
             job_lines = list(self.job_lines.all())
