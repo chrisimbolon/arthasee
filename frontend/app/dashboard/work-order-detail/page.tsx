@@ -9,12 +9,13 @@ import {
   Mechanic,
   mechanicsApi,
   WorkOrder,
+  WorkOrderJobLine,
   workOrderJobLinesApi, workOrderMaterialLinesApi, workOrdersApi,
   WorkOrderStage,
   workOrderStagesApi,
   WorkOrderStatus,
 } from "@/lib/api/workorders";
-import { AlertTriangle, ArrowLeft, Check, Download, Loader2, Plus, Printer, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Download, Loader2, Pencil, Plus, Printer, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -129,6 +130,127 @@ function IntakeCard({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Me
       <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleSave} disabled={saving}>
         {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
       </button>
+    </div>
+  );
+}
+
+// Chris's own explicit ask, 2 Aug — caught live from a real
+// screenshot: a job line typed with a typo ("Pemasangan Kembal") had
+// no way to ever be fixed, and no way to remove a wrongly-added item
+// either. Shared between StageCard's per-stage list and
+// JobLinesSection's unstaged list, rather than duplicating the same
+// inline-edit state machine in two places — the two render locations
+// only ever differed in sizing (compact vs. not), never in behavior.
+function JobLineRow({ line, editable, onToggle, onUpdated, compact }: {
+  line: WorkOrderJobLine;
+  editable: boolean;
+  onToggle: (id: string) => void;
+  onUpdated: () => void;
+  compact?: boolean;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [value, setValue] = useState(line.description);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Two conditions combined deliberately, not just one: `editable`
+  // is the WO-level open-status check the caller already computes;
+  // `!line.is_locked` is the backend's own, stricter rule (also
+  // covers a completed stage locking its own lines even while the
+  // WorkOrder overall still has other open stages). Checking both
+  // client-side is real defense-in-depth, not redundancy — the
+  // backend is still the actual enforcement either way (409 on a
+  // stale client).
+  const canModify = editable && !line.is_locked;
+
+  const startEdit = () => { setValue(line.description); setError(null); setIsEditing(true); };
+  const cancelEdit = () => { setValue(line.description); setError(null); setIsEditing(false); };
+
+  const save = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) { setError("Deskripsi tidak boleh kosong."); return; }
+    if (trimmed === line.description) { setIsEditing(false); return; }
+    setSaving(true); setError(null);
+    try {
+      await workOrderJobLinesApi.update(line.id, trimmed);
+      setIsEditing(false);
+      onUpdated();
+    } catch {
+      setError("Gagal menyimpan perubahan.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!window.confirm(`Hapus item "${line.description}"?`)) return;
+    setError(null);
+    try {
+      await workOrderJobLinesApi.remove(line.id);
+      onUpdated();
+    } catch {
+      setError("Gagal menghapus item.");
+    }
+  };
+
+  const boxSize = compact ? 16 : 20;
+  const boxRadius = compact ? 4 : 5;
+  const iconSize = compact ? 10 : 13;
+  const fontSize = compact ? 13 : 14;
+
+  if (isEditing) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            className="input" autoFocus
+            style={{ flex: 1, fontSize, padding: compact ? "4px 8px" : "6px 10px" }}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") cancelEdit(); }}
+          />
+          <button className="btn-ghost" style={{ fontSize: 11, padding: "4px 9px", flexShrink: 0 }} onClick={save} disabled={saving}>
+            {saving ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
+          </button>
+          <button className="btn-ghost" style={{ fontSize: 11, padding: "4px 9px", flexShrink: 0 }} onClick={cancelEdit}>
+            Batal
+          </button>
+        </div>
+        {error && <span style={{ fontSize: 11, color: "var(--danger)" }}>{error}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 10 }}>
+        <button
+          onClick={() => canModify && onToggle(line.id)}
+          disabled={!canModify}
+          style={{
+            width: boxSize, height: boxSize, borderRadius: boxRadius, border: "1px solid var(--line)",
+            background: line.is_done ? "var(--rust)" : "transparent",
+            display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+            cursor: canModify ? "pointer" : "default",
+          }}
+        >
+          {line.is_done && <Check size={iconSize} color="#fff" />}
+        </button>
+        <span style={{ flex: 1, fontSize, textDecoration: line.is_done ? "line-through" : "none", color: line.is_done ? "var(--steel)" : undefined }}>
+          {line.description}
+        </span>
+        {canModify && (
+          <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+            <button onClick={startEdit} title="Ubah" style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "var(--steel)", display: "flex" }}>
+              <Pencil size={compact ? 12 : 13} />
+            </button>
+            <button onClick={remove} title="Hapus" style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "var(--steel)", display: "flex" }}>
+              <Trash2 size={compact ? 12 : 13} />
+            </button>
+          </div>
+        )}
+      </div>
+      {error && <span style={{ fontSize: 11, color: "var(--danger)" }}>{error}</span>}
     </div>
   );
 }
@@ -269,23 +391,7 @@ function StageCard({ stage, mechanics, editable, onUpdated }: {
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: editable ? 10 : 0 }}>
         {stage.job_lines.length === 0 && <p style={{ fontSize: 12.5, color: "var(--steel)" }}>Belum ada item di tahap ini.</p>}
         {stage.job_lines.map((line) => (
-          <div key={line.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-            <button
-              onClick={() => editable && toggle(line.id)}
-              disabled={!editable}
-              style={{
-                width: 16, height: 16, borderRadius: 4, border: "1px solid var(--line)",
-                background: line.is_done ? "var(--rust)" : "transparent",
-                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-                cursor: editable ? "pointer" : "default",
-              }}
-            >
-              {line.is_done && <Check size={10} color="#fff" />}
-            </button>
-            <span style={{ textDecoration: line.is_done ? "line-through" : "none", color: line.is_done ? "var(--steel)" : undefined }}>
-              {line.description}
-            </span>
-          </div>
+          <JobLineRow key={line.id} line={line} editable={editable} onToggle={toggle} onUpdated={onUpdated} compact />
         ))}
       </div>
 
@@ -410,23 +516,7 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
       {unstagedLines.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13.5, marginBottom: 12 }}>Belum ada item pekerjaan.</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: editable ? 14 : 0 }}>
         {unstagedLines.map((line) => (
-          <div key={line.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button
-              onClick={() => editable && toggle(line.id)}
-              disabled={!editable}
-              style={{
-                width: 20, height: 20, borderRadius: 5, border: "1px solid var(--line)",
-                background: line.is_done ? "var(--rust)" : "transparent",
-                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-                cursor: editable ? "pointer" : "default",
-              }}
-            >
-              {line.is_done && <Check size={13} color="#fff" />}
-            </button>
-            <span style={{ fontSize: 14, textDecoration: line.is_done ? "line-through" : "none", color: line.is_done ? "var(--steel)" : undefined }}>
-              {line.description}
-            </span>
-          </div>
+          <JobLineRow key={line.id} line={line} editable={editable} onToggle={toggle} onUpdated={onUpdated} />
         ))}
       </div>
       {editable && (
