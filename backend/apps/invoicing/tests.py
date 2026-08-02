@@ -7,7 +7,7 @@ from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
-from apps.workorders.models import Mechanic, WorkOrder
+from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -47,11 +47,19 @@ class InvoicingAPITestBase(APITestCase):
         work_order = WorkOrder.objects.create(
             organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
         )
-        # Chris's own catch, 2 Aug — caught live in production:
-        # WorkOrder.close() now correctly rejects closing directly
-        # from OPEN (see apps.workorders.models.WorkOrder.close()) —
-        # a real precondition, not test boilerplate to skip.
+        # Made's own confirmed real-world rule, 2 Aug — Chris
+        # witnessed it directly at Arya Motor: EVERY job goes through
+        # QC before being marked done, even a routine oil change or
+        # spark plug replacement. WorkOrder.close() now correctly
+        # rejects closing directly from OPEN or IN_PROGRESS (see
+        # apps.workorders.models.WorkOrder.close()) — a real
+        # precondition, not test boilerplate to skip.
         work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+        )
+        work_order.status = "QC"
         work_order.save(update_fields=["status"])
         self.service_record = work_order.close(closed_by=self.owner)
         self.part = Part.objects.create(
@@ -170,6 +178,11 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
         )
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
         record = work_order.close(closed_by=self.owner)
         return self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
 
@@ -213,6 +226,11 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
             organization=other_org, vehicle=other_vehicle, assigned_to=other_mechanic,
         )
         other_work_order.status = "IN_PROGRESS"
+        other_work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=other_org, work_order=other_work_order, description="(qc placeholder)", is_done=True,
+        )
+        other_work_order.status = "QC"
         other_work_order.save(update_fields=["status"])
         other_record = other_work_order.close(closed_by=other_owner)
         self.client.force_authenticate(user=other_owner)
@@ -368,6 +386,11 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
         work_order = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
         return work_order.close(closed_by=self.owner)
 
     def test_cannot_create_invoice_when_work_order_has_no_mechanic(self):
@@ -405,6 +428,11 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
             organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
         )
         work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+        )
+        work_order.status = "QC"
         work_order.save(update_fields=["status"])
         record = work_order.close(closed_by=self.owner)
         resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
