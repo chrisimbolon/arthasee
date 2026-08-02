@@ -737,7 +737,7 @@ function WorkOrderDetailContent() {
             className="btn-ghost"
             onClick={handleDownloadPdf}
             disabled={downloadingPdf || wo.status === "OPEN"}
-            title={wo.status === "OPEN" ? "Tersedia setelah Mulai Dikerjakan" : undefined}
+            title={wo.status === "OPEN" ? "Tersedia setelah WO mulai dikerjakan" : undefined}
           >
             {downloadingPdf ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={15} />}
             Download PDF
@@ -746,7 +746,7 @@ function WorkOrderDetailContent() {
             className="btn-rust"
             onClick={handlePrint}
             disabled={downloadingPdf || wo.status === "OPEN"}
-            title={wo.status === "OPEN" ? "Tersedia setelah Mulai Dikerjakan" : undefined}
+            title={wo.status === "OPEN" ? "Tersedia setelah WO mulai dikerjakan" : undefined}
           >
             <Printer size={15} /> Cetak
           </button>
@@ -812,7 +812,7 @@ function WorkOrderDetailContent() {
       {OPEN_STATUSES.includes(wo.status) && (
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           {wo.status === "OPEN" && (
-            <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("IN_PROGRESS")}>Mulai Dikerjakan</button>
+            <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("IN_PROGRESS")}>Mulai WO #{wo.number} Sekarang</button>
           )}
           {wo.status === "IN_PROGRESS" && (
             <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("QC")}>Ajukan Pemeriksaan</button>
