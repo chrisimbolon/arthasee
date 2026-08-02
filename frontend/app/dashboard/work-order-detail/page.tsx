@@ -5,6 +5,7 @@
 // export needs every route's HTML identical regardless of ?id= value.
 // =============================================================================
 import { Part, partsApi } from "@/lib/api/service";
+import { TrackingLink, trackingLinksApi } from "@/lib/api/tracking";
 import {
   Mechanic,
   mechanicsApi,
@@ -15,7 +16,7 @@ import {
   workOrderStagesApi,
   WorkOrderStatus,
 } from "@/lib/api/workorders";
-import { AlertTriangle, ArrowLeft, Check, Download, Loader2, Pencil, Plus, Printer, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Copy, Download, Link2, Loader2, Pencil, Plus, Printer, Trash2, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -270,6 +271,117 @@ function JobLineRow({ line, editable, canToggle, onToggle, onUpdated, compact }:
         )}
       </div>
       {error && <span style={{ fontSize: 11, color: "var(--danger)" }}>{error}</span>}
+    </div>
+  );
+}
+
+// Chris's own confirmed Fase 2 v1 scope, 2 Aug: a single, revocable,
+// unguessable link Made copies into WhatsApp by hand — deliberately
+// manual, matching the same "no automated sending" discipline already
+// established for Estimasi/Invoice PDF downloads (B3, automated
+// WhatsApp, is still on hold). window.location.origin is the real
+// frontend origin, not the backend API's own base URL — the public
+// link points at THIS app's /track page, which then calls the API
+// itself.
+function TrackingLinksSection({ workOrderId }: { workOrderId: string }) {
+  const [links, setLinks] = useState<TrackingLink[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () => trackingLinksApi.list(workOrderId).then(setLinks).finally(() => setLoading(false));
+  useEffect(() => { load(); }, [workOrderId]);
+
+  const activeLinks = links.filter((l) => !l.is_revoked);
+
+  const publicUrl = (token: string) =>
+    typeof window !== "undefined" ? `${window.location.origin}/track?token=${token}` : "";
+
+  const handleCreate = async () => {
+    setCreating(true); setError(null);
+    try {
+      await trackingLinksApi.create(workOrderId);
+      load();
+    } catch {
+      setError("Gagal membuat link pelacakan.");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleCopy = async (link: TrackingLink) => {
+    try {
+      await navigator.clipboard.writeText(publicUrl(link.token));
+      setCopiedId(link.id);
+      setTimeout(() => setCopiedId((id) => (id === link.id ? null : id)), 2000);
+    } catch {
+      setError("Gagal menyalin link — salin manual dari daftar di bawah.");
+    }
+  };
+
+  const handleRevoke = async (link: TrackingLink) => {
+    if (!window.confirm("Cabut link ini? Link tidak akan bisa diakses lagi setelah dicabut.")) return;
+    setError(null);
+    try {
+      await trackingLinksApi.revoke(link.id);
+      load();
+    } catch {
+      setError("Gagal mencabut link.");
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: activeLinks.length > 0 ? 12 : 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700 }}>
+          <Link2 size={15} /> Link Pelacakan untuk Pelanggan
+        </div>
+        <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleCreate} disabled={creating}>
+          {creating ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <><Plus size={13} /> Buat Link Baru</>}
+        </button>
+      </div>
+
+      {loading ? (
+        <p style={{ fontSize: 12.5, color: "var(--steel)" }}>Memuat…</p>
+      ) : activeLinks.length === 0 ? (
+        <p style={{ fontSize: 12.5, color: "var(--steel)" }}>
+          Belum ada link — buat satu untuk dibagikan ke pelanggan lewat WhatsApp.
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {activeLinks.map((link) => (
+            <div key={link.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: "var(--paper-3)", borderRadius: 6 }}>
+              <span className="mono" style={{ flex: 1, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {publicUrl(link.token)}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--steel)", flexShrink: 0 }}>
+                {link.view_count === 0 ? "Belum dilihat" : `Dilihat ${link.view_count}×`}
+              </span>
+              <button
+                onClick={() => handleCopy(link)}
+                title="Salin link"
+                style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: copiedId === link.id ? "#2e7d4f" : "var(--steel)", display: "flex", flexShrink: 0 }}
+              >
+                <Copy size={14} />
+              </button>
+              <button
+                onClick={() => handleRevoke(link)}
+                title="Cabut link"
+                style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "var(--steel)", display: "flex", flexShrink: 0 }}
+              >
+                <XCircle size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "8px 10px", borderRadius: 5, fontSize: 12, marginTop: 10 }}>
+          {error}
+        </div>
+      )}
     </div>
   );
 }
@@ -827,6 +939,8 @@ function WorkOrderDetailContent() {
           <AlertTriangle size={13} /> Pekerjaan ini sudah berjalan lebih lama dari perkiraan.
         </div>
       )}
+
+      <TrackingLinksSection workOrderId={wo.id} />
 
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
