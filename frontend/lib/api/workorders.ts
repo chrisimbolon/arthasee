@@ -14,6 +14,13 @@ export interface WorkOrderJobLine {
   stage:       string | null;
   description: string;
   is_done:     boolean;
+  // Computed on the backend (WorkOrderJobLine.is_locked in
+  // models.py) — true once the whole WorkOrder is DONE/CANCELLED, or
+  // once this line's own stage is completed even while the WorkOrder
+  // overall still has other open stages. Edit/delete UI should key
+  // off this directly rather than re-deriving the same rule
+  // client-side from wo.status and stage.completed_at separately.
+  is_locked:   boolean;
   created_at:  string;
 }
 
@@ -220,6 +227,19 @@ export const workOrderJobLinesApi = {
   async toggle(id: string): Promise<WorkOrderJobLine> {
     const { data } = await api.patch(`/api/work-orders/job-lines/${id}/toggle/`);
     return data.job_line;
+  },
+  // Chris's own explicit ask, 2 Aug: a job line had no way to fix a
+  // typo or remove a wrongly-added item at all before this — only
+  // toggle/assign-stage existed. Backend hard-blocks once
+  // job_line.is_locked (409) — this method doesn't duplicate that
+  // check; the caller is expected to only offer these once
+  // !line.is_locked.
+  async update(id: string, description: string): Promise<WorkOrderJobLine> {
+    const { data } = await api.put(`/api/work-orders/job-lines/${id}/`, { description });
+    return data.job_line;
+  },
+  async remove(id: string): Promise<void> {
+    await api.delete(`/api/work-orders/job-lines/${id}/`);
   },
   // Moves an existing job line into a stage, or clears it back to
   // unstaged with stageId = null — lets a line created before any
