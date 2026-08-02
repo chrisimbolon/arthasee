@@ -299,6 +299,19 @@ class WorkOrderJobLineToggleView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
                 status=status.HTTP_409_CONFLICT,
             )
+        # Chris's own catch, 2 Aug — caught live in production: a job
+        # line could be marked "done" before the WorkOrder even left
+        # OPEN, i.e. before "Mulai WO Sekarang" was ever clicked. Same
+        # real-work-must-have-begun rule as WorkOrder.close() itself
+        # rejecting OPEN — this is the checkbox-level equivalent, one
+        # layer down. The frontend also stops rendering the checkbox
+        # as clickable while OPEN, but that's the proactive layer;
+        # this is what actually enforces it.
+        if line.work_order.status == "OPEN":
+            return Response(
+                {"success": False, "message": 'Work order harus "Mulai Dikerjakan" dulu sebelum item bisa ditandai selesai.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         line.is_done = not line.is_done
         line.save(update_fields=["is_done"])
         return Response({"success": True, "job_line": WorkOrderJobLineSerializer(line).data})

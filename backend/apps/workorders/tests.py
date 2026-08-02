@@ -222,9 +222,31 @@ class WorkOrderJobLineTests(WorkOrderAPITestBase):
         self.assertFalse(create.data["job_line"]["is_done"])
 
         line_id = create.data["job_line"]["id"]
+        # Chris's own catch, 2 Aug — caught live in production: a job
+        # line couldn't be marked done before this until the WorkOrder
+        # actually left OPEN — same real-work-must-have-begun rule as
+        # WorkOrder.close() itself. A real precondition now, not test
+        # boilerplate to skip.
+        self._started(self.wo)
         toggle = self.client.patch(f"/api/work-orders/job-lines/{line_id}/toggle/")
         self.assertEqual(toggle.status_code, status.HTTP_200_OK)
         self.assertTrue(toggle.data["job_line"]["is_done"])
+
+    def test_cannot_toggle_job_line_while_work_order_still_open(self):
+        """
+        The actual regression test for the bug this fixes — caught
+        live from a real screenshot (WO #22, a job line struck
+        through while status was still Terbuka/OPEN, "Mulai WO
+        Sekarang" never clicked).
+        """
+        create = self.client.post(
+            f"/api/work-orders/{self.wo.id}/job-lines/",
+            {"description": "Bongkar kaburator"}, format="json",
+        )
+        line_id = create.data["job_line"]["id"]
+        toggle = self.client.patch(f"/api/work-orders/job-lines/{line_id}/toggle/")
+        self.assertEqual(toggle.status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(WorkOrderJobLine.objects.get(id=line_id).is_done)
 
     def test_cannot_add_job_line_to_cancelled_work_order(self):
         self.wo.status = "CANCELLED"
