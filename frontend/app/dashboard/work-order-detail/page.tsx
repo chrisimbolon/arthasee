@@ -655,8 +655,9 @@ function WorkOrderDetailContent() {
     try {
       await workOrdersApi.updateStatus(workOrderId, status);
       load();
-    } catch {
-      setError("Gagal mengubah status.");
+    } catch (err) {
+      const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setError(apiMessage || "Gagal mengubah status.");
     } finally {
       setBusy(false);
     }
@@ -744,6 +745,14 @@ function WorkOrderDetailContent() {
   if (loading || !wo) {
     return <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…</div>;
   }
+
+  // Chris's own explicit ask, 2 Aug — caught live in production:
+  // "Ajukan Pemeriksaan" sat right next to "Selesaikan Work Order"
+  // with no ordering signal at all, and nothing stopped submitting a
+  // job for QC before the actual work was ever checked off. A
+  // WorkOrder with zero job lines is also treated as "not done" —
+  // there's nothing to have verified yet.
+  const allJobLinesDone = wo.job_lines.length > 0 && wo.job_lines.every((line) => line.is_done);
 
   return (
     <div>
@@ -842,18 +851,27 @@ function WorkOrderDetailContent() {
             <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("IN_PROGRESS")}>Mulai WO #{wo.number} Sekarang</button>
           )}
           {wo.status === "IN_PROGRESS" && (
-            <button className="btn-rust" disabled={busy} onClick={() => advanceStatus("QC")}>Ajukan Pemeriksaan</button>
+            <button
+              className="btn-rust"
+              disabled={busy || !allJobLinesDone}
+              onClick={() => advanceStatus("QC")}
+              title={!allJobLinesDone ? "Selesaikan semua item pekerjaan dulu sebelum mengajukan pemeriksaan" : undefined}
+            >
+              Ajukan Pemeriksaan
+            </button>
           )}
-          {/* Chris's own catch, 2 Aug: this used to render
-              unconditionally for every OPEN_STATUSES status,
-              including a fresh OPEN WorkOrder that never even
-              clicked "Mulai Dikerjakan" — letting a job jump straight
-              to DONE with zero actual work recorded. Same real
-              enforcement backing this on the backend now
-              (WorkOrder.close() itself rejects status="OPEN" with a
-              409), this is just the proactive layer that stops SA
-              from seeing a button with no valid action behind it. */}
-          {wo.status !== "OPEN" && (
+          {/* Made's own confirmed real-world rule, 2 Aug — Chris
+              witnessed it directly at Arya Motor: EVERY job goes
+              through QC before being marked done, even a routine oil
+              change or spark plug replacement, with Made himself
+              personally doing QC on simple jobs. Tightened from "not
+              OPEN" to "must actually be QC" — closing straight from
+              IN_PROGRESS is exactly as wrong as closing from OPEN
+              was, just one step further down the pipeline. Same real
+              enforcement on the backend (WorkOrder.close() itself
+              rejects status="IN_PROGRESS" with a 409); this is the
+              proactive layer. */}
+          {wo.status === "QC" && (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <label className="label" style={{ marginBottom: 0 }}>Tanggal Servis</label>
