@@ -64,6 +64,22 @@ export default function LoginPage() {
         <p style={{ textAlign: "center", fontSize: 13.5, color: "var(--steel)", marginTop: 20 }}>
           Belum punya akun? <Link href="/register" style={{ color: "var(--rust)", fontWeight: 600 }}>Daftar bengkel Anda</Link>
         </p>
+
+        {/* Chris's own catch, 3 Aug: this page (staff/owner login) and
+            /customer/login (a customer's own magic-link login,
+            Fase 2.5) are two completely separate identity systems —
+            CustomUser vs. Customer, see auth.py's own docstring — but
+            a returning customer is far more likely to type this more
+            "obvious" URL out of habit than remember /customer/login.
+            One small, low-key pointer here catches that mistake right
+            where it happens, without needing any messaging on the
+            main marketing page (page.tsx) — that page's entire
+            audience is bengkel owners considering signing up, not car
+            owners checking on a vehicle, and was never the right
+            place for this. */}
+        <p style={{ textAlign: "center", fontSize: 13, color: "var(--steel)", marginTop: 10 }}>
+          Anda pelanggan bengkel? <Link href="/customer/login" style={{ color: "var(--rust)", fontWeight: 600 }}>Masuk di sini →</Link>
+        </p>
       </div>
     </div>
   );
