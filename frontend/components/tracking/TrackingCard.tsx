@@ -11,11 +11,64 @@
 // (fetchPublicTracking) or an authenticated session
 // (customerWorkOrdersApi.get) — both hit the exact same backend
 // payload shape (backend/apps/customers/payload.py's shared builder).
-import { PublicTracking } from "@/lib/api/tracking";
-import { CheckCircle2, Circle, Wrench } from "lucide-react";
+import { PublicStage, PublicTracking } from "@/lib/api/tracking";
+import { Check, Wrench } from "lucide-react";
 
 function money(v: string | number) {
   return `Rp ${Number(v).toLocaleString("id-ID")}`;
+}
+
+function formatTime(iso: string) {
+  return new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+
+// Chris's own ask, 3 Aug — "Option A": match the visual language of
+// Sansan's original mockup (numbered circles, connecting line, soft
+// status pills) using ONLY the real stage data this endpoint already
+// returns — no per-job-line breakdown, no fabricated timestamps.
+// Made's own signed Fase 2 note is still the real scope here; this is
+// a restyle of what's true, not a step toward the mockup's actual
+// granularity (that's a separate, still-open question for Made — see
+// item 23 in the roadmap).
+function StageStep({ stage, index, total }: { stage: PublicStage; index: number; total: number }) {
+  const isDone = stage.status === "Selesai";
+  const isInProgress = stage.status === "Sedang Berjalan";
+  const circleColor = isDone ? "#2e7d4f" : isInProgress ? "var(--rust)" : "var(--steel-lt)";
+  const circleBg = isDone || isInProgress ? circleColor : "transparent";
+  const circleTextColor = isDone || isInProgress ? "#fff" : "var(--steel)";
+  const pillBg = isDone ? "#e3f3e9" : isInProgress ? "#fbeae2" : "var(--paper-3)";
+  const pillColor = isDone ? "#2e7d4f" : isInProgress ? "var(--rust)" : "var(--steel)";
+  // Real time only, never both stacked — completed_at is the more
+  // meaningful single moment once a stage is done; started_at is the
+  // only real signal while it's still in progress.
+  const time = stage.completed_at ? formatTime(stage.completed_at) : stage.started_at ? formatTime(stage.started_at) : null;
+
+  return (
+    <div style={{ display: "flex", gap: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+        <div style={{
+          width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
+          background: circleBg, border: `2px solid ${circleColor}`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: circleTextColor, fontSize: 12, fontWeight: 700,
+        }}>
+          {isDone ? <Check size={13} /> : index + 1}
+        </div>
+        {index < total - 1 && (
+          <div style={{ width: 2, flex: 1, background: isDone ? "#2e7d4f" : "var(--line)", marginTop: 4, minHeight: 24 }} />
+        )}
+      </div>
+      <div style={{ flex: 1, paddingBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>{stage.name}</div>
+          <span style={{ fontSize: 10.5, fontWeight: 600, color: pillColor, background: pillBg, padding: "3px 9px", borderRadius: 20, flexShrink: 0, whiteSpace: "nowrap" }}>
+            {stage.status}
+          </span>
+        </div>
+        {time && <div className="mono" style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 3 }}>{time}</div>}
+      </div>
+    </div>
+  );
 }
 
 export default function TrackingCard({ tracking }: { tracking: PublicTracking }) {
@@ -34,24 +87,15 @@ export default function TrackingCard({ tracking }: { tracking: PublicTracking })
 
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>Tahap Pengerjaan</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {tracking.stages.length === 0 && (
-            <p style={{ fontSize: 13, color: "var(--steel)" }}>Belum ada tahap tercatat.</p>
-          )}
-          {tracking.stages.map((s, i) => (
-            <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-              {s.status === "Selesai" ? (
-                <CheckCircle2 size={18} style={{ color: "#2e7d4f", flexShrink: 0 }} />
-              ) : (
-                <Circle size={18} style={{ color: s.status === "Sedang Berjalan" ? "var(--rust)" : "var(--line)", flexShrink: 0 }} />
-              )}
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 600 }}>{s.name}</div>
-                <div style={{ fontSize: 12.5, color: "var(--steel)" }}>{s.status}</div>
-              </div>
-            </div>
-          ))}
-        </div>
+        {tracking.stages.length === 0 ? (
+          <p style={{ fontSize: 13, color: "var(--steel)" }}>Belum ada tahap tercatat.</p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {tracking.stages.map((s, i) => (
+              <StageStep key={i} stage={s} index={i} total={tracking.stages.length} />
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Only ever rendered once the backend actually includes it —
