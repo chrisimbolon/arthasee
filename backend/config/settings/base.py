@@ -150,3 +150,7 @@ CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS", default="http://localhost:3000"
 ).split(",")
 CORS_ALLOW_CREDENTIALS = True
+
+RESEND_API_KEY = config("RESEND_API_KEY", default="")
+CUSTOMER_MAGIC_LINK_FROM_EMAIL = config("CUSTOMER_MAGIC_LINK_FROM_EMAIL", default="noreply@arthasee.com")
+FRONTEND_BASE_URL = config("FRONTEND_BASE_URL", default="http://localhost:3000")

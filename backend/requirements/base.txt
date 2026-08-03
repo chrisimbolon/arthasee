@@ -8,4 +8,4 @@ gunicorn>=22.0
 whitenoise>=6.7
 openpyxl>=3.1.5
 xhtml2pdf>=0.2.16
-resend
+resend==2.35.0
