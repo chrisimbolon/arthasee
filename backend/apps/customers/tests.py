@@ -1,6 +1,8 @@
 # =============================================================================
 # === backend/apps/customers/tests.py ===
 # =============================================================================
+from datetime import timedelta
+
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part
 from apps.invoicing.models import Invoice
@@ -8,10 +10,13 @@ from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
 from apps.workorders.models import (Mechanic, WorkOrder, WorkOrderJobLine,
                                     WorkOrderStage)
+from django.test import override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import TrackingLink
+from .auth import generate_customer_access_token
+from .models import MagicLinkToken, TrackingLink
 
 
 class CustomersAPITestBase(APITestCase):
@@ -278,3 +283,326 @@ class PublicTrackingViewTests(CustomersAPITestBase):
         self.assertNotIn(str(self.wo.id), payload_str)
         self.assertNotIn(str(self.vehicle.id), payload_str)
         self.assertNotIn(str(self.org.id), payload_str)
+
+
+def _customer_auth_header(customer):
+    """Shared by every Fase 2.5 test class below that needs a real,
+    valid customer session — mirrors the exact header shape
+    CustomerJWTAuthentication expects (see auth.py)."""
+    token = generate_customer_access_token(customer)
+    return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
+
+
+class MagicLinkTokenModelTests(CustomersAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.customer.email = "brian@test.id"
+        self.customer.save(update_fields=["email"])
+
+    def test_token_is_generated_automatically(self):
+        link = MagicLinkToken.objects.create(
+            organization=self.org, customer=self.customer,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        self.assertTrue(link.token)
+        self.assertGreaterEqual(len(link.token), 32)
+
+    def test_is_valid_true_for_a_fresh_unused_token(self):
+        link = MagicLinkToken.objects.create(
+            organization=self.org, customer=self.customer,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        self.assertTrue(link.is_valid)
+
+    def test_is_valid_false_once_marked_used(self):
+        link = MagicLinkToken.objects.create(
+            organization=self.org, customer=self.customer,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        link.mark_used()
+        self.assertFalse(link.is_valid)
+        self.assertIsNotNone(link.used_at)
+
+    def test_is_valid_false_once_expired(self):
+        link = MagicLinkToken.objects.create(
+            organization=self.org, customer=self.customer,
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        self.assertFalse(link.is_valid)
+
+
+class CustomerMagicLinkRequestViewTests(CustomersAPITestBase):
+    """
+    Public client throughout — requesting a magic link is, by
+    definition, something a not-yet-logged-in customer does.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.customer.email = "brian@test.id"
+        self.customer.save(update_fields=["email"])
+        self.public_client = self.client_class()
+
+    def test_creates_a_real_token_when_email_matches_a_customer(self):
+        self.assertEqual(MagicLinkToken.objects.count(), 0)
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(MagicLinkToken.objects.count(), 1)
+        self.assertEqual(MagicLinkToken.objects.first().customer, self.customer)
+
+    def test_email_matching_is_case_insensitive(self):
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "BRIAN@TEST.ID"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(MagicLinkToken.objects.count(), 1)
+
+    def test_no_token_created_when_email_matches_nobody(self):
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "nobody@test.id"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(MagicLinkToken.objects.count(), 0)
+
+    def test_response_is_identical_whether_or_not_the_email_exists(self):
+        """
+        Real security property, not incidental — a public endpoint
+        must never let an attacker learn whether a given email is a
+        real customer just by watching the response shape.
+        """
+        matched = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
+        )
+        unmatched = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "nobody@test.id"}, format="json",
+        )
+        self.assertEqual(matched.status_code, unmatched.status_code)
+        self.assertEqual(matched.data["message"], unmatched.data["message"])
+
+    def test_missing_email_is_rejected(self):
+        resp = self.public_client.post("/api/customer-auth/magic-link/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(DEBUG=True)
+    def test_dev_token_included_in_response_when_debug_is_true(self):
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
+        )
+        self.assertIn("dev_token", resp.data)
+        self.assertEqual(resp.data["dev_token"], MagicLinkToken.objects.first().token)
+
+    @override_settings(DEBUG=False)
+    def test_dev_token_never_included_when_debug_is_false(self):
+        """
+        The one test that actually matters most in this class — a
+        magic-link token must never appear in an API response once
+        this is treated as production-shaped, since that would let
+        anyone who can see the response log in as someone else.
+        """
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
+        )
+        self.assertNotIn("dev_token", resp.data)
+
+
+class CustomerMagicLinkVerifyViewTests(CustomersAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.customer.email = "brian@test.id"
+        self.customer.save(update_fields=["email"])
+        self.public_client = self.client_class()
+        self.link = MagicLinkToken.objects.create(
+            organization=self.org, customer=self.customer,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+
+    def test_valid_token_returns_a_real_access_token_and_session_info(self):
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/verify/", {"token": self.link.token}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        session = resp.data["session"]
+        self.assertTrue(session["access"])
+        self.assertEqual(session["name"], "Brian Sira")
+        self.assertEqual(session["email"], "brian@test.id")
+
+    def test_verifying_marks_the_token_used(self):
+        self.public_client.post(
+            "/api/customer-auth/magic-link/verify/", {"token": self.link.token}, format="json",
+        )
+        self.link.refresh_from_db()
+        self.assertIsNotNone(self.link.used_at)
+
+    def test_a_used_token_cannot_be_redeemed_twice(self):
+        self.public_client.post(
+            "/api/customer-auth/magic-link/verify/", {"token": self.link.token}, format="json",
+        )
+        second = self.public_client.post(
+            "/api/customer-auth/magic-link/verify/", {"token": self.link.token}, format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_expired_token_is_rejected(self):
+        self.link.expires_at = timezone.now() - timedelta(minutes=1)
+        self.link.save(update_fields=["expires_at"])
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/verify/", {"token": self.link.token}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_unknown_token_is_rejected(self):
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/verify/", {"token": "this-token-does-not-exist"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_the_returned_access_token_actually_works_on_a_protected_endpoint(self):
+        """
+        The real, end-to-end proof — not just that verify() returns
+        something that looks like a token, but that the whole chain
+        (magic link -> access token -> CustomerJWTAuthentication)
+        genuinely holds together.
+        """
+        verify_resp = self.public_client.post(
+            "/api/customer-auth/magic-link/verify/", {"token": self.link.token}, format="json",
+        )
+        access = verify_resp.data["session"]["access"]
+        resp = self.public_client.get(
+            "/api/customer/work-orders/", **{"HTTP_AUTHORIZATION": f"Bearer {access}"},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+class CustomerWorkOrdersListViewTests(CustomersAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.public_client = self.client_class()
+        self.wo_active = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self.wo_done = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self._ready_to_close(self.wo_done)
+        self.wo_done.close(closed_by=self.owner)
+
+    def _ready_to_close(self, wo):
+        # Same shape as apps.workorders.tests' own helper — this file
+        # has no shared base with that one, so reimplemented locally
+        # rather than importing across apps' test modules.
+        wo.status = "IN_PROGRESS"
+        wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=wo, description="(qc placeholder)", is_done=True,
+        )
+        wo.status = "QC"
+        wo.save(update_fields=["status"])
+        return wo
+
+    def test_requires_a_valid_customer_token(self):
+        resp = self.public_client.get("/api/customer/work-orders/")
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_a_customuser_token_does_not_grant_access(self):
+        """
+        Real proof of the "complete separation" requirement — an
+        internal CustomUser session (even a real, valid one) must
+        never be usable to authenticate as a customer.
+        """
+        self.public_client.force_authenticate(user=self.owner)
+        resp = self.public_client.get("/api/customer/work-orders/")
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_returns_active_and_history_split_correctly(self):
+        resp = self.public_client.get("/api/customer/work-orders/", **_customer_auth_header(self.customer))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        active_numbers = [wo["work_order_number"] for wo in resp.data["active"]]
+        history_numbers = [wo["work_order_number"] for wo in resp.data["history"]]
+        self.assertIn(self.wo_active.number, active_numbers)
+        self.assertIn(self.wo_done.number, history_numbers)
+        self.assertNotIn(self.wo_done.number, active_numbers)
+        self.assertNotIn(self.wo_active.number, history_numbers)
+
+    def test_only_returns_this_customers_own_work_orders(self):
+        other_customer = Customer.objects.create(organization=self.org, name="Pelanggan Lain")
+        other_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=other_customer, plate_number="BP 9999 ZZ",
+            vehicle_type="Mobil", model="Test", manufacture_year=2020,
+        )
+        WorkOrder.objects.create(organization=self.org, vehicle=other_vehicle)
+
+        resp = self.public_client.get("/api/customer/work-orders/", **_customer_auth_header(self.customer))
+        all_numbers = [wo["work_order_number"] for wo in resp.data["active"] + resp.data["history"]]
+        # Three of OUR OWN, not two — the real bug was in this
+        # assertion, not the view. CustomersAPITestBase's own setUp()
+        # already creates self.wo (a third WorkOrder on the same
+        # vehicle, for TrackingLink/PublicTracking tests elsewhere in
+        # this file), in addition to this class's own wo_active/
+        # wo_done. My first draft here forgot that inherited fixture
+        # entirely — caught by a real test failure, traced by
+        # actually re-reading the base class instead of trusting
+        # memory a second time.
+        self.assertEqual(len(all_numbers), 3)
+        self.assertIn(self.wo.number, all_numbers)
+        self.assertIn(self.wo_active.number, all_numbers)
+        self.assertIn(self.wo_done.number, all_numbers)
+
+
+class CustomerWorkOrderDetailViewTests(CustomersAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.public_client = self.client_class()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def _done_work_order_with_invoice(self, wo):
+        wo.status = "IN_PROGRESS"
+        wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=wo, description="Ganti oli", is_done=True,
+        )
+        wo.status = "QC"
+        wo.save(update_fields=["status"])
+        wo.assigned_to = self.mechanic
+        wo.save(update_fields=["assigned_to"])
+        record = wo.close(closed_by=self.owner)
+        return Invoice.objects.create(service_record=record)
+
+    def test_can_fetch_own_work_order_detail(self):
+        resp = self.public_client.get(
+            f"/api/customer/work-orders/{self.wo.id}/", **_customer_auth_header(self.customer),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["tracking"]["work_order_number"], self.wo.number)
+
+    def test_cannot_fetch_another_customers_work_order(self):
+        """
+        The real ownership check — a logged-in customer must only
+        ever reach a WorkOrder for one of THEIR OWN vehicles, not any
+        id they happen to guess or construct.
+        """
+        other_customer = Customer.objects.create(organization=self.org, name="Pelanggan Lain")
+        other_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=other_customer, plate_number="BP 9999 ZZ",
+            vehicle_type="Mobil", model="Test", manufacture_year=2020,
+        )
+        other_wo = WorkOrder.objects.create(organization=self.org, vehicle=other_vehicle)
+
+        resp = self.public_client.get(
+            f"/api/customer/work-orders/{other_wo.id}/", **_customer_auth_header(self.customer),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_invoice_included_once_done_with_a_real_invoice(self):
+        invoice = self._done_work_order_with_invoice(self.wo)
+        resp = self.public_client.get(
+            f"/api/customer/work-orders/{self.wo.id}/", **_customer_auth_header(self.customer),
+        )
+        self.assertEqual(resp.data["tracking"]["invoice"]["number"], invoice.number)
+
+    def test_invoice_excluded_while_still_in_progress(self):
+        resp = self.public_client.get(
+            f"/api/customer/work-orders/{self.wo.id}/", **_customer_auth_header(self.customer),
+        )
+        self.assertIsNone(resp.data["tracking"]["invoice"])
