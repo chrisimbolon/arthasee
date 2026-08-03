@@ -2,6 +2,7 @@
 # === backend/apps/customers/tests.py ===
 # =============================================================================
 from datetime import timedelta
+from unittest.mock import patch
 
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part
@@ -606,3 +607,125 @@ class CustomerWorkOrderDetailViewTests(CustomersAPITestBase):
             f"/api/customer/work-orders/{self.wo.id}/", **_customer_auth_header(self.customer),
         )
         self.assertIsNone(resp.data["tracking"]["invoice"])
+
+
+class MagicLinkEmailTests(CustomersAPITestBase):
+    """
+    Tests for email.py directly, not through the view — real
+    Resend calls are always mocked here (patch("resend.Emails.send")),
+    never a genuine network call, matching the same discipline as
+    every other test in this project. NOTE: these tests require the
+    `resend` package to actually be installed (import resend happens
+    inside send_magic_link_email itself, only once an API key is
+    configured) — if it isn't yet, the tests using
+    @override_settings(RESEND_API_KEY=...) will fail on that import,
+    not on anything this test file itself gets wrong.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.customer.email = "brian@test.id"
+        self.customer.save(update_fields=["email"])
+
+    def test_returns_false_when_api_key_not_configured(self):
+        """
+        The real, current state as of 3 Aug — no RESEND_API_KEY set
+        up yet. Must fail soft, not raise.
+        """
+        from .email import send_magic_link_email
+        result = send_magic_link_email(self.customer, "some-token")
+        self.assertFalse(result)
+
+    @override_settings(RESEND_API_KEY="test_key_123")
+    @patch("resend.Emails.send")
+    def test_sends_and_returns_true_when_configured_and_resend_succeeds(self, mock_send):
+        from .email import send_magic_link_email
+        result = send_magic_link_email(self.customer, "some-token")
+        self.assertTrue(result)
+        mock_send.assert_called_once()
+
+    @override_settings(RESEND_API_KEY="test_key_123")
+    @patch("resend.Emails.send")
+    def test_returns_false_when_resend_raises(self, mock_send):
+        """
+        A real provider-side failure (bad key, outage, rate limit)
+        must never bubble up into a 500 on the request endpoint —
+        the whole reason this function catches broadly rather than
+        letting an exception propagate.
+        """
+        mock_send.side_effect = Exception("Resend API error")
+        from .email import send_magic_link_email
+        result = send_magic_link_email(self.customer, "some-token")
+        self.assertFalse(result)
+
+    @override_settings(RESEND_API_KEY="test_key_123", FRONTEND_BASE_URL="https://arthasee.com")
+    @patch("resend.Emails.send")
+    def test_email_includes_the_real_magic_link_url_and_recipient(self, mock_send):
+        from .email import send_magic_link_email
+        send_magic_link_email(self.customer, "abc123token")
+        call_args = mock_send.call_args[0][0]
+        self.assertEqual(call_args["to"], ["brian@test.id"])
+        self.assertIn("https://arthasee.com/customer/verify?token=abc123token", call_args["html"])
+        self.assertIn(self.org.name, call_args["subject"])
+
+
+class CustomerMagicLinkRequestViewEmailWiringTests(CustomersAPITestBase):
+    """
+    Proves the view actually calls send_magic_link_email — separate
+    from CustomerMagicLinkRequestViewTests above (which predates the
+    real Resend wiring and deliberately doesn't mock anything, relying
+    on RESEND_API_KEY being unset in test settings so the real
+    function fails soft on its own). These tests mock at the views.py
+    import site specifically (apps.customers.views.send_magic_link_email,
+    not apps.customers.email.send_magic_link_email) — patching a
+    function only affects the name actually called from, and views.py
+    holds its own bound reference via `from .email import
+    send_magic_link_email`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.customer.email = "brian@test.id"
+        self.customer.save(update_fields=["email"])
+        self.public_client = self.client_class()
+
+    @patch("apps.customers.views.send_magic_link_email")
+    def test_view_calls_send_magic_link_email_when_a_customer_matches(self, mock_send):
+        mock_send.return_value = True
+        self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
+        )
+        mock_send.assert_called_once()
+        called_customer = mock_send.call_args[0][0]
+        self.assertEqual(called_customer.id, self.customer.id)
+
+    @patch("apps.customers.views.send_magic_link_email")
+    def test_view_does_not_call_send_when_no_customer_matches(self, mock_send):
+        self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "nobody@test.id"}, format="json",
+        )
+        mock_send.assert_not_called()
+
+    @override_settings(DEBUG=True)
+    @patch("apps.customers.views.send_magic_link_email")
+    def test_dev_token_self_eliminates_once_a_real_send_succeeds(self, mock_send):
+        """
+        The actual point of the redesigned dev_token logic: once a
+        real send genuinely works, dev_token must NOT appear in the
+        response even in DEBUG — no manual cleanup needed once Resend
+        is properly configured.
+        """
+        mock_send.return_value = True
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
+        )
+        self.assertNotIn("dev_token", resp.data)
+
+    @override_settings(DEBUG=True)
+    @patch("apps.customers.views.send_magic_link_email")
+    def test_dev_token_still_present_when_send_fails_in_debug(self, mock_send):
+        mock_send.return_value = False
+        resp = self.public_client.post(
+            "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
+        )
+        self.assertIn("dev_token", resp.data)

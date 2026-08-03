@@ -1,28 +1,25 @@
 # =============================================================================
 # === backend/apps/customers/views.py ===
 # =============================================================================
-from datetime import timedelta
-
 from apps.core.views import TenantScopedAPIView
-from apps.service.models import Customer
 from apps.workorders.models import WorkOrder
 from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from datetime import timedelta
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .auth import (CustomerJWTAuthentication, IsCustomerAuthenticated,
-                   generate_customer_access_token)
+from apps.service.models import Customer
+from .auth import CustomerJWTAuthentication, IsCustomerAuthenticated, generate_customer_access_token
+from .email import send_magic_link_email
 from .models import MagicLinkToken, TrackingLink
 from .payload import build_work_order_tracking_payload
-from .serializers import (CustomerSessionSerializer,
-                          CustomerWorkOrderSummarySerializer,
-                          MagicLinkRequestSerializer,
-                          MagicLinkVerifySerializer, PublicTrackingSerializer,
-                          TrackingLinkSerializer)
+from .serializers import (CustomerSessionSerializer, CustomerWorkOrderSummarySerializer,
+                          MagicLinkRequestSerializer, MagicLinkVerifySerializer,
+                          PublicTrackingSerializer, TrackingLinkSerializer)
 
 # Mirrors WorkOrder.STATUS_CHOICES' own labels — duplicated rather
 # than imported, since this is customer-facing copy and the two are
@@ -118,13 +115,13 @@ class CustomerMagicLinkRequestView(APIView):
     POST /api/customer-auth/magic-link/
     Fase 2.5 — step 1 of login. Body: {"email": "..."}.
 
-    NOT yet wired to a real email provider (Resend/SendGrid) —
-    Chris's own explicit call, 3 Aug: ship everything buildable now,
-    defer only the actual send. In DEBUG, the raw token is returned
-    directly in the response so the whole flow is testable end to end
-    today; in production this MUST be replaced with a real send call
-    before this view is exposed publicly — see the TODO below for
-    exactly where.
+    Real delivery via Resend (email.py), wired in 3 Aug — Chris's own
+    choice over SendGrid. Until RESEND_API_KEY is actually configured
+    (no API key/domain set up yet as of this writing), send_magic_link_
+    email() fails soft and this view falls back to returning the raw
+    token directly in the response, but ONLY in DEBUG — see the
+    dev_token logic below, which self-eliminates the moment real
+    sending genuinely works, no further code change needed then.
     """
     permission_classes = [AllowAny]
 
@@ -149,20 +146,34 @@ class CustomerMagicLinkRequestView(APIView):
                 organization=customer.organization, customer=customer,
                 expires_at=timezone.now() + timedelta(minutes=15),
             )
-            # ---- TODO(Fase 2.5 email provider): real send goes here ----
-            # Once Resend/SendGrid is chosen, replace this block with
-            # a real email containing a link built from link.token,
-            # and remove the dev_token passthrough below entirely —
-            # a magic-link token must never appear in an API response
-            # once real delivery exists, only in the actual email.
-            dev_token = link.token
+            # Resend, wired in 3 Aug (Chris's own choice over
+            # SendGrid) — see email.py's own docstring. Fails soft:
+            # if RESENaD_API_KEY isn't configured yet (or a real send
+            # fails), send_magic_link_email() logs it and returns
+            # False, but this view's own response never changes
+            # either way — same reasoning as everywhere else here,
+            # never let the caller learn anything from whether the
+            # send succeeded.
+            sent = send_magic_link_email(customer, link.token)
+            # dev_token only ever appears when a real email genuinely
+            # did NOT go out — not the original plan (which was to
+            # remove this passthrough entirely once real delivery
+            # existed), reconsidered: that plan would've needed a
+            # manual code change to actually enforce, easy to forget.
+            # This version self-eliminates instead — the moment
+            # RESEND_API_KEY is real and sending works, `sent` is
+            # True and dev_token is never populated, DEBUG or not, no
+            # further action needed. Until then, local development
+            # still works via this same path without a real inbox.
+            if not sent and settings.DEBUG:
+                dev_token = link.token
 
         # Deliberately the SAME response whether the email matched a
         # real Customer or not — never confirm or deny whether an
         # email is registered, same reasoning as PublicTrackingView's
         # own generic 404.
         response_data = {"success": True, "message": "Jika email terdaftar, link masuk telah dikirim."}
-        if settings.DEBUG and dev_token:
+        if dev_token:
             response_data["dev_token"] = dev_token
         return Response(response_data)
 
