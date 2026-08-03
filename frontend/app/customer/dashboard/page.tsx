@@ -46,15 +46,26 @@ export default function CustomerDashboardPage() {
   const [active, setActive] = useState<CustomerWorkOrderSummary[]>([]);
   const [history, setHistory] = useState<CustomerWorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [signedOut, setSignedOut] = useState(!customerTokenStorage.get());
+  // Caught live via a real hydration-mismatch error, 3 Aug:
+  // useState(!customerTokenStorage.get()) reads localStorage
+  // synchronously during render, which returns null on the SERVER
+  // (no window there) but a real token on the CLIENT — so the
+  // server-rendered HTML and the first client render genuinely
+  // disagreed on which branch to show, exactly the anti-pattern
+  // React's own hydration warning describes. Fixed by starting both
+  // server and client renders from the SAME value (false) and only
+  // ever checking the real token inside useEffect, which — unlike a
+  // useState initializer — never runs during server rendering at
+  // all, only after the client has mounted.
+  const [signedOut, setSignedOut] = useState(false);
 
   useEffect(() => {
-    if (signedOut) { setLoading(false); return; }
+    if (!customerTokenStorage.get()) { setSignedOut(true); setLoading(false); return; }
     customerWorkOrdersApi.list()
       .then((data) => { setActive(data.active); setHistory(data.history); })
       .catch(() => setSignedOut(true))
       .finally(() => setLoading(false));
-  }, [signedOut]);
+  }, []);
 
   if (signedOut) {
     return (
