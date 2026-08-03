@@ -96,3 +96,57 @@ class TrackingLink(TenantScopedModel):
         self.view_count += 1
         self.last_viewed_at = timezone.now()
         self.save(update_fields=["view_count", "last_viewed_at"])
+
+
+class MagicLinkToken(TenantScopedModel):
+    """
+    Fase 2.5 (confirmed with Made/Chris, 3 Aug) — real customer
+    accounts, magic-link login. A customer types their email, gets a
+    single-use link, clicks it, they're in — no password to set,
+    reset, or leak. Chris's own explicit call over password auth:
+    "cleaner, eliminates password resets, fits the low-friction feel
+    of the app."
+
+    Deliberately its own model, same reasoning as TrackingLink's own
+    docstring — a real, single-use, short-lived, revocable-by-expiry
+    credential, not a bare field on Customer. 15-minute expiry,
+    single-use (used_at set the moment it's redeemed) — a real magic
+    link left sitting in an inbox for days must not still work.
+
+    NOT yet wired to a real email provider — Resend/SendGrid
+    integration is the other, deliberately deferred half of Fase 2.5
+    (Chris's own explicit call, 3 Aug: ship everything buildable now,
+    stub only the actual send). See
+    CustomerMagicLinkRequestView.post() in views.py for exactly where
+    that real send call needs to go once a provider is chosen — the
+    token itself, the whole verify/login flow, and the customer
+    dashboard behind it are all real and fully working today.
+    """
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer    = models.ForeignKey(
+        "service.Customer", on_delete=models.CASCADE, related_name="magic_link_tokens",
+        verbose_name="Pelanggan",
+    )
+    token       = models.CharField(max_length=64, unique=True, editable=False, default=_generate_token, db_index=True)
+    expires_at  = models.DateTimeField(verbose_name="Kadaluarsa")
+    used_at     = models.DateTimeField(null=True, blank=True, verbose_name="Digunakan Pada")
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Magic Link Token"
+        verbose_name_plural  = "Magic Link Tokens"
+        ordering             = ["-created_at"]
+
+    def __str__(self):
+        return f"Magic link for {self.customer.name}"
+
+    def _resolve_organization(self):
+        return self.customer.organization
+
+    @property
+    def is_valid(self):
+        return self.used_at is None and self.expires_at > timezone.now()
+
+    def mark_used(self):
+        self.used_at = timezone.now()
+        self.save(update_fields=["used_at"])

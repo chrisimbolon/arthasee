@@ -3,7 +3,10 @@
 # =============================================================================
 from django.urls import path
 
-from .views import PublicTrackingView, TrackingLinkListView, TrackingLinkRevokeView
+from .views import (CustomerMagicLinkRequestView, CustomerMagicLinkVerifyView,
+                    CustomerWorkOrderDetailView, CustomerWorkOrdersListView,
+                    PublicTrackingView, TrackingLinkListView,
+                    TrackingLinkRevokeView)
 
 urlpatterns = [
     path("work-orders/<uuid:work_order_id>/tracking-links/",
@@ -16,4 +19,14 @@ urlpatterns = [
     # converter — it's a random secrets.token_urlsafe() string, not
     # a UUID.
     path("track/<str:token>/", PublicTrackingView.as_view(), name="public-tracking"),
+
+    # Fase 2.5 — real customer accounts, magic-link login.
+    path("customer-auth/magic-link/",
+         CustomerMagicLinkRequestView.as_view(), name="customer-magic-link-request"),
+    path("customer-auth/magic-link/verify/",
+         CustomerMagicLinkVerifyView.as_view(), name="customer-magic-link-verify"),
+    path("customer/work-orders/",
+         CustomerWorkOrdersListView.as_view(), name="customer-work-order-list"),
+    path("customer/work-orders/<uuid:pk>/",
+         CustomerWorkOrderDetailView.as_view(), name="customer-work-order-detail"),
 ]

@@ -1,16 +1,28 @@
 # =============================================================================
 # === backend/apps/customers/views.py ===
 # =============================================================================
+from datetime import timedelta
+
 from apps.core.views import TenantScopedAPIView
+from apps.service.models import Customer
 from apps.workorders.models import WorkOrder
+from django.conf import settings
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import TrackingLink
-from .serializers import PublicTrackingSerializer, TrackingLinkSerializer
+from .auth import (CustomerJWTAuthentication, IsCustomerAuthenticated,
+                   generate_customer_access_token)
+from .models import MagicLinkToken, TrackingLink
+from .payload import build_work_order_tracking_payload
+from .serializers import (CustomerSessionSerializer,
+                          CustomerWorkOrderSummarySerializer,
+                          MagicLinkRequestSerializer,
+                          MagicLinkVerifySerializer, PublicTrackingSerializer,
+                          TrackingLinkSerializer)
 
 # Mirrors WorkOrder.STATUS_CHOICES' own labels — duplicated rather
 # than imported, since this is customer-facing copy and the two are
@@ -94,39 +106,165 @@ class PublicTrackingView(APIView):
             )
 
         link.record_view()
-        work_order = link.work_order
-        vehicle = work_order.vehicle
+        # Shared with CustomerWorkOrderDetailView below (Fase 2.5) —
+        # see payload.py's own docstring for why this is a plain
+        # function, not duplicated whitelist logic in two views.
+        payload = build_work_order_tracking_payload(link.work_order)
+        return Response({"success": True, "tracking": PublicTrackingSerializer(payload).data})
 
-        # getattr probe, same pattern already proven throughout this
-        # codebase (WorkOrder.mark_started(), Invoice.save()'s own
-        # mechanic lookup) — a reverse OneToOneField raises
-        # RelatedObjectDoesNotExist rather than returning None when
-        # nothing points back to it.
-        service_record = getattr(work_order, "service_record", None)
-        invoice = getattr(service_record, "invoice", None) if service_record else None
 
-        invoice_payload = None
-        # Chris's own explicit scope call, 2 Aug: only shown once the
-        # job is genuinely DONE and a real invoice exists — never a
-        # mid-repair estimate, and never any contract/termin
-        # financials (institutional clients pay via TerminPeriod
-        # schedules, not a flat invoice — showing this here would be
-        # confusing or simply wrong against their real payment plan).
-        if work_order.status == "DONE" and invoice is not None:
-            invoice_payload = {
-                "number": invoice.number,
-                "mechanic_name_snapshot": invoice.mechanic_name_snapshot,
-                "total": invoice.total,
-                "status": invoice.get_status_display(),
-            }
+class CustomerMagicLinkRequestView(APIView):
+    """
+    POST /api/customer-auth/magic-link/
+    Fase 2.5 — step 1 of login. Body: {"email": "..."}.
 
-        payload = {
-            "work_order_number": work_order.number,
-            "status": STATUS_LABEL.get(work_order.status, work_order.status),
-            "vehicle_plate": vehicle.plate_number,
-            "vehicle_model": vehicle.model,
-            "mechanic_name": work_order.assigned_to.name if work_order.assigned_to_id else None,
-            "stages": list(work_order.stages.order_by("sequence").all()),
-            "invoice": invoice_payload,
-        }
+    NOT yet wired to a real email provider (Resend/SendGrid) —
+    Chris's own explicit call, 3 Aug: ship everything buildable now,
+    defer only the actual send. In DEBUG, the raw token is returned
+    directly in the response so the whole flow is testable end to end
+    today; in production this MUST be replaced with a real send call
+    before this view is exposed publicly — see the TODO below for
+    exactly where.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = MagicLinkRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data["email"].strip().lower()
+        # .first(), not .get() — Customer.email has no unique
+        # constraint (a real, known v1 limitation: the same person
+        # could in principle be a Customer under this email at more
+        # than one Arthasee-powered shop). Picks the first match
+        # rather than trying to disambiguate — worth a real decision
+        # later if that scenario ever actually comes up, not solved
+        # here on a guess.
+        customer = Customer.objects.filter(email__iexact=email).first() if email else None
+
+        dev_token = None
+        if customer is not None:
+            link = MagicLinkToken.objects.create(
+                organization=customer.organization, customer=customer,
+                expires_at=timezone.now() + timedelta(minutes=15),
+            )
+            # ---- TODO(Fase 2.5 email provider): real send goes here ----
+            # Once Resend/SendGrid is chosen, replace this block with
+            # a real email containing a link built from link.token,
+            # and remove the dev_token passthrough below entirely —
+            # a magic-link token must never appear in an API response
+            # once real delivery exists, only in the actual email.
+            dev_token = link.token
+
+        # Deliberately the SAME response whether the email matched a
+        # real Customer or not — never confirm or deny whether an
+        # email is registered, same reasoning as PublicTrackingView's
+        # own generic 404.
+        response_data = {"success": True, "message": "Jika email terdaftar, link masuk telah dikirim."}
+        if settings.DEBUG and dev_token:
+            response_data["dev_token"] = dev_token
+        return Response(response_data)
+
+
+class CustomerMagicLinkVerifyView(APIView):
+    """
+    POST /api/customer-auth/magic-link/verify/
+    Fase 2.5 — step 2 of login. Body: {"token": "..."}. Single-use —
+    MagicLinkToken.mark_used() means clicking the same link twice
+    (a forwarded email, a stale browser tab) fails the second time,
+    same real-world expectation as any other magic-link flow.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = MagicLinkVerifySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        link = MagicLinkToken.objects.select_related("customer").filter(
+            token=serializer.validated_data["token"],
+        ).first()
+        if link is None or not link.is_valid:
+            return Response(
+                {"success": False, "message": "Link tidak valid atau sudah kadaluarsa."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        link.mark_used()
+        customer = link.customer
+        access_token = generate_customer_access_token(customer)
+        session = {"access": access_token, "name": customer.name, "email": customer.email}
+        return Response({"success": True, "session": CustomerSessionSerializer(session).data})
+
+
+class CustomerWorkOrdersListView(APIView):
+    """
+    GET /api/customer/work-orders/
+    Fase 2.5 dashboard — the real reason accounts exist over one-off
+    tracking links: a fleet client's full vehicle list in one place.
+    Active (OPEN/IN_PROGRESS/QC) and history (DONE/CANCELLED) split
+    server-side, matching Chris's own confirmed "active first, history
+    behind a tab" scope — the frontend doesn't have to re-derive that
+    split from a flat list.
+    """
+    authentication_classes = [CustomerJWTAuthentication]
+    permission_classes = [IsCustomerAuthenticated]
+
+    def get(self, request):
+        customer = request.user  # a real Customer instance — see auth.py
+        # Filtering by customer_id explicitly, not the model instance
+        # — functionally identical to vehicle__customer=customer
+        # (Django resolves both to the same SQL), just marginally
+        # more explicit. The real bug behind an earlier test failure
+        # here turned out to be in the TEST's expected count, not this
+        # filter — see CustomerWorkOrdersListViewTests.test_only_
+        # returns_this_customers_own_work_orders' own comment for the
+        # real story.
+        work_orders = WorkOrder.objects.filter(vehicle__customer_id=customer.id).select_related(
+            "vehicle",
+        ).order_by("-created_at")
+
+        def summarize(qs):
+            return CustomerWorkOrderSummarySerializer([
+                {
+                    "id": str(wo.id),
+                    "work_order_number": wo.number,
+                    "status": STATUS_LABEL.get(wo.status, wo.status),
+                    "vehicle_plate": wo.vehicle.plate_number,
+                    "vehicle_model": wo.vehicle.model,
+                    "created_at": wo.created_at,
+                }
+                for wo in qs
+            ], many=True).data
+
+        active = [wo for wo in work_orders if wo.status in ("OPEN", "IN_PROGRESS", "QC")]
+        history = [wo for wo in work_orders if wo.status in ("DONE", "CANCELLED")]
+        return Response({"success": True, "active": summarize(active), "history": summarize(history)})
+
+
+class CustomerWorkOrderDetailView(APIView):
+    """
+    GET /api/customer/work-orders/<id>/
+    The same real, whitelisted payload as PublicTrackingView (see
+    payload.py) — just reached via a logged-in Customer session
+    instead of a one-off token. Real tenant/ownership check: a
+    logged-in customer must only ever be able to open a WorkOrder for
+    one of THEIR OWN vehicles, never any WorkOrder id they happen to
+    guess or construct — same discipline as every other ownership
+    check in this codebase, just enforced against Customer instead of
+    organization membership.
+    """
+    authentication_classes = [CustomerJWTAuthentication]
+    permission_classes = [IsCustomerAuthenticated]
+
+    def get(self, request, pk):
+        customer = request.user
+        work_order = WorkOrder.objects.filter(
+            pk=pk, vehicle__customer_id=customer.id,
+        ).select_related("vehicle", "assigned_to").first()
+        if work_order is None:
+            return Response({"success": False, "message": "Work order tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = build_work_order_tracking_payload(work_order)
         return Response({"success": True, "tracking": PublicTrackingSerializer(payload).data})

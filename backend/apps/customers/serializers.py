@@ -3,7 +3,7 @@
 # =============================================================================
 from rest_framework import serializers
 
-from .models import TrackingLink
+from .models import MagicLinkToken, TrackingLink
 
 
 class TrackingLinkSerializer(serializers.ModelSerializer):
@@ -67,3 +67,43 @@ class PublicTrackingSerializer(serializers.Serializer):
     mechanic_name      = serializers.CharField(allow_null=True)
     stages             = PublicStageSerializer(many=True)
     invoice            = PublicInvoiceSerializer(allow_null=True)
+
+
+class CustomerWorkOrderSummarySerializer(serializers.Serializer):
+    """
+    Fase 2.5 — the dashboard list view (active + history tabs), one
+    row per WorkOrder. Deliberately lighter than
+    PublicTrackingSerializer — no stage breakdown, no invoice detail;
+    those live behind the real detail endpoint
+    (CustomerWorkOrderDetailView, which reuses the exact same
+    build_work_order_tracking_payload() as the token-link path). This
+    is just enough to render a list and let the customer pick one.
+    """
+    id                 = serializers.CharField()
+    work_order_number  = serializers.CharField()
+    status             = serializers.CharField()
+    vehicle_plate      = serializers.CharField()
+    vehicle_model      = serializers.CharField()
+    created_at         = serializers.DateTimeField()
+
+
+class MagicLinkRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class MagicLinkVerifySerializer(serializers.Serializer):
+    token = serializers.CharField()
+
+
+class CustomerSessionSerializer(serializers.Serializer):
+    """
+    What the frontend actually needs after a successful magic-link
+    verify — an access token, plus enough of the Customer's own
+    identity to render "Hi, {name}" without a second round-trip.
+    Deliberately narrow, same whitelist discipline as everything else
+    customer-facing — no organization id, no internal Customer fields
+    beyond name/email.
+    """
+    access = serializers.CharField()
+    name   = serializers.CharField()
+    email  = serializers.EmailField()
