@@ -386,8 +386,8 @@ function TrackingLinksSection({ workOrderId }: { workOrderId: string }) {
   );
 }
 
-function StageCard({ stage, mechanics, editable, canToggle, onUpdated }: {
-  stage: WorkOrderStage; mechanics: Mechanic[]; editable: boolean; canToggle: boolean; onUpdated: () => void;
+function StageCard({ stage, index, total, mechanics, editable, canToggle, onUpdated }: {
+  stage: WorkOrderStage; index: number; total: number; mechanics: Mechanic[]; editable: boolean; canToggle: boolean; onUpdated: () => void;
 }) {
   const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
@@ -454,36 +454,79 @@ function StageCard({ stage, mechanics, editable, canToggle, onUpdated }: {
     }
   };
 
-  const borderColor = stage.completed_at ? "#2e7d4f" : stage.started_at ? "var(--rust)" : "var(--steel-lt)";
+  // Chris's own ask, 3 Aug — "Option A": match the visual language
+  // of Sansan's original mockup (numbered circles, connecting line,
+  // soft status pills) WITHOUT following it into fabricating
+  // per-job-line timestamps. Made's own call on whether job lines
+  // should ever become real, independently-tracked stages (Sansan's
+  // mockup's actual granularity) is still pending — this only
+  // restyles what's already real: one circle per genuine
+  // WorkOrderStage, using its own real started_at/completed_at.
+  const isDone = !!stage.completed_at;
+  const isInProgress = !!stage.started_at && !isDone;
+  const circleColor = isDone ? "#2e7d4f" : isInProgress ? "var(--rust)" : "var(--steel-lt)";
+  const circleBg = isDone || isInProgress ? circleColor : "transparent";
+  const circleTextColor = isDone || isInProgress ? "#fff" : "var(--steel)";
 
   return (
-    <div className="card" style={{ marginBottom: 10, borderLeft: `3px solid ${borderColor}` }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
-        <span style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
-          {stage.name}
-          {/* Made's own literal example: an oil change + brake pads
-              taking more than 2 hours. Only ever shown while a stage
-              is genuinely in-progress and past its own threshold —
-              is_overdue already accounts for a completed stage never
-              qualifying, regardless of how long it actually took. */}
-          {stage.is_overdue && (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 600, color: "var(--danger)", background: "var(--danger-light)", padding: "2px 7px", borderRadius: 20 }}>
-              <AlertTriangle size={10} /> Lama
+    <div style={{ display: "flex", gap: 14, marginBottom: 10 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0, width: 28 }}>
+        <div style={{
+          width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
+          background: circleBg, border: `2px solid ${circleColor}`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: circleTextColor, fontSize: 13, fontWeight: 700,
+        }}>
+          {isDone ? <Check size={14} /> : index + 1}
+        </div>
+        {/* Connecting line to the next stage — omitted after the
+            last one. Relies on this gutter column stretching to the
+            card's own real rendered height (flexbox default
+            align-items: stretch on the row above), not a fixed pixel
+            guess — a card with more job lines genuinely grows taller,
+            and the line grows with it. */}
+        {index < total - 1 && (
+          <div style={{ width: 2, flex: 1, background: isDone ? "#2e7d4f" : "var(--line)", marginTop: 4, minHeight: 20 }} />
+        )}
+      </div>
+
+      <div className="card" style={{ flex: 1, marginBottom: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
+          <span style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+            {stage.name}
+            {/* Made's own literal example: an oil change + brake pads
+                taking more than 2 hours. Only ever shown while a stage
+                is genuinely in-progress and past its own threshold —
+                is_overdue already accounts for a completed stage never
+                qualifying, regardless of how long it actually took. */}
+            {stage.is_overdue && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 600, color: "var(--danger)", background: "var(--danger-light)", padding: "2px 7px", borderRadius: 20 }}>
+                <AlertTriangle size={10} /> Lama
+              </span>
+            )}
+          </span>
+          {isDone ? (
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#2e7d4f", background: "#e3f3e9", padding: "3px 10px", borderRadius: 20, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+              <Check size={11} /> Selesai
+            </span>
+          ) : editable ? (
+            !stage.started_at ? (
+              <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={start}>Mulai Tahap</button>
+            ) : (
+              <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={complete}>Selesaikan Tahap</button>
+            )
+          ) : (
+            // Chris's own catch, 3 Aug: this case previously rendered
+            // nothing at all — a real, small gap. Read-only view of a
+            // still-open stage (e.g. viewing a closed WO's own
+            // history) now shows a proper status pill instead of a
+            // blank space, matching the mockup's own "Sedang
+            // Berjalan"/"Menunggu" treatment.
+            <span style={{ fontSize: 11, fontWeight: 600, color: isInProgress ? "var(--rust)" : "var(--steel)", background: isInProgress ? "#fbeae2" : "var(--paper-3)", padding: "3px 10px", borderRadius: 20, flexShrink: 0 }}>
+              {isInProgress ? "Sedang Berjalan" : "Menunggu"}
             </span>
           )}
-        </span>
-        {stage.completed_at ? (
-          <span style={{ fontSize: 11, color: "#2e7d4f", fontWeight: 600, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-            <Check size={12} /> Selesai
-          </span>
-        ) : editable ? (
-          !stage.started_at ? (
-            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={start}>Mulai Tahap</button>
-          ) : (
-            <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={complete}>Selesaikan Tahap</button>
-          )
-        ) : null}
-      </div>
+        </div>
 
       {error && (
         <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "7px 10px", borderRadius: 5, fontSize: 12, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
@@ -538,6 +581,7 @@ function StageCard({ stage, mechanics, editable, canToggle, onUpdated }: {
           </button>
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -583,8 +627,8 @@ function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics:
       {wo.stages.length > 0 && (
         <>
           <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Tahap Pengerjaan</h3>
-          {wo.stages.map((stage) => (
-            <StageCard key={stage.id} stage={stage} mechanics={mechanics} editable={editable} canToggle={canToggle} onUpdated={onUpdated} />
+          {wo.stages.map((stage, index) => (
+            <StageCard key={stage.id} stage={stage} index={index} total={wo.stages.length} mechanics={mechanics} editable={editable} canToggle={canToggle} onUpdated={onUpdated} />
           ))}
         </>
       )}
