@@ -42,11 +42,23 @@ export const trackingLinksApi = {
 // empty-string base URL.
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+export interface PublicJobLine {
+  description:  string;
+  status:       "Menunggu" | "Sedang Berjalan" | "Selesai";
+  started_at:   string | null;
+  completed_at: string | null;
+}
+
 export interface PublicStage {
   name:         string;
   status:       "Menunggu" | "Sedang Berjalan" | "Selesai";
   started_at:   string | null;
   completed_at: string | null;
+  // Made's own confirmed note, 4 Aug: real per-step timing. Chris's
+  // own separate, explicit call the same day: this now shows on the
+  // customer-facing timeline too, not just internally — a genuine
+  // widening of Fase 2 v1's original stage-level-only scope.
+  job_lines:    PublicJobLine[];
 }
 
 export interface PublicInvoice {
@@ -63,6 +75,9 @@ export interface PublicTracking {
   vehicle_model:       string;
   mechanic_name:       string | null;
   stages:              PublicStage[];
+  // Mirrors the internal page's own "Pekerjaan Lain (Tanpa Tahap)" —
+  // routine work never grouped under a stage still gets real timing.
+  unstaged_job_lines:  PublicJobLine[];
   invoice:             PublicInvoice | null;
 }
 
