@@ -80,7 +80,7 @@ class WorkOrderAPITestBase(APITestCase):
         """
         self._started(wo)
         WorkOrderJobLine.objects.create(
-            organization=wo.organization, work_order=wo, description="(qc placeholder)", is_done=True,
+            organization=wo.organization, work_order=wo, description="(qc placeholder)", completed_at=timezone.now(),
         )
         wo.status = "QC"
         wo.save(update_fields=["status"])
@@ -238,13 +238,21 @@ class WorkOrderJobLineTests(WorkOrderAPITestBase):
         super().setUp()
         self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
 
-    def test_create_and_toggle_job_line(self):
+    def test_toggle_cycles_through_the_real_three_states(self):
+        """
+        Made's own confirmed handwritten note, 4 Aug: "Pekerjaan
+        bertahap: jam mulai – jam selesai" — a single toggle used to
+        flip straight to done; now it's a real 3-state cycle
+        (Menunggu -> Sedang Berjalan -> Selesai -> back to Menunggu),
+        each transition backed by a real timestamp.
+        """
         create = self.client.post(
             f"/api/work-orders/{self.wo.id}/job-lines/",
             {"description": "Bak belakang las reparasi"}, format="json",
         )
         self.assertEqual(create.status_code, status.HTTP_201_CREATED)
         self.assertFalse(create.data["job_line"]["is_done"])
+        self.assertIsNone(create.data["job_line"]["started_at"])
 
         line_id = create.data["job_line"]["id"]
         # Chris's own catch, 2 Aug — caught live in production: a job
@@ -253,9 +261,28 @@ class WorkOrderJobLineTests(WorkOrderAPITestBase):
         # WorkOrder.close() itself. A real precondition now, not test
         # boilerplate to skip.
         self._started(self.wo)
-        toggle = self.client.patch(f"/api/work-orders/job-lines/{line_id}/toggle/")
-        self.assertEqual(toggle.status_code, status.HTTP_200_OK)
-        self.assertTrue(toggle.data["job_line"]["is_done"])
+
+        # 1st toggle: Menunggu -> Sedang Berjalan
+        first = self.client.patch(f"/api/work-orders/job-lines/{line_id}/toggle/")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertFalse(first.data["job_line"]["is_done"])
+        self.assertIsNotNone(first.data["job_line"]["started_at"])
+        self.assertIsNone(first.data["job_line"]["completed_at"])
+
+        # 2nd toggle: Sedang Berjalan -> Selesai
+        second = self.client.patch(f"/api/work-orders/job-lines/{line_id}/toggle/")
+        self.assertTrue(second.data["job_line"]["is_done"])
+        self.assertIsNotNone(second.data["job_line"]["completed_at"])
+        # started_at from the first toggle must survive untouched —
+        # first-time-wins, same discipline as WorkOrderStage.
+        self.assertEqual(first.data["job_line"]["started_at"], second.data["job_line"]["started_at"])
+
+        # 3rd toggle: Selesai -> back to Menunggu (the real mistake-
+        # correction path — WorkOrderJobLine.reset() on the backend)
+        third = self.client.patch(f"/api/work-orders/job-lines/{line_id}/toggle/")
+        self.assertFalse(third.data["job_line"]["is_done"])
+        self.assertIsNone(third.data["job_line"]["started_at"])
+        self.assertIsNone(third.data["job_line"]["completed_at"])
 
     def test_cannot_toggle_job_line_while_work_order_still_open(self):
         """
@@ -799,8 +826,8 @@ class WorkOrderStatusTransitionTests(WorkOrderAPITestBase):
     def test_can_move_to_qc_once_every_job_line_is_done(self):
         self._started(self.wo)
         line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Bongkar Gear Box")
-        line.is_done = True
-        line.save(update_fields=["is_done"])
+        line.complete()
+        line.save(update_fields=["started_at", "completed_at"])
         resp = self.client.patch(f"/api/work-orders/{self.wo.id}/status/", {"status": "QC"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["work_order"]["status"], "QC")
@@ -808,8 +835,8 @@ class WorkOrderStatusTransitionTests(WorkOrderAPITestBase):
     def test_cannot_move_to_qc_when_only_some_job_lines_are_done(self):
         self._started(self.wo)
         done_line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Bongkar Gear Box")
-        done_line.is_done = True
-        done_line.save(update_fields=["is_done"])
+        done_line.complete()
+        done_line.save(update_fields=["started_at", "completed_at"])
         WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Pasang Gear Box Baru")
         resp = self.client.patch(f"/api/work-orders/{self.wo.id}/status/", {"status": "QC"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
