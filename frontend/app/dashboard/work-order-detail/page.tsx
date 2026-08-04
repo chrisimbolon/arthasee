@@ -234,31 +234,52 @@ function JobLineRow({ line, editable, canToggle, onToggle, onUpdated, compact }:
     );
   }
 
+  // Made's own confirmed handwritten note, 4 Aug: "Pekerjaan
+  // bertahap: jam mulai – jam selesai" — real per-step start/end
+  // timing now, not just a done/not-done flag. The checkbox is a
+  // genuine 3-state cycle: Menunggu -> Sedang Berjalan -> Selesai ->
+  // back to Menunggu (see WorkOrderJobLine.reset() on the backend for
+  // why the cycle loops instead of dead-ending at Selesai — a real
+  // mistake-correction path, not just a display nuance).
+  const isInProgress = !!line.started_at && !line.completed_at;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 10 }}>
         <button
           onClick={() => canCheck && onToggle(line.id)}
           disabled={!canCheck}
-          title={!canToggle && editable ? "Tersedia setelah WO mulai dikerjakan" : undefined}
+          title={
+            !canToggle && editable ? "Tersedia setelah WO mulai dikerjakan"
+            : line.is_done ? "Selesai — klik untuk mengatur ulang"
+            : isInProgress ? "Sedang berjalan — klik untuk tandai selesai"
+            : "Menunggu — klik untuk mulai"
+          }
           style={{
             width: boxSize, height: boxSize, borderRadius: boxRadius, border: "1px solid var(--line)",
             // Chris's own explicit ask, 2 Aug: rust reads as a
             // warning/in-progress color elsewhere in this app (see
             // STATUS_COLOR's own IN_PROGRESS above) — "done" should
-            // read as done. #2e7d4f is the same green already used
-            // for a completed stage's border and a PAID invoice
-            // badge, not a new color invented just for this.
-            background: line.is_done ? "#2e7d4f" : "transparent",
+            // read as done, so rust is deliberately reused here for
+            // the genuinely in-progress middle state instead,
+            // matching that same color language rather than
+            // contradicting it. #2e7d4f (green) stays reserved for
+            // Selesai, same as everywhere else in this app.
+            background: line.is_done ? "#2e7d4f" : isInProgress ? "var(--rust)" : "transparent",
             display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
             cursor: canCheck ? "pointer" : "default",
           }}
         >
           {line.is_done && <Check size={iconSize} color="#fff" />}
         </button>
-        <span style={{ flex: 1, fontSize, textDecoration: line.is_done ? "line-through" : "none", color: line.is_done ? "var(--steel)" : undefined }}>
+        <span style={{ flex: 1, fontSize, textDecoration: line.is_done ? "line-through" : "none", color: line.is_done ? "var(--steel)" : isInProgress ? "var(--rust)" : undefined }}>
           {line.description}
         </span>
+        {isInProgress && (
+          <span style={{ fontSize: 10, fontWeight: 600, color: "var(--rust)", flexShrink: 0, whiteSpace: "nowrap" }}>
+            Sedang berjalan
+          </span>
+        )}
         {canModify && (
           <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
             <button onClick={startEdit} title="Ubah" style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "var(--steel)", display: "flex" }}>
