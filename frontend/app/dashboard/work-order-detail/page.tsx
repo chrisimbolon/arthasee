@@ -534,7 +534,28 @@ function StageCard({ stage, index, total, mechanics, editable, canToggle, onUpda
             !stage.started_at ? (
               <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={start}>Mulai Tahap</button>
             ) : (
-              <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }} onClick={complete}>Selesaikan Tahap</button>
+              // Chris's own catch, 4 Aug — caught live in production:
+              // this gate never existed at the stage level, only for
+              // the whole WorkOrder (see allJobLinesDone further
+              // below for that same rule). A stage could be marked
+              // Selesai while its own job lines underneath were still
+              // Sedang Berjalan or Menunggu — a real, visible
+              // contradiction once job lines got real 3-state timing
+              // (Option B, same day). Real enforcement lives on the
+              // backend (WorkOrderStageCompleteView's own 409); this
+              // is the proactive layer.
+              (() => {
+                const stageJobLinesDone = stage.job_lines.length > 0 && stage.job_lines.every((line) => line.is_done);
+                return (
+                  <button
+                    className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 10px", flexShrink: 0 }}
+                    onClick={complete} disabled={!stageJobLinesDone}
+                    title={!stageJobLinesDone ? "Selesaikan semua item pekerjaan di tahap ini dulu" : undefined}
+                  >
+                    Selesaikan Tahap
+                  </button>
+                );
+              })()
             )
           ) : (
             // Chris's own catch, 3 Aug: this case previously rendered
