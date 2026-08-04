@@ -22,11 +22,18 @@ class MechanicSerializer(serializers.ModelSerializer):
 
 class WorkOrderJobLineSerializer(serializers.ModelSerializer):
     is_locked = serializers.BooleanField(read_only=True)
+    # Declared explicitly, same as is_locked above — is_done is now a
+    # read-only Python property (Option B, 4 Aug: completed_at is the
+    # only real stored fact), not a model field. ModelSerializer can
+    # often auto-detect a property, but explicit beats implicit here,
+    # especially right next to another property field already handled
+    # this exact way.
+    is_done   = serializers.BooleanField(read_only=True)
 
     class Meta:
         model  = WorkOrderJobLine
-        fields = ["id", "work_order", "stage", "description", "is_done", "is_locked", "created_at"]
-        read_only_fields = ["id", "is_locked", "created_at"]
+        fields = ["id", "work_order", "stage", "description", "is_done", "started_at", "completed_at", "is_locked", "created_at"]
+        read_only_fields = ["id", "is_done", "started_at", "completed_at", "is_locked", "created_at"]
 
     def validate_stage(self, stage):
         """

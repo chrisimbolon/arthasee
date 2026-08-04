@@ -377,6 +377,32 @@ class WorkOrder(TenantScopedModel):
             if stages_to_backfill:
                 WorkOrderStage.objects.bulk_update(stages_to_backfill, ["started_at", "completed_at"])
 
+            # Same real risk, now for job lines too — Chris's own
+            # extension of the fix above, 4 Aug: once job-line timing
+            # became customer-visible (Made's own confirmed request
+            # for per-step "jam mulai – jam selesai"), a WorkOrder
+            # reaching DONE with an item still stuck at "Menunggu"
+            # became exactly the same visible contradiction the stage
+            # fix already solved, one level down. In the normal API-
+            # driven flow every job line is already completed by the
+            # time close() runs (the QC gate itself requires it), but
+            # close() is also reachable directly via the ORM (tests,
+            # scripts) bypassing that gate — this is real defense in
+            # depth, not redundant with the QC check.
+            job_lines_to_backfill = []
+            for line in job_lines:
+                changed = False
+                if line.started_at is None:
+                    line.started_at = now
+                    changed = True
+                if line.completed_at is None:
+                    line.completed_at = now
+                    changed = True
+                if changed:
+                    job_lines_to_backfill.append(line)
+            if job_lines_to_backfill:
+                WorkOrderJobLine.objects.bulk_update(job_lines_to_backfill, ["started_at", "completed_at"])
+
             issue_description = "\n".join(line.description for line in job_lines)
             parts_replaced = ", ".join(line.part.name for line in material_lines)
 
@@ -585,6 +611,28 @@ class WorkOrderJobLine(TenantScopedModel):
     genuinely checkable off as work happens, unlike ServiceRecord's
     single free-text issue_description field it eventually collapses
     into.
+
+    Made's own confirmed handwritten note, 4 Aug: "Pekerjaan bertahap:
+    jam mulai – jam selesai" — multi-step work needs a real start
+    time AND end time per step, not just a done/not-done flag. Real
+    started_at/completed_at now, mirroring WorkOrderStage's own exact
+    shape and semantics (start()/complete(), same IN_PROGRESS
+    precondition, same first-time-wins). Chris's own explicit call,
+    same day: this now shows on the CUSTOMER-facing tracking page too
+    (a badly-damaged car's owner genuinely wants to see "bongkar
+    done, parts on order now" — a real, separate scope decision from
+    Made's note itself, not something to quietly infer from one line
+    about timestamps) — see apps.customers.payload's own comment for
+    where that's wired in.
+
+    is_done deliberately removed as a stored field, not just renamed
+    — Option B, Chris's own explicit call: a payload served to a
+    customer needs ONE honest number, not a boolean and a timestamp
+    that could theoretically drift apart. completed_at is now the
+    only real stored fact; is_done below is a read-only property
+    derived from it, purely so code that only ever READS the concept
+    ("is this done?") doesn't need rewriting — anything that used to
+    WRITE is_done=True must now call complete() instead.
     """
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     work_order  = models.ForeignKey(WorkOrder, on_delete=models.CASCADE, related_name="job_lines", verbose_name="Work Order")
@@ -599,7 +647,8 @@ class WorkOrderJobLine(TenantScopedModel):
         related_name="job_lines", verbose_name="Tahap",
     )
     description = models.CharField(max_length=255, verbose_name="Deskripsi Pekerjaan")
-    is_done      = models.BooleanField(default=False, verbose_name="Selesai")
+    started_at   = models.DateTimeField(null=True, blank=True, verbose_name="Mulai")
+    completed_at = models.DateTimeField(null=True, blank=True, verbose_name="Selesai")
     created_at  = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -612,6 +661,51 @@ class WorkOrderJobLine(TenantScopedModel):
 
     def _resolve_organization(self):
         return self.work_order.organization
+
+    @property
+    def is_done(self):
+        # Read-only, derived — never assign to this. See the class
+        # docstring's own Option B reasoning for why completed_at is
+        # the only real stored fact now.
+        return self.completed_at is not None
+
+    def start(self):
+        """
+        Mirrors WorkOrderStage.start() exactly — same precondition,
+        same first-time-wins, same in-memory-only (caller saves).
+        Real reason for the IN_PROGRESS requirement here too: a job
+        line's own start time landing before the WorkOrder's overall
+        work_started_at would be the same incoherent-timeline problem
+        stages already guard against.
+        """
+        if self.work_order.status != "IN_PROGRESS":
+            raise ValueError('Work order harus berstatus "Dikerjakan" sebelum item bisa dimulai.')
+        if self.started_at is not None:
+            return
+        self.started_at = timezone.now()
+
+    def complete(self):
+        """Mirrors WorkOrderStage.complete() exactly — auto-starts
+        first if never explicitly started, first-time-wins on
+        completed_at itself."""
+        if self.started_at is None:
+            self.start()
+        if self.completed_at is not None:
+            return
+        self.completed_at = timezone.now()
+
+    def reset(self):
+        """
+        NOT mirrored from WorkOrderStage — stages have no equivalent.
+        Added specifically for the job-line 3-state click cycle
+        (Menunggu -> Sedang Berjalan -> Selesai -> back to Menunggu):
+        a mechanic correcting a mistake needs a real way back to the
+        start, not a dead end at "Selesai." Clears both timestamps
+        together — an item can't be "half reset," genuinely back to
+        not-yet-started or nothing.
+        """
+        self.started_at = None
+        self.completed_at = None
 
     @property
     def is_locked(self):

@@ -207,7 +207,13 @@ class WorkOrderStatusUpdateView(TenantScopedAPIView):
         # here (`not job_lines.exists()`) — nothing to have verified.
         if new_status == "QC":
             job_lines = order.job_lines.all()
-            if not job_lines.exists() or job_lines.filter(is_done=False).exists():
+            # completed_at__isnull, not is_done — is_done is now a
+            # read-only Python property (Option B, 4 Aug), not a
+            # real DB field, and Django's ORM can't filter() on a
+            # property at all. This would have silently broken the
+            # QC gate entirely the moment the model changed if not
+            # caught here.
+            if not job_lines.exists() or job_lines.filter(completed_at__isnull=True).exists():
                 return Response(
                     {"success": False, "message": "Selesaikan semua item pekerjaan dulu sebelum mengajukan pemeriksaan."},
                     status=status.HTTP_409_CONFLICT,
@@ -306,7 +312,16 @@ class WorkOrderJobLineListView(TenantScopedAPIView):
 
 
 class WorkOrderJobLineToggleView(TenantScopedAPIView):
-    """PATCH /api/work-orders/job-lines/<id>/toggle/ — flips is_done."""
+    """
+    PATCH /api/work-orders/job-lines/<id>/toggle/ — cycles a job line
+    through its real 3-state lifecycle: Menunggu -> Sedang Berjalan ->
+    Selesai -> back to Menunggu. Rebuilt from a plain boolean flip,
+    4 Aug — Made's own confirmed handwritten note asking for real
+    per-step timing ("Pekerjaan bertahap: jam mulai - jam selesai"),
+    and Chris's own explicit call for Option B: completed_at is now
+    the only stored fact on the model, no separate is_done field left
+    to drift out of sync with it.
+    """
     model = WorkOrderJobLine
 
     def patch(self, request, pk):
@@ -329,8 +344,28 @@ class WorkOrderJobLineToggleView(TenantScopedAPIView):
                 {"success": False, "message": 'Work order harus "Mulai Dikerjakan" dulu sebelum item bisa ditandai selesai.'},
                 status=status.HTTP_409_CONFLICT,
             )
-        line.is_done = not line.is_done
-        line.save(update_fields=["is_done"])
+        # The actual 3-state cycle — start()/complete() each carry
+        # their own real IN_PROGRESS precondition (see
+        # WorkOrderJobLine's own docstring, mirroring
+        # WorkOrderStage.start() exactly); the OPEN check just above
+        # is a distinct, coarser gate already handled separately.
+        # reset() is the mistake-correction path back to Menunggu —
+        # not mirrored from WorkOrderStage, added specifically so a
+        # mechanic isn't stuck at a dead end after marking something
+        # done by accident.
+        try:
+            if line.started_at is None:
+                line.start()
+                update_fields = ["started_at"]
+            elif line.completed_at is None:
+                line.complete()
+                update_fields = ["completed_at"]
+            else:
+                line.reset()
+                update_fields = ["started_at", "completed_at"]
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_409_CONFLICT)
+        line.save(update_fields=update_fields)
         return Response({"success": True, "job_line": WorkOrderJobLineSerializer(line).data})
 
 
