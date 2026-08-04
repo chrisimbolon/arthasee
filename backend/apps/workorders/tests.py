@@ -1283,12 +1283,72 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         started still deserves a real start time on record — better
         a slightly-late timestamp than no record at all for
         something that clearly did happen.
+
+        Now needs a real, done job line first — Chris's own catch,
+        4 Aug: completing a stage with nothing checked off underneath
+        it is exactly the gap that let "Tune-up: Selesai" sit above
+        "Kuras Cairan: Sedang berjalan" in production. See the
+        dedicated gate tests just below for that fix's own coverage.
+        """
+        self._move_wo_to_in_progress()
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, stage=stage, description="Ketok panel")
+        line.complete()
+        line.save(update_fields=["started_at", "completed_at"])
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(resp.data["stage"]["started_at"])
+        self.assertIsNotNone(resp.data["stage"]["completed_at"])
+
+    def test_cannot_complete_a_stage_with_no_job_lines_at_all(self):
+        """
+        Chris's own catch, 4 Aug — caught live in production: a stage
+        could be marked Selesai while its own job lines underneath
+        were still incomplete, or with none at all. A stage with zero
+        job lines has nothing to have verified as actually done, same
+        reasoning as the WO-level "Ajukan Pemeriksaan" gate.
         """
         self._move_wo_to_in_progress()
         stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
         resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        stage.refresh_from_db()
+        self.assertIsNone(stage.completed_at)
+
+    def test_cannot_complete_a_stage_while_a_job_line_is_still_unchecked(self):
+        """
+        The actual regression test for the bug this fixes — a real
+        production screenshot showed "Tune-up: Selesai" sitting
+        directly above two job lines still reading "Sedang berjalan."
+        """
+        self._move_wo_to_in_progress()
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Tune-up", sequence=1)
+        done_line = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=stage, description="Kuras Cairan",
+        )
+        done_line.complete()
+        done_line.save(update_fields=["started_at", "completed_at"])
+        in_progress_line = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=stage, description="Pelepasan Komponen",
+        )
+        in_progress_line.start()
+        in_progress_line.save(update_fields=["started_at"])
+
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        stage.refresh_from_db()
+        self.assertIsNone(stage.completed_at)
+
+    def test_can_complete_a_stage_once_every_job_line_is_genuinely_done(self):
+        self._move_wo_to_in_progress()
+        stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Tune-up", sequence=1)
+        for desc in ["Kuras Cairan", "Pelepasan Komponen"]:
+            line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, stage=stage, description=desc)
+            line.complete()
+            line.save(update_fields=["started_at", "completed_at"])
+
+        resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertIsNotNone(resp.data["stage"]["started_at"])
         self.assertIsNotNone(resp.data["stage"]["completed_at"])
 
     def test_cannot_start_a_stage_while_work_order_is_still_open(self):
@@ -1313,8 +1373,19 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         being blocked, calling it directly on an OPEN WorkOrder would
         silently sidestep the exact restriction test_cannot_start_a_
         stage_while_work_order_is_still_open just proved.
+
+        Needs a real, done job line — otherwise the newer job-lines
+        gate (4 Aug) fires first and this test would only be proving
+        THAT gate by accident, not the IN_PROGRESS requirement it's
+        actually named for. Set directly via the ORM, not
+        line.complete() — that method itself requires IN_PROGRESS,
+        exactly the state this test deliberately never reaches.
         """
         stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Body Repair", sequence=1)
+        line = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, stage=stage, description="Ketok panel")
+        line.completed_at = timezone.now()
+        line.started_at = timezone.now()
+        line.save(update_fields=["started_at", "completed_at"])
         resp = self.client.post(f"/api/work-orders/stages/{stage.id}/complete/")
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
         stage.refresh_from_db()

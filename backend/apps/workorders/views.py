@@ -592,6 +592,26 @@ class WorkOrderStageCompleteView(TenantScopedAPIView):
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
                 status=status.HTTP_409_CONFLICT,
             )
+        # Chris's own catch, 4 Aug — caught live in production: this
+        # gate never existed at the STAGE level, only at the whole-
+        # WorkOrder level (see the QC-gate check in
+        # WorkOrderStatusUpdateView above — "Ajukan Pemeriksaan
+        # requires all job lines done"). A stage could be marked
+        # Selesai while its own job lines underneath were still
+        # Sedang Berjalan or Menunggu — always technically possible,
+        # but effectively invisible before job lines had real 3-state
+        # timing (Option B, same day). Once they did, it became a
+        # genuine, visible contradiction: "Tune-up: Selesai" sitting
+        # directly above "Kuras Cairan: Sedang berjalan." Same
+        # reasoning as the WO-level gate — a stage with zero job lines
+        # is blocked too (`not job_lines.exists()`), since there's
+        # nothing to have verified as actually done.
+        job_lines = stage.job_lines.all()
+        if not job_lines.exists() or job_lines.filter(completed_at__isnull=True).exists():
+            return Response(
+                {"success": False, "message": "Selesaikan semua item pekerjaan di tahap ini dulu sebelum menyelesaikan tahap."},
+                status=status.HTTP_409_CONFLICT,
+            )
         try:
             stage.complete()
         except ValueError as e:
