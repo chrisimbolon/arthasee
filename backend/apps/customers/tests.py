@@ -63,7 +63,7 @@ class CustomersAPITestBase(APITestCase):
         wo.status = "IN_PROGRESS"
         wo.save(update_fields=["status"])
         line = WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=wo, description="Ganti kampas rem", is_done=True,
+            organization=self.org, work_order=wo, description="Ganti kampas rem", completed_at=timezone.now(),
         )
         wo.status = "QC"
         wo.save(update_fields=["status"])
@@ -218,18 +218,71 @@ class PublicTrackingViewTests(CustomersAPITestBase):
         self.assertEqual(stages["Sedang Dikerjakan"], "Sedang Berjalan")
         self.assertEqual(stages["Sudah Selesai"], "Selesai")
 
-    def test_no_job_line_level_detail_is_exposed(self):
+    def test_stage_includes_its_own_job_lines_with_correct_status(self):
         """
-        Chris's own explicit Fase 2 v1 scope: stage-level only, not
-        job-line detail — that's Sansan's mockup's granularity, not
-        what Made's signed note asked for.
+        Made's own confirmed handwritten note, 4 Aug: "Pekerjaan
+        bertahap: jam mulai – jam selesai" — real per-step timing.
+        Chris's own separate, explicit call the same day: this now
+        shows on the customer-facing page too, a deliberate widening
+        of Fase 2 v1's original stage-level-only scope (replaces the
+        old test_no_job_line_level_detail_is_exposed, which asserted
+        the opposite of what's now the real, confirmed behavior).
         """
+        self.wo.status = "IN_PROGRESS"
+        self.wo.save(update_fields=["status"])
+        stage = WorkOrderStage.objects.create(
+            organization=self.org, work_order=self.wo, name="Overhaul", sequence=1,
+        )
+        done_line = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=stage, description="Kuras cairan",
+        )
+        done_line.complete()
+        done_line.save(update_fields=["started_at", "completed_at"])
+        in_progress_line = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=stage, description="Pelepasan komponen",
+        )
+        in_progress_line.start()
+        in_progress_line.save(update_fields=["started_at"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=self.wo, description="Ganti kampas rem depan",
+            organization=self.org, work_order=self.wo, stage=stage, description="Pengujian akhir",
+        )
+
+        resp = self.public_client.get(f"/api/track/{self.link.token}/")
+        lines = {l["description"]: l for l in resp.data["tracking"]["stages"][0]["job_lines"]}
+        self.assertEqual(lines["Kuras cairan"]["status"], "Selesai")
+        self.assertIsNotNone(lines["Kuras cairan"]["completed_at"])
+        self.assertEqual(lines["Pelepasan komponen"]["status"], "Sedang Berjalan")
+        self.assertIsNone(lines["Pelepasan komponen"]["completed_at"])
+        self.assertEqual(lines["Pengujian akhir"]["status"], "Menunggu")
+        self.assertIsNone(lines["Pengujian akhir"]["started_at"])
+
+    def test_unstaged_job_lines_are_included_separately(self):
+        """Mirrors the internal page's own "Pekerjaan Lain (Tanpa
+        Tahap)" — routine work never grouped under a stage still gets
+        real timing, in its own top-level list, not nested inside any
+        stage's job_lines."""
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, description="Ganti oli",
         )
         resp = self.public_client.get(f"/api/track/{self.link.token}/")
-        self.assertNotIn("job_lines", resp.data["tracking"])
-        self.assertNotIn("Ganti kampas rem depan", str(resp.data["tracking"]))
+        unstaged = [l["description"] for l in resp.data["tracking"]["unstaged_job_lines"]]
+        self.assertIn("Ganti oli", unstaged)
+        for stage in resp.data["tracking"]["stages"]:
+            self.assertNotIn("Ganti oli", [l["description"] for l in stage["job_lines"]])
+
+    def test_response_never_leaks_internal_job_line_ids(self):
+        """
+        Same real security property as
+        test_response_never_leaks_raw_internal_ids below, extended to
+        the newly-included job-line data — a real id or PK must never
+        appear in this public payload just because job-line detail is
+        now shown.
+        """
+        line = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, description="Ganti oli",
+        )
+        resp = self.public_client.get(f"/api/track/{self.link.token}/")
+        self.assertNotIn(str(line.id), str(resp.data["tracking"]))
 
     def test_invoice_is_excluded_while_work_order_is_not_done(self):
         resp = self.public_client.get(f"/api/track/{self.link.token}/")
@@ -239,7 +292,7 @@ class PublicTrackingViewTests(CustomersAPITestBase):
         self.wo.status = "IN_PROGRESS"
         self.wo.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=self.wo, description="Ganti oli", is_done=True,
+            organization=self.org, work_order=self.wo, description="Ganti oli", completed_at=timezone.now(),
         )
         self.wo.status = "QC"
         self.wo.save(update_fields=["status"])
@@ -333,10 +386,29 @@ class MagicLinkTokenModelTests(CustomersAPITestBase):
         self.assertFalse(link.is_valid)
 
 
+@override_settings(RESEND_API_KEY="")
 class CustomerMagicLinkRequestViewTests(CustomersAPITestBase):
     """
     Public client throughout — requesting a magic link is, by
     definition, something a not-yet-logged-in customer does.
+
+    Class-level @override_settings(RESEND_API_KEY="") added after a
+    real, live-network problem surfaced: once a real RESEND_API_KEY
+    was added to .env for actual local use, that SAME key leaked into
+    every test run too (config.settings.local is used for both
+    runserver and manage.py test here — no separate test settings
+    module). These tests were written expecting an empty key by
+    default and never intended to exercise real Resend behavior at
+    all; without this override they were silently making real,
+    live network calls to Resend's production API on every test run
+    (caught live: ResendError tracebacks appearing in real
+    manage.py test output, one per test in this class, all correctly
+    caught internally so no assertion failed — but a real test-hygiene
+    problem regardless, not something to leave as-is). Tests that
+    deliberately DO exercise real Resend behavior
+    (MagicLinkEmailTests, CustomerMagicLinkRequestViewEmailWiringTests
+    below) already mock resend.Emails.send explicitly instead of
+    relying on this default — this override doesn't affect them.
     """
 
     def setUp(self):
@@ -495,7 +567,7 @@ class CustomerWorkOrdersListViewTests(CustomersAPITestBase):
         wo.status = "IN_PROGRESS"
         wo.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=wo, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=wo, description="(qc placeholder)", completed_at=timezone.now(),
         )
         wo.status = "QC"
         wo.save(update_fields=["status"])
@@ -561,7 +633,7 @@ class CustomerWorkOrderDetailViewTests(CustomersAPITestBase):
         wo.status = "IN_PROGRESS"
         wo.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=wo, description="Ganti oli", is_done=True,
+            organization=self.org, work_order=wo, description="Ganti oli", completed_at=timezone.now(),
         )
         wo.status = "QC"
         wo.save(update_fields=["status"])
@@ -627,10 +699,22 @@ class MagicLinkEmailTests(CustomersAPITestBase):
         self.customer.email = "brian@test.id"
         self.customer.save(update_fields=["email"])
 
+    @override_settings(RESEND_API_KEY="")
     def test_returns_false_when_api_key_not_configured(self):
         """
         The real, current state as of 3 Aug — no RESEND_API_KEY set
         up yet. Must fail soft, not raise.
+
+        @override_settings added after a real gap surfaced live: this
+        test relied on the AMBIENT environment having no key
+        configured, true when originally written but no longer true
+        once a real key was added to .env for actual local use. It
+        was "passing" purely by coincidence (a real failed send also
+        returns False) while silently making a real, live network
+        call to Resend it was never meant to make — same class of
+        issue as CustomerMagicLinkRequestViewTests' own class-level
+        fix just above, just one test that slipped through that
+        earlier pass.
         """
         from .email import send_magic_link_email
         result = send_magic_link_email(self.customer, "some-token")
