@@ -3,9 +3,146 @@
 // === frontend/app/dashboard/vehicles/page.tsx ===
 // =============================================================================
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
-import { AlertTriangle, Calendar, ChevronDown, Loader2, Plus, X } from "lucide-react";
+import { AlertTriangle, Calendar, Check, ChevronDown, Loader2, Plus, Search, X } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+// Chris's own catch, 4 Aug: a plain <select> genuinely doesn't scale
+// once Made has 50+ real customers — scrolling and squinting through
+// a long alphabetical list every time a vehicle gets added, made
+// worse by institutional clients whose names all start similarly
+// ("Polresta Batanghari", "Polresta Tanjung Pinang"). Client-side
+// substring search, not a new backend endpoint — customersApi.list()
+// already fetches the full list once for this page, and a real shop's
+// customer count is nowhere near the scale where filtering in the
+// browser would ever be the bottleneck.
+function CustomerCombobox({ customers, value, onChange }: {
+  customers: Customer[]; value: string; onChange: (id: string) => void;
+}) {
+  const selected = customers.find((c) => c.id === value) ?? null;
+  const [query, setQuery] = useState(selected?.name ?? "");
+  const [open, setOpen] = useState(false);
+  const [highlighted, setHighlighted] = useState(0);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // Keeps the input's displayed text in sync if `value` ever changes
+  // from outside this component (e.g. the whole form getting reset
+  // after a successful save) — not just on first mount.
+  useEffect(() => {
+    setQuery(selected?.name ?? "");
+  }, [selected?.id]);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        // Snap back to the real selected name (or blank) — typing
+        // something that matches nobody and clicking away shouldn't
+        // leave stray, non-committed text sitting in the field.
+        setQuery(selected?.name ?? "");
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [selected]);
+
+  const results = query.trim()
+    ? customers.filter((c) => c.name.toLowerCase().includes(query.trim().toLowerCase()))
+    : customers;
+
+  const selectCustomer = (customer: Customer) => {
+    onChange(customer.id);
+    setQuery(customer.name);
+    setOpen(false);
+  };
+
+  const handleInputChange = (text: string) => {
+    setQuery(text);
+    setOpen(true);
+    setHighlighted(0);
+    // A real selection only exists once explicitly picked from the
+    // list — typing over a previously-selected name (even by one
+    // character) must clear the actual committed value, so the
+    // form's own `required` check on customer can't silently pass
+    // with a stale id that no longer matches what's displayed.
+    if (!selected || text !== selected.name) onChange("");
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setOpen(true);
+      setHighlighted((i) => Math.min(i + 1, results.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlighted((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (open && results[highlighted]) selectCustomer(results[highlighted]);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+      setQuery(selected?.name ?? "");
+    }
+  };
+
+  return (
+    <div ref={wrapperRef} style={{ position: "relative" }}>
+      <div style={{ position: "relative" }}>
+        <Search size={14} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--steel)", pointerEvents: "none" }} />
+        <input
+          className="input"
+          style={{ paddingLeft: 30 }}
+          placeholder="Cari nama pelanggan…"
+          value={query}
+          onFocus={() => setOpen(true)}
+          onChange={(e) => handleInputChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          // A customer must be genuinely picked from the dropdown —
+          // typed text alone never counts as a real selection, see
+          // handleInputChange's own comment. The actual required
+          // check happens in AddVehicleModal's handleSubmit(), not
+          // here (a hidden input can't enforce `required` — see the
+          // comment on that field just below).
+        />
+        {/* Purely a semantic conduit for the actual committed
+            selection — NOT a validation mechanism. Caught before
+            shipping: the HTML spec explicitly ignores `required` on
+            type="hidden" inputs, so a required attribute here would
+            have silently done nothing. The real check lives in
+            handleSubmit() below instead. */}
+        <input type="hidden" value={value} onChange={() => {}} />
+      </div>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 20,
+          background: "var(--paper)", border: "1px solid var(--line)", borderRadius: 6,
+          maxHeight: 220, overflowY: "auto", boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+        }}>
+          {results.length === 0 ? (
+            <div style={{ padding: "10px 12px", fontSize: 13, color: "var(--steel)" }}>Tidak ada pelanggan yang cocok.</div>
+          ) : (
+            results.map((c, i) => (
+              <div
+                key={c.id}
+                onMouseDown={(e) => { e.preventDefault(); selectCustomer(c); }}
+                onMouseEnter={() => setHighlighted(i)}
+                style={{
+                  padding: "9px 12px", fontSize: 13.5, cursor: "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  background: i === highlighted ? "var(--paper-3)" : "transparent",
+                }}
+              >
+                {c.name}
+                {c.id === value && <Check size={13} style={{ color: "var(--rust)" }} />}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function AddVehicleModal({ customers, onClose, onCreated }: {
   customers: Customer[]; onClose: () => void; onCreated: (v: Vehicle) => void;
@@ -26,6 +163,14 @@ function AddVehicleModal({ customers, onClose, onCreated }: {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // The real required-field check for customer — the old <select
+    // required> enforced this natively; a hidden input can't (see
+    // CustomerCombobox's own comment on why), so it has to happen
+    // here instead, explicitly.
+    if (!form.customer) {
+      setError("Pilih pelanggan terlebih dahulu.");
+      return;
+    }
     setSaving(true); setError(null);
     try {
       // Strip empty-string optional fields rather than sending them —
@@ -59,10 +204,7 @@ function AddVehicleModal({ customers, onClose, onCreated }: {
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: 14 }}>
             <label className="label">Pelanggan</label>
-            <select className="input" required value={form.customer} onChange={(e) => setForm({ ...form, customer: e.target.value })}>
-              <option value="">— Pilih Pelanggan —</option>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
+            <CustomerCombobox customers={customers} value={form.customer} onChange={(id) => setForm({ ...form, customer: id })} />
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
             <div>
