@@ -17,6 +17,33 @@ STATUS_LABEL = {
 }
 
 
+def _three_state_status(entity):
+    """
+    Selesai / Sedang Berjalan / Menunggu — the same three-state rule
+    already used for WorkOrderStage, now shared with job lines too
+    (Made's own confirmed note, 4 Aug: per-step start/end timing, not
+    just a done/not-done flag). Works identically for either a Stage
+    or a JobLine instance — both carry the same started_at/
+    completed_at shape. One place computes this so a future change to
+    the 3-state rule only has to happen once, not separately for
+    stages and job lines.
+    """
+    if entity.completed_at:
+        return "Selesai"
+    if entity.started_at:
+        return "Sedang Berjalan"
+    return "Menunggu"
+
+
+def _serialize_job_line(line):
+    return {
+        "description": line.description,
+        "status": _three_state_status(line),
+        "started_at": line.started_at,
+        "completed_at": line.completed_at,
+    }
+
+
 def build_work_order_tracking_payload(work_order):
     """
     Returns a plain dict, deliberately whitelist-only — never derived
@@ -25,6 +52,15 @@ def build_work_order_tracking_payload(work_order):
     customer-facing screen just by existing. Caller is responsible
     for passing the result through PublicTrackingSerializer (or
     equivalent) before returning it in a Response.
+
+    Chris's own explicit scope call, 4 Aug: job-line-level detail is
+    now included, nested under each stage — a real, deliberate
+    widening of Fase 2 v1's original "stage-level only, no job-line
+    detail" scope (see git history / the roadmap for that earlier
+    decision). Made's own confirmed note ("jam mulai – jam selesai")
+    only settled the SCHEMA question; showing this to the customer at
+    all was Chris's own separate call, made explicitly, not inferred
+    from the note.
     """
     vehicle = work_order.vehicle
 
@@ -53,12 +89,31 @@ def build_work_order_tracking_payload(work_order):
             "status": invoice.get_status_display(),
         }
 
+    stages_payload = []
+    for stage in work_order.stages.order_by("sequence").all():
+        stages_payload.append({
+            "name": stage.name,
+            "status": _three_state_status(stage),
+            "started_at": stage.started_at,
+            "completed_at": stage.completed_at,
+            "job_lines": [_serialize_job_line(line) for line in stage.job_lines.all()],
+        })
+
+    # Mirrors the internal page's own "Pekerjaan Lain (Tanpa Tahap)"
+    # section — routine work that was never grouped under a stage
+    # (a standalone oil change, not part of a multi-step overhaul)
+    # still gets its own real timing, shown the same honest way.
+    unstaged_job_lines = [
+        _serialize_job_line(line) for line in work_order.job_lines.filter(stage__isnull=True)
+    ]
+
     return {
         "work_order_number": work_order.number,
         "status": STATUS_LABEL.get(work_order.status, work_order.status),
         "vehicle_plate": vehicle.plate_number,
         "vehicle_model": vehicle.model,
         "mechanic_name": work_order.assigned_to.name if work_order.assigned_to_id else None,
-        "stages": list(work_order.stages.order_by("sequence").all()),
+        "stages": stages_payload,
+        "unstaged_job_lines": unstaged_job_lines,
         "invoice": invoice_payload,
     }

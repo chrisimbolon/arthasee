@@ -15,24 +15,40 @@ class TrackingLinkSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "token", "last_viewed_at", "view_count", "created_at"]
 
 
-class PublicStageSerializer(serializers.Serializer):
+class PublicJobLineSerializer(serializers.Serializer):
     """
-    Chris's own explicit Fase 2 v1 scope: stage name + completion
-    status + timestamps only — no job-line-level detail (that's
-    Sansan's mockup's granularity, not what Made's signed note asked
-    for), no photos.
+    Made's own confirmed handwritten note, 4 Aug: "Pekerjaan
+    bertahap: jam mulai – jam selesai" — multi-step work needs real
+    per-step start/end timing. Chris's own explicit scope call, same
+    day: this now goes on the CUSTOMER-facing timeline too, not just
+    internal — a badly-damaged car's owner genuinely wants to see
+    "bongkar done, parts on order now," not just an overall stage
+    status. This is a deliberate widening of Fase 2 v1's original
+    "stage-level only" scope (see PublicStageSerializer's own older
+    comment) — a real, separate decision from Made's note itself, not
+    inferred from it.
     """
-    name         = serializers.CharField()
-    status       = serializers.SerializerMethodField()
+    description  = serializers.CharField()
+    status       = serializers.CharField()
     started_at   = serializers.DateTimeField(allow_null=True)
     completed_at = serializers.DateTimeField(allow_null=True)
 
-    def get_status(self, stage):
-        if stage.completed_at:
-            return "Selesai"
-        if stage.started_at:
-            return "Sedang Berjalan"
-        return "Menunggu"
+
+class PublicStageSerializer(serializers.Serializer):
+    """
+    Stage name + completion status + timestamps, now with each
+    stage's own real job lines nested underneath (see
+    PublicJobLineSerializer's own docstring for why that scope
+    changed, 4 Aug). status is a plain field, not a
+    SerializerMethodField — payload.py computes it once, the same way
+    for stages and job lines both, rather than duplicating that
+    three-state logic in two places.
+    """
+    name         = serializers.CharField()
+    status       = serializers.CharField()
+    started_at   = serializers.DateTimeField(allow_null=True)
+    completed_at = serializers.DateTimeField(allow_null=True)
+    job_lines    = PublicJobLineSerializer(many=True)
 
 
 class PublicInvoiceSerializer(serializers.Serializer):
@@ -66,6 +82,11 @@ class PublicTrackingSerializer(serializers.Serializer):
     vehicle_model      = serializers.CharField()
     mechanic_name      = serializers.CharField(allow_null=True)
     stages             = PublicStageSerializer(many=True)
+    # Mirrors the internal page's own "Pekerjaan Lain (Tanpa Tahap)"
+    # section — routine, unstaged work (an oil change on its own, not
+    # part of a multi-step overhaul) still has real timing now too,
+    # shown the same honest way as everything staged.
+    unstaged_job_lines = PublicJobLineSerializer(many=True)
     invoice            = PublicInvoiceSerializer(allow_null=True)
 
 
