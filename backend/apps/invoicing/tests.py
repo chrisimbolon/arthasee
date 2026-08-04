@@ -8,6 +8,7 @@ from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -57,7 +58,7 @@ class InvoicingAPITestBase(APITestCase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])
@@ -179,7 +180,7 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])
@@ -228,7 +229,7 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
         other_work_order.status = "IN_PROGRESS"
         other_work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=other_org, work_order=other_work_order, description="(qc placeholder)", is_done=True,
+            organization=other_org, work_order=other_work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         other_work_order.status = "QC"
         other_work_order.save(update_fields=["status"])
@@ -387,7 +388,7 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])
@@ -430,7 +431,7 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])

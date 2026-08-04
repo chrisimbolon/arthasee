@@ -8,6 +8,7 @@ from apps.authentication.models import CustomUser
 from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -401,7 +402,7 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])
@@ -467,7 +468,7 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])

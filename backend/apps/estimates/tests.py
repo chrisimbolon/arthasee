@@ -9,6 +9,7 @@ from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
 from apps.workorders.models import (WorkOrder, WorkOrderJobLine,
                                     WorkOrderMaterialLine)
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase, APITransactionTestCase
 
@@ -116,7 +117,7 @@ class EstimateVehicleLockGuardTests(EstimateAPITestBase):
         done_wo.status = "IN_PROGRESS"
         done_wo.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=done_wo, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=done_wo, description="(qc placeholder)", completed_at=timezone.now(),
         )
         done_wo.status = "QC"
         done_wo.save(update_fields=["status"])
@@ -155,7 +156,7 @@ class EstimateVehicleLockGuardTests(EstimateAPITestBase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])

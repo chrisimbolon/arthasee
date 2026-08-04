@@ -8,6 +8,7 @@ from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -320,7 +321,7 @@ class PartUsageFrozenAfterInvoiceTests(InventoryAPITestBase):
         work_order.status = "IN_PROGRESS"
         work_order.save(update_fields=["status"])
         WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", is_done=True,
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
         work_order.status = "QC"
         work_order.save(update_fields=["status"])
