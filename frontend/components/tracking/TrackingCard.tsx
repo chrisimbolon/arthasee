@@ -11,7 +11,7 @@
 // (fetchPublicTracking) or an authenticated session
 // (customerWorkOrdersApi.get) — both hit the exact same backend
 // payload shape (backend/apps/customers/payload.py's shared builder).
-import { PublicStage, PublicTracking } from "@/lib/api/tracking";
+import { PublicJobLine, PublicStage, PublicTracking } from "@/lib/api/tracking";
 import { Check, Wrench } from "lucide-react";
 
 function money(v: string | number) {
@@ -22,14 +22,43 @@ function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
 }
 
+// Made's own confirmed handwritten note, 4 Aug: "Pekerjaan bertahap:
+// jam mulai – jam selesai" — real per-step timing. Chris's own
+// separate, explicit call the same day: this now shows on the
+// customer-facing timeline too — a badly-damaged car's owner
+// genuinely wants to see "bongkar done, parts on order now," not
+// just an overall stage status. A real, deliberate widening of Fase
+// 2 v1's original stage-level-only scope, not inferred from Made's
+// note by itself. Kept visually small/nested (a dot, not a full
+// numbered circle) — the stage above it still carries the primary
+// visual weight, this is supporting detail underneath.
+function JobLineItem({ line }: { line: PublicJobLine }) {
+  const isDone = line.status === "Selesai";
+  const isInProgress = line.status === "Sedang Berjalan";
+  const dotColor = isDone ? "#2e7d4f" : isInProgress ? "var(--rust)" : "var(--line)";
+  const time = line.completed_at ? formatTime(line.completed_at) : line.started_at ? formatTime(line.started_at) : null;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: dotColor, flexShrink: 0 }} />
+      <span style={{ flex: 1, fontSize: 12.5, color: isDone ? "var(--steel)" : "var(--text-primary, inherit)", textDecoration: isDone ? "line-through" : "none" }}>
+        {line.description}
+      </span>
+      {isInProgress && (
+        <span style={{ fontSize: 10, fontWeight: 600, color: "var(--rust)", whiteSpace: "nowrap" }}>Sedang berjalan</span>
+      )}
+      {time && <span className="mono" style={{ fontSize: 11, color: "var(--steel)" }}>{time}</span>}
+    </div>
+  );
+}
+
 // Chris's own ask, 3 Aug — "Option A": match the visual language of
 // Sansan's original mockup (numbered circles, connecting line, soft
-// status pills) using ONLY the real stage data this endpoint already
-// returns — no per-job-line breakdown, no fabricated timestamps.
-// Made's own signed Fase 2 note is still the real scope here; this is
-// a restyle of what's true, not a step toward the mockup's actual
-// granularity (that's a separate, still-open question for Made — see
-// item 23 in the roadmap).
+// status pills) using real stage data. Extended 4 Aug to also nest
+// each stage's own real job lines underneath (see JobLineItem's own
+// comment for the scope reasoning) — the numbered circle still
+// represents the STAGE, job lines are supporting detail, not
+// separately numbered.
 function StageStep({ stage, index, total }: { stage: PublicStage; index: number; total: number }) {
   const isDone = stage.status === "Selesai";
   const isInProgress = stage.status === "Sedang Berjalan";
@@ -66,6 +95,11 @@ function StageStep({ stage, index, total }: { stage: PublicStage; index: number;
           </span>
         </div>
         {time && <div className="mono" style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 3 }}>{time}</div>}
+        {stage.job_lines.length > 0 && (
+          <div style={{ marginTop: 8, paddingLeft: 10, borderLeft: "2px solid var(--line)" }}>
+            {stage.job_lines.map((line, i) => <JobLineItem key={i} line={line} />)}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -97,6 +131,17 @@ export default function TrackingCard({ tracking }: { tracking: PublicTracking })
           </div>
         )}
       </div>
+
+      {/* Mirrors the internal page's own "Pekerjaan Lain (Tanpa
+          Tahap)" section — routine work never grouped under a stage
+          still has real timing now, shown the same honest way. Only
+          rendered when there's genuinely something to show. */}
+      {tracking.unstaged_job_lines.length > 0 && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Pekerjaan Lain</div>
+          {tracking.unstaged_job_lines.map((line, i) => <JobLineItem key={i} line={line} />)}
+        </div>
+      )}
 
       {/* Only ever rendered once the backend actually includes it —
           WorkOrder.status === "DONE" and a real Invoice exists. See
