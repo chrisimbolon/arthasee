@@ -13,7 +13,17 @@ export interface WorkOrderJobLine {
   // repairs never use stages at all). See WorkOrderStage below.
   stage:       string | null;
   description: string;
-  is_done:     boolean;
+  // Made's own confirmed handwritten note, 4 Aug: "Pekerjaan
+  // bertahap: jam mulai – jam selesai" — real per-step timing now,
+  // mirroring WorkOrderStage's own exact shape. is_done is a
+  // read-only derived value on the backend (Option B, Chris's own
+  // call: completed_at is the only real stored fact, never a
+  // separately-writable field that could drift out of sync) — still
+  // useful here for simple boolean reads, just never write to it
+  // directly; use the toggle endpoint instead.
+  is_done:      boolean;
+  started_at:   string | null;
+  completed_at: string | null;
   // Computed on the backend (WorkOrderJobLine.is_locked in
   // models.py) — true once the whole WorkOrder is DONE/CANCELLED, or
   // once this line's own stage is completed even while the WorkOrder
