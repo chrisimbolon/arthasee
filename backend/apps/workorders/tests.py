@@ -77,8 +77,22 @@ class WorkOrderAPITestBase(APITestCase):
         off" gate doesn't block this purely-setup transition — these
         tests aren't testing that gate either, just need a real,
         valid path to a closeable state.
+
+        Also assigns a real mechanic, 4 Aug — Made's own explicit
+        rule that same meeting: "Harus dicegat penerbitan WO selesai
+        tanpa mekanik!" (no orphan completions). close() now rejects
+        assigned_to=None too. Only assigns one if the caller hasn't
+        already set one deliberately — a test specifically covering
+        the no-mechanic rejection itself creates its own WorkOrder
+        with assigned_to left unset and calls close() directly,
+        bypassing this helper entirely (see
+        WorkOrderNoMechanicHardBlockTests).
         """
         self._started(wo)
+        if wo.assigned_to is None:
+            mechanic = Mechanic.objects.create(organization=wo.organization, name="Yoga (test setup)")
+            wo.assigned_to = mechanic
+            wo.save(update_fields=["assigned_to"])
         WorkOrderJobLine.objects.create(
             organization=wo.organization, work_order=wo, description="(qc placeholder)", completed_at=timezone.now(),
         )
@@ -602,6 +616,70 @@ class WorkOrderCloseTests(WorkOrderAPITestBase):
         empty_wo.cancel()
         with self.assertRaises(ValueError):
             empty_wo.close(closed_by=self.owner)
+
+    def test_cannot_close_a_work_order_with_no_mechanic_assigned(self):
+        """
+        The actual regression test for Made's own explicit rule, 4
+        Aug meeting: "Harus dicegat penerbitan WO selesai tanpa
+        mekanik!" (no orphan completions). Caught live: a real
+        WorkOrder had already reached "Selesai" with no assigned
+        mechanic, and the existing block (item 22, 31 Jul) only ever
+        fired later, downstream, at the "Buat Invoice" step — this is
+        the real fix, catching it at the source. A fresh WorkOrder
+        here, deliberately not self.wo (which setUp already gives a
+        real mechanic to via _ready_to_close's own new behavior).
+        """
+        no_mechanic_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        no_mechanic_wo.status = "IN_PROGRESS"
+        no_mechanic_wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=no_mechanic_wo, description="Ganti oli", completed_at=timezone.now(),
+        )
+        no_mechanic_wo.status = "QC"
+        no_mechanic_wo.save(update_fields=["status"])
+        self.assertIsNone(no_mechanic_wo.assigned_to)
+
+        with self.assertRaises(ValueError):
+            no_mechanic_wo.close(closed_by=self.owner)
+        no_mechanic_wo.refresh_from_db()
+        self.assertIsNone(no_mechanic_wo.service_record)
+        self.assertEqual(no_mechanic_wo.status, "QC")
+
+    def test_can_close_once_a_mechanic_is_assigned(self):
+        no_mechanic_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        no_mechanic_wo.status = "IN_PROGRESS"
+        no_mechanic_wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=no_mechanic_wo, description="Ganti oli", completed_at=timezone.now(),
+        )
+        no_mechanic_wo.status = "QC"
+        no_mechanic_wo.assigned_to = Mechanic.objects.create(organization=self.org, name="Yoga")
+        no_mechanic_wo.save(update_fields=["status", "assigned_to"])
+
+        record = no_mechanic_wo.close(closed_by=self.owner)
+        self.assertIsNotNone(record)
+        no_mechanic_wo.refresh_from_db()
+        self.assertEqual(no_mechanic_wo.status, "DONE")
+
+    def test_no_mechanic_hard_block_via_api(self):
+        """
+        The real, end-to-end proof — not just that the model method
+        raises, but that the actual /close/ endpoint a real click hits
+        surfaces it correctly as a 409, same as every other close()
+        precondition already proven this way.
+        """
+        no_mechanic_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        no_mechanic_wo.status = "IN_PROGRESS"
+        no_mechanic_wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=no_mechanic_wo, description="Ganti oli", completed_at=timezone.now(),
+        )
+        no_mechanic_wo.status = "QC"
+        no_mechanic_wo.save(update_fields=["status"])
+
+        resp = self.client.post(f"/api/work-orders/{no_mechanic_wo.id}/close/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("mekanik", resp.data["message"].lower())
 
     def test_service_record_created_by_close_can_still_be_invoiced_normally(self):
         """
