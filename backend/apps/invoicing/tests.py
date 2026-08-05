@@ -8,6 +8,7 @@ from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -370,6 +371,77 @@ class InvoicePdfTests(InvoicingAPITestBase):
         self.client.force_authenticate(user=other_owner)
         resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class TerbilangRupiahTests(SimpleTestCase):
+    """
+    Made's own handwritten meeting note, 4 Aug: "WO & Invoice:
+    terbilang, diterima oleh." Chris's own confirmed scope, 5 Aug:
+    Invoice only. Direct, real unit tests against the pure function —
+    InvoicePdfTests above can't verify individual rendered text (no
+    PDF-parsing library available), so this is the actual, precise
+    coverage for the algorithm itself: a wrong spelled-out amount on
+    a financial document is a real trust problem, not a cosmetic bug.
+    SimpleTestCase, not APITestCase — no database touched at all.
+    """
+
+    def test_zero(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(0), "Nol Rupiah")
+
+    def test_single_digit(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(1), "Satu Rupiah")
+
+    def test_teens_use_belas_not_puluh(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(11), "Sebelas Rupiah")
+        self.assertEqual(terbilang_rupiah(15), "Lima Belas Rupiah")
+
+    def test_tens_with_a_remainder(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(21), "Dua Puluh Satu Rupiah")
+
+    def test_exactly_one_hundred_uses_seratus_not_satu_ratus(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(100), "Seratus Rupiah")
+
+    def test_exactly_one_thousand_uses_seribu_not_satu_ribu(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(1000), "Seribu Rupiah")
+
+    def test_two_thousand_does_not_say_seribu_ribu(self):
+        """The real reason seribu is a special case bounded at 2000,
+        not just "n < 1000" — without it, 2000 would recurse into
+        terbilang_words(2) + " ribu" on top of the 1000-1999 branch
+        producing nonsense like "seribu ribu" for anything doubled."""
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(2000), "Dua Ribu Rupiah")
+
+    def test_no_trailing_nol_when_a_remainder_is_genuinely_zero(self):
+        """The actual bug the recursive algorithm has to avoid — a
+        naive implementation emits a trailing 'nol' whenever a
+        remainder is exactly zero (e.g. "tujuh ratus empat puluh ribu
+        nol" for 740.000), which is wrong and would look broken on a
+        real invoice."""
+        from .pdf import terbilang_rupiah
+        result = terbilang_rupiah(740000)
+        self.assertEqual(result, "Tujuh Ratus Empat Puluh Ribu Rupiah")
+        self.assertNotIn("Nol", result)
+
+    def test_real_value_from_this_apps_own_example(self):
+        """The exact total shown on a real invoice screenshot during
+        this feature's own planning — Rp 740.000."""
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(740000), "Tujuh Ratus Empat Puluh Ribu Rupiah")
+
+    def test_millions(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(1500000), "Satu Juta Lima Ratus Ribu Rupiah")
+
+    def test_accepts_a_decimal_same_as_every_other_money_field_in_this_app(self):
+        from .pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(Decimal("240000.00")), "Dua Ratus Empat Puluh Ribu Rupiah")
 
 
 class InvoiceMechanicRequirementTests(InvoicingAPITestBase):

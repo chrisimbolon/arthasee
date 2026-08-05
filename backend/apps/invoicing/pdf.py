@@ -24,6 +24,12 @@ reasoning already established when apps.estimates.pdf was built
 separately from apps.contracts.exports: these are small, self-
 contained utilities, and creating a cross-app import for something
 this small isn't worth the coupling.
+
+Terbilang + signature block added 5 Aug — Made's own handwritten
+meeting note, confirmed with Chris to apply to Invoice ONLY (not the
+Job Ticket, which deliberately shows zero prices anywhere): a spelled
+-out Indonesian amount, and a "Diterima oleh" sign-off line for a
+real, physical customer signature.
 """
 from decimal import Decimal
 from io import BytesIO
@@ -41,6 +47,83 @@ STATUS_LABEL = {
 STATUS_COLOR = {
     "DRAFT": "#6b6b6b", "ISSUED": "#b5502f", "PAID": "#2e7d4f", "CANCELLED": "#c0392b",
 }
+
+# Chris's own reasoning, 5 Aug: a real recursive number-to-words
+# converter, not a lookup table — an Indonesian invoice total can
+# genuinely be anything, and a partial/approximate implementation
+# would be worse than not having terbilang at all (a wrong spelled-
+# out amount on a financial document is a real trust problem, not a
+# cosmetic bug). Verified against real values, including this exact
+# app's own Rp 740.000 example: "Tujuh Ratus Empat Puluh Ribu
+# Rupiah" — matches standard Indonesian terbilang convention exactly
+# (seribu not satu ribu, seratus not satu ratus, no trailing "nol"
+# when a remainder is genuinely zero).
+_ONES = ["", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan",
+         "sepuluh", "sebelas"]
+
+
+def _terbilang_words(n):
+    if n < 12:
+        return _ONES[n]
+    if n < 20:
+        return _terbilang_words(n - 10) + " belas"
+    if n < 100:
+        tens, rest = divmod(n, 10)
+        result = _terbilang_words(tens) + " puluh"
+        if rest:
+            result += " " + _terbilang_words(rest)
+        return result
+    if n < 200:
+        rest = n - 100
+        return "seratus" + (" " + _terbilang_words(rest) if rest else "")
+    if n < 1000:
+        hundreds, rest = divmod(n, 100)
+        result = _terbilang_words(hundreds) + " ratus"
+        if rest:
+            result += " " + _terbilang_words(rest)
+        return result
+    if n < 2000:
+        rest = n - 1000
+        return "seribu" + (" " + _terbilang_words(rest) if rest else "")
+    if n < 1_000_000:
+        thousands, rest = divmod(n, 1000)
+        result = _terbilang_words(thousands) + " ribu"
+        if rest:
+            result += " " + _terbilang_words(rest)
+        return result
+    if n < 1_000_000_000:
+        millions, rest = divmod(n, 1_000_000)
+        result = _terbilang_words(millions) + " juta"
+        if rest:
+            result += " " + _terbilang_words(rest)
+        return result
+    if n < 1_000_000_000_000:
+        billions, rest = divmod(n, 1_000_000_000)
+        result = _terbilang_words(billions) + " miliar"
+        if rest:
+            result += " " + _terbilang_words(rest)
+        return result
+    trillions, rest = divmod(n, 1_000_000_000_000)
+    result = _terbilang_words(trillions) + " triliun"
+    if rest:
+        result += " " + _terbilang_words(rest)
+    return result
+
+
+def terbilang_rupiah(value):
+    """
+    Public entry point. Whole rupiah only — every amount in this app
+    is already a whole number (see _format_rupiah's own int()
+    conversion below), so no fractional/sen handling is needed.
+    Capitalized per-word, matching the formal style used on real
+    Indonesian financial documents ("Lima Ratus Empat Puluh Ribu
+    Rupiah"), not lowercase running prose.
+    """
+    n = int(Decimal(value).to_integral_value())
+    if n == 0:
+        return "Nol Rupiah"
+    words = " ".join(w.capitalize() for w in _terbilang_words(n).split())
+    return f"{words} Rupiah"
 
 
 def _format_date_id(dt):
@@ -96,6 +179,12 @@ def build_invoice_pdf(invoice, org_name):
         <tr><td class="num">Deposit</td><td class="num">− {_format_rupiah(invoice.deposit_amount)}</td></tr>"""
 
     total_label = "Sisa Tagihan" if invoice.deposit_amount > 0 else "Total"
+    # Terbilang describes the SAME figure total_label/the grand-total
+    # row actually shows — balance_due, not the pre-deposit subtotal.
+    # Spelling out a different number than what's printed as the
+    # bottom-line total would be a real, confusing inconsistency on a
+    # financial document, not a cosmetic mismatch.
+    terbilang_text = terbilang_rupiah(invoice.balance_due)
 
     created_by_block = ""
     if invoice.created_by_id and invoice.created_by.full_name:
@@ -130,7 +219,12 @@ def build_invoice_pdf(invoice, org_name):
         .total-value {{ font-weight: bold; }}
         .grand-total-table {{ width: 100%; margin-top: 12px; border-top: 1px solid #17181a; padding-top: 10px; }}
         .grand-total-table td {{ font-size: 13pt; font-weight: bold; }}
-        .created-by {{ font-size: 8.5pt; color: #6b6b6b; text-align: right; margin-top: 26px; }}
+        .terbilang {{ font-size: 9pt; font-style: italic; color: #52514e; margin-top: 6px; }}
+        .signoff-table {{ width: 100%; margin-top: 44px; }}
+        .signature-space {{ height: 50px; }}
+        .signature-line {{ border-top: 1px solid #17181a; width: 200px; padding-top: 4px; }}
+        .signature-label {{ font-size: 9pt; color: #52514e; }}
+        .created-by {{ font-size: 8.5pt; color: #6b6b6b; text-align: right; margin-top: 10px; }}
     </style>
     </head>
     <body>
@@ -181,6 +275,17 @@ def build_invoice_pdf(invoice, org_name):
 
         <table class="grand-total-table">
             <tr><td>{total_label}</td><td class="num">{_format_rupiah(invoice.balance_due)}</td></tr>
+        </table>
+        <div class="terbilang">Terbilang: {terbilang_text}</div>
+
+        <table class="signoff-table">
+            <tr>
+                <td style="width: 50%;">
+                    <div class="signature-space"></div>
+                    <div class="signature-line">Diterima oleh</div>
+                </td>
+                <td style="width: 50%;"></td>
+            </tr>
         </table>
 
         {created_by_block}
