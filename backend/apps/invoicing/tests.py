@@ -384,15 +384,30 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
     """
 
     def _work_order_without_mechanic(self):
+        """
+        Made's own "no orphan completions" rule, 4 Aug, means
+        WorkOrder.close() itself now ALSO rejects assigned_to=None —
+        the normal path (WorkOrder -> close() -> ServiceRecord) can
+        no longer produce a mechanic-less ServiceRecord at all, which
+        is exactly the point (see the new, dedicated coverage for
+        that rule in apps.workorders.tests.WorkOrderNoMechanicHardBlockTests).
+
+        This helper now constructs the scenario directly via the ORM
+        instead, bypassing close() entirely — still a real, defensible
+        case (a ServiceRecord linked to a WorkOrder some other way,
+        never through close() itself) and still the right place to
+        prove Invoice.save()'s OWN, independent check actually holds,
+        not merely that WorkOrder.close() happens to catch it first.
+        """
         work_order = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
-        work_order.status = "IN_PROGRESS"
-        work_order.save(update_fields=["status"])
-        WorkOrderJobLine.objects.create(
-            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-31", odometer_km=5000,
+            issue_description="Dibuat langsung, tanpa mekanik",
         )
-        work_order.status = "QC"
-        work_order.save(update_fields=["status"])
-        return work_order.close(closed_by=self.owner)
+        work_order.service_record = record
+        work_order.save(update_fields=["service_record"])
+        return record
 
     def test_cannot_create_invoice_when_work_order_has_no_mechanic(self):
         record = self._work_order_without_mechanic()

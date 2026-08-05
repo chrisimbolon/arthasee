@@ -563,9 +563,14 @@ class CustomerWorkOrdersListViewTests(CustomersAPITestBase):
     def _ready_to_close(self, wo):
         # Same shape as apps.workorders.tests' own helper — this file
         # has no shared base with that one, so reimplemented locally
-        # rather than importing across apps' test modules.
+        # rather than importing across apps' test modules. Also
+        # assigns a mechanic if the caller hasn't set one, 4 Aug —
+        # Made's own "no orphan completions" rule, mirrored here the
+        # same way.
         wo.status = "IN_PROGRESS"
-        wo.save(update_fields=["status"])
+        if wo.assigned_to is None:
+            wo.assigned_to = Mechanic.objects.create(organization=self.org, name="Yoga (test setup)")
+        wo.save(update_fields=["status", "assigned_to"])
         WorkOrderJobLine.objects.create(
             organization=self.org, work_order=wo, description="(qc placeholder)", completed_at=timezone.now(),
         )

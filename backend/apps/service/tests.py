@@ -398,9 +398,12 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         # witnessed it directly at Arya Motor: EVERY job goes through
         # QC before being marked done. WorkOrder.close() now
         # correctly rejects closing directly from OPEN or IN_PROGRESS
-        # — a real precondition, not test boilerplate.
+        # — a real precondition, not test boilerplate. Also needs a
+        # real mechanic, 4 Aug — close() now rejects assigned_to=None
+        # too (Made's own "no orphan completions" rule).
         work_order.status = "IN_PROGRESS"
-        work_order.save(update_fields=["status"])
+        work_order.assigned_to = Mechanic.objects.create(organization=self.org, name="Yoga")
+        work_order.save(update_fields=["status", "assigned_to"])
         WorkOrderJobLine.objects.create(
             organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )

@@ -7,7 +7,7 @@ from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
-from apps.workorders.models import (WorkOrder, WorkOrderJobLine,
+from apps.workorders.models import (Mechanic, WorkOrder, WorkOrderJobLine,
                                     WorkOrderMaterialLine)
 from django.utils import timezone
 from rest_framework import status
@@ -113,9 +113,13 @@ class EstimateVehicleLockGuardTests(EstimateAPITestBase):
         # spark plug replacement. WorkOrder.close() now correctly
         # rejects closing directly from OPEN or IN_PROGRESS (see
         # apps.workorders.models.WorkOrder.close()) — a real
-        # precondition, not test boilerplate to skip.
+        # precondition, not test boilerplate to skip. Also needs a
+        # real mechanic, 4 Aug — Made's own explicit rule that
+        # meeting: "Harus dicegat penerbitan WO selesai tanpa
+        # mekanik!" — close() now rejects assigned_to=None too.
         done_wo.status = "IN_PROGRESS"
-        done_wo.save(update_fields=["status"])
+        done_wo.assigned_to = Mechanic.objects.create(organization=self.org, name="Yoga")
+        done_wo.save(update_fields=["status", "assigned_to"])
         WorkOrderJobLine.objects.create(
             organization=self.org, work_order=done_wo, description="(qc placeholder)", completed_at=timezone.now(),
         )
@@ -154,7 +158,8 @@ class EstimateVehicleLockGuardTests(EstimateAPITestBase):
         estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
         work_order = estimate.approve(approved_by=self.owner)
         work_order.status = "IN_PROGRESS"
-        work_order.save(update_fields=["status"])
+        work_order.assigned_to = Mechanic.objects.create(organization=self.org, name="Yoga")
+        work_order.save(update_fields=["status", "assigned_to"])
         WorkOrderJobLine.objects.create(
             organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
         )
