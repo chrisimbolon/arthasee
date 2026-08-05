@@ -75,6 +75,22 @@ function IntakeCard({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Me
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState<string | null>(null);
 
+  // Chris's own catch, 5 Aug — caught live in production: form only
+  // ever initializes from `wo` ONCE, on mount, and never re-syncs.
+  // Picking a mechanic in the dropdown below updates this LOCAL
+  // state immediately (so the select visually shows the pick), but
+  // wo.assigned_to itself — the field WorkOrder.close()'s own hard
+  // block actually checks — stays whatever it was until "Simpan" is
+  // genuinely clicked. A selected-but-unsaved mechanic and a real,
+  // persisted one are visually IDENTICAL in the dropdown otherwise —
+  // this is what makes that distinction actually visible.
+  const hasUnsavedMechanicChange = form.assigned_to !== (wo.assigned_to ?? "");
+  const hasAnyUnsavedChange =
+    hasUnsavedMechanicChange ||
+    form.odometer_km_intake !== (wo.odometer_km_intake?.toString() ?? "") ||
+    form.received_by !== wo.received_by ||
+    form.notes !== wo.notes;
+
   const handleSave = async () => {
     setSaving(true); setError(null);
     try {
@@ -126,7 +142,11 @@ function IntakeCard({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Me
       </div>
       <div style={{ marginBottom: 12 }}>
         <label className="label">Mekanik Penanggung Jawab</label>
-        <select className="input" value={form.assigned_to} onChange={(e) => setForm({ ...form, assigned_to: e.target.value })}>
+        <select
+          className="input" value={form.assigned_to}
+          onChange={(e) => setForm({ ...form, assigned_to: e.target.value })}
+          style={hasUnsavedMechanicChange ? { borderColor: "var(--rust)" } : undefined}
+        >
           <option value="">— Belum ditentukan —</option>
           {mechanics.map((m) => (
             <option key={m.id} value={m.id} disabled={!m.is_active && m.id !== wo.assigned_to}>
@@ -134,13 +154,26 @@ function IntakeCard({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Me
             </option>
           ))}
         </select>
+        {/* The actual fix, 5 Aug: without this, a picked-but-unsaved
+            mechanic and a genuinely saved one look identical in the
+            dropdown — the only real difference is whether
+            "Selesaikan Work Order" is enabled later, which is a
+            confusing way to discover a forgotten click. */}
+        {hasUnsavedMechanicChange && (
+          <p style={{ fontSize: 11.5, color: "var(--rust)", marginTop: 4 }}>
+            Klik &quot;Simpan&quot; agar mekanik ini tersimpan — belum bisa menyelesaikan work order sebelum disimpan.
+          </p>
+        )}
       </div>
       <div style={{ marginBottom: 14 }}>
         <label className="label">Catatan</label>
         <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
       </div>
-      <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleSave} disabled={saving}>
-        {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
+      <button
+        className={hasAnyUnsavedChange ? "btn-rust" : "btn-ghost"}
+        style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={handleSave} disabled={saving}
+      >
+        {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : hasAnyUnsavedChange ? "Simpan Perubahan" : "Simpan"}
       </button>
     </div>
   );
@@ -1124,7 +1157,7 @@ function WorkOrderDetailContent() {
                   layer, same discipline as every other gate here. */}
               <button
                 className="btn-rust" disabled={busy || !wo.assigned_to} onClick={handleClose}
-                title={!wo.assigned_to ? "Tetapkan mekanik penanggung jawab dulu" : undefined}
+                title={!wo.assigned_to ? "Pilih mekanik penanggung jawab di atas, lalu klik Simpan" : undefined}
               >
                 Selesaikan Work Order
               </button>
