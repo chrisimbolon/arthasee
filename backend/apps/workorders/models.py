@@ -327,6 +327,21 @@ class WorkOrder(TenantScopedModel):
         # was — just one step further down the same pipeline.
         if self.status == "IN_PROGRESS":
             raise ValueError('Work order harus melalui "Ajukan Pemeriksaan" terlebih dahulu sebelum bisa diselesaikan.')
+        # Made's own explicit rule, 4 Aug meeting: "Harus dicegat
+        # penerbitan WO selesai tanpa mekanik!" — no orphan
+        # completions. Item 22 (31 Jul) already blocked this at
+        # INVOICE-creation time (Invoice.save() itself), but that
+        # only caught the problem downstream, after a mechanic-less
+        # WorkOrder had already reached DONE — confirmed live: a real
+        # WorkOrder closed with no assigned_to, and the block only
+        # ever fired later, at the "Buat Invoice" step. This is the
+        # real fix, catching it at the source. Invoice.save()'s own
+        # check stays — deliberately not redundant, since a bare
+        # ServiceRecord with no WorkOrder origin at all (see its own
+        # getattr/RelatedObjectDoesNotExist handling) can still exist
+        # completely outside this method and needs its own guard.
+        if self.assigned_to is None:
+            raise ValueError("Work order belum memiliki mekanik penanggung jawab — tidak bisa diselesaikan.")
 
         with transaction.atomic():
             job_lines = list(self.job_lines.all())
