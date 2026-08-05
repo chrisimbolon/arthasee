@@ -31,17 +31,23 @@ export default function Sidebar() {
     });
   }, []);
 
-  // Chris's own catch, 5 Aug — caught live: /settings/organization
-  // existed and built cleanly, but nothing in the app actually
-  // pointed to it anywhere, same discoverability gap already caught
-  // once before with the customer portal's own login page. Placed in
-  // the account section below, not the main NAV array above — this
-  // isn't a daily operational screen like the others, it belongs
-  // with account-level actions. Shown to every authenticated user,
-  // not just owners: the page itself already handles the non-owner
-  // case gracefully (a disabled form with a clear explanation), same
-  // as showing a locked door is more honest than hiding it entirely.
-  const settingsActive = pathname === "/settings/organization";
+  // Chris's own catches, 5 Aug — two real, separate mistakes:
+  // (1) the page originally lived at frontend/app/settings/organization,
+  // a SIBLING of app/dashboard, not nested inside it — Next.js layouts
+  // nest by folder structure, so it only ever inherited the bare root
+  // layout.tsx, never this Sidebar at all (confirmed live: a real
+  // screenshot showed the settings page with zero nav around it).
+  // Moved under app/dashboard/settings/organization to fix that.
+  // (2) even once that was fixed, nothing in the app pointed to it —
+  // same discoverability gap already caught once before with the
+  // customer portal's own login page. Placed in the account section
+  // below, not the main NAV array above — this isn't a daily
+  // operational screen like the others, it belongs with account-level
+  // actions. Shown to every authenticated user, not just owners: the
+  // page itself already handles the non-owner case gracefully (a
+  // disabled form with a clear explanation), same as showing a locked
+  // door being more honest than hiding it entirely.
+  const settingsActive = pathname === "/dashboard/settings/organization";
 
   return (
     <aside style={{ width: 240, minHeight: "100vh", background: "var(--paper-3)", borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", padding: "22px 16px" }}>
@@ -77,7 +83,7 @@ export default function Sidebar() {
       </nav>
 
       <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14, marginTop: 14 }}>
-        <Link href="/settings/organization"
+        <Link href="/dashboard/settings/organization"
           style={{
             display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 6,
             fontSize: 13.5, fontWeight: settingsActive ? 600 : 500,
