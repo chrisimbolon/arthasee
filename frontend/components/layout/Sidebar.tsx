@@ -4,7 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Package, Phone, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Package, Phone, Settings, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -30,6 +30,18 @@ export default function Sidebar() {
       if (res) setOrgName(res.organization.name);
     });
   }, []);
+
+  // Chris's own catch, 5 Aug — caught live: /settings/organization
+  // existed and built cleanly, but nothing in the app actually
+  // pointed to it anywhere, same discoverability gap already caught
+  // once before with the customer portal's own login page. Placed in
+  // the account section below, not the main NAV array above — this
+  // isn't a daily operational screen like the others, it belongs
+  // with account-level actions. Shown to every authenticated user,
+  // not just owners: the page itself already handles the non-owner
+  // case gracefully (a disabled form with a clear explanation), same
+  // as showing a locked door is more honest than hiding it entirely.
+  const settingsActive = pathname === "/settings/organization";
 
   return (
     <aside style={{ width: 240, minHeight: "100vh", background: "var(--paper-3)", borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", padding: "22px 16px" }}>
@@ -65,6 +77,16 @@ export default function Sidebar() {
       </nav>
 
       <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14, marginTop: 14 }}>
+        <Link href="/settings/organization"
+          style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 6,
+            fontSize: 13.5, fontWeight: settingsActive ? 600 : 500,
+            color: settingsActive ? "var(--rust)" : "var(--ink-soft)",
+            background: settingsActive ? "var(--rust-light)" : "transparent",
+            marginBottom: 10,
+          }}>
+          <Settings size={16} /> Pengaturan Bengkel
+        </Link>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{user?.full_name}</div>
         <div style={{ fontSize: 12, color: "var(--steel)", marginBottom: 10 }}>{user?.email}</div>
         <button onClick={logout} className="btn-ghost" style={{ width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: 7, fontSize: 13 }}>
