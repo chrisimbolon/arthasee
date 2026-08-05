@@ -53,6 +53,17 @@ function formatCompactDateTime(iso: string) {
   return `${datePart}, ${timePart}`;
 }
 
+// Chris's own catch, 5 Aug — caught live in production: individual
+// job lines had real started_at/completed_at on the backend (Option
+// B) but nothing displayed them anywhere on THIS page — only the
+// parent stage's own time showed. Time-only, no date — a job line
+// always shares its stage's day, so repeating the date on every row
+// would just be visual noise. Matches the customer-facing
+// TrackingCard's own formatTime exactly, same HH.MM shape.
+function formatTimeOnly(iso: string) {
+  return new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+
 function IntakeCard({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics: Mechanic[]; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
   const [form, setForm] = useState({
@@ -275,6 +286,18 @@ function JobLineRow({ line, editable, canToggle, onToggle, onUpdated, compact }:
         <span style={{ flex: 1, fontSize, textDecoration: line.is_done ? "line-through" : "none", color: line.is_done ? "var(--steel)" : isInProgress ? "var(--rust)" : undefined }}>
           {line.description}
         </span>
+        {/* The actual missing piece, caught live in production, 5
+            Aug: the checkbox/label already showed the right STATE
+            (Menunggu/Sedang Berjalan/Selesai), but no TIME ever
+            displayed anywhere on this page for an individual job
+            line — only the parent stage's own time showed. Made's
+            own note was explicitly "jam mulai – jam selesai," and
+            this page never actually showed either one per item. */}
+        {(line.completed_at || line.started_at) && (
+          <span className="mono" style={{ fontSize: compact ? 10.5 : 11, color: "var(--steel)", flexShrink: 0 }}>
+            {formatTimeOnly(line.completed_at ?? line.started_at!)}
+          </span>
+        )}
         {isInProgress && (
           <span style={{ fontSize: 10, fontWeight: 600, color: "var(--rust)", flexShrink: 0, whiteSpace: "nowrap" }}>
             Sedang berjalan
