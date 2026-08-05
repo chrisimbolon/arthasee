@@ -1113,7 +1113,21 @@ function WorkOrderDetailContent() {
                   // not just logging one that just finished.
                 />
               </div>
-              <button className="btn-rust" disabled={busy} onClick={handleClose}>Selesaikan Work Order</button>
+              {/* Made's own explicit rule, 4 Aug meeting: "Harus
+                  dicegat penerbitan WO selesai tanpa mekanik!" — no
+                  orphan completions. Caught live: a WO could reach
+                  "Selesai" with no assigned mechanic, and the block
+                  only ever fired later, downstream, at the "Buat
+                  Invoice" step. Real enforcement lives on the backend
+                  (WorkOrder.close() itself now rejects
+                  assigned_to=None with a 409); this is the proactive
+                  layer, same discipline as every other gate here. */}
+              <button
+                className="btn-rust" disabled={busy || !wo.assigned_to} onClick={handleClose}
+                title={!wo.assigned_to ? "Tetapkan mekanik penanggung jawab dulu" : undefined}
+              >
+                Selesaikan Work Order
+              </button>
             </>
           )}
           <button className="btn-ghost" disabled={busy} onClick={handleCancel}>Batalkan</button>
