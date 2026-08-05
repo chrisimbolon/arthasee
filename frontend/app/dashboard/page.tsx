@@ -3,8 +3,8 @@
 // === frontend/app/dashboard/page.tsx ===
 // =============================================================================
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
-import { dashboardApi, DashboardSummary } from "@/lib/api/workorders";
-import { AlertTriangle, Car, CheckCircle2, Clock, Loader2, Users, Wrench } from "lucide-react";
+import { ActiveJob, activeJobsApi, dashboardApi, DashboardSummary } from "@/lib/api/workorders";
+import { AlertTriangle, Car, CheckCircle2, Clock, Layers, Loader2, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
@@ -23,6 +23,20 @@ export default function DashboardOverviewPage() {
   const [period, setPeriod] = useState<Period>("today");
   const [loading, setLoading]     = useState(true);
   const [summaryLoading, setSummaryLoading] = useState(true);
+  // Made's own request, 4 Aug meeting: "Tahap pekerjaan berat, gimana
+  // caranya muncul di dashboard owner (responsive)" — a clean summary
+  // of active staged/heavy jobs and their current stage, checkable
+  // from his phone without opening each full WorkOrder. Deliberately
+  // NOT a new backend endpoint — GET /api/work-orders/active/ already
+  // returns current_stage_name/current_stage_mechanic for every open
+  // WorkOrder (built for the full /dashboard/active-jobs roster);
+  // this just reuses it, filtered client-side to the ones that
+  // genuinely have a stage in motion. A routine, unstaged job (no
+  // current_stage_name) isn't what "heavy" means here, so it's left
+  // out — that's what the "Antrian / Dikerjakan" count above already
+  // covers.
+  const [stagedJobs, setStagedJobs] = useState<ActiveJob[]>([]);
+  const [stagedJobsLoading, setStagedJobsLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([customersApi.list(), vehiclesApi.list(), vehiclesApi.list({ dueForService: true })])
@@ -39,6 +53,12 @@ export default function DashboardOverviewPage() {
     setSummaryLoading(true);
     dashboardApi.summary(period).then(setSummary).finally(() => setSummaryLoading(false));
   }, [period]);
+
+  useEffect(() => {
+    activeJobsApi.list()
+      .then((jobs) => setStagedJobs(jobs.filter((j) => j.current_stage_name !== null)))
+      .finally(() => setStagedJobsLoading(false));
+  }, []);
 
   if (loading) {
     return <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…</div>;
@@ -158,6 +178,47 @@ export default function DashboardOverviewPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Made's own 4 Aug request — a clean, at-a-glance view of every
+          staged/heavy job and its CURRENT step, checkable from his
+          phone. Deliberately its own card, separate from the overdue
+          alert above: that one is "what needs attention," this one
+          is "what's happening right now," good and bad both. Grid on
+          desktop, stacks to one column under 640px — no fixed-width
+          assumptions, matching Made's own explicit "responsive" ask. */}
+      {!stagedJobsLoading && stagedJobs.length > 0 && (
+        <div className="card" style={{ marginBottom: 32 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+            <Layers size={16} style={{ color: "var(--workshop)" }} /> Pekerjaan Bertahap Aktif
+          </h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 10 }}>
+            {stagedJobs.map((job) => (
+              <Link
+                key={job.id} href={`/dashboard/work-order-detail?id=${job.id}`}
+                style={{
+                  display: "block", padding: "12px 14px", borderRadius: 8, background: "var(--paper-3)",
+                  border: job.is_overdue ? "1px solid var(--danger)" : "1px solid transparent",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span className="mono" style={{ fontWeight: 600, fontSize: 13.5 }}>WO #{job.number}</span>
+                  {job.is_overdue && <AlertTriangle size={13} style={{ color: "var(--danger)" }} />}
+                </div>
+                <div style={{ fontSize: 13, color: "var(--steel)", marginBottom: 8 }}>{job.vehicle_plate} · {job.customer_name}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: job.is_overdue ? "var(--danger)" : "var(--rust)" }}>
+                    {job.current_stage_name}
+                  </span>
+                  <span className="mono" style={{ fontSize: 11, color: "var(--steel)" }}>{formatHours(job.elapsed_hours)}</span>
+                </div>
+                {job.current_stage_mechanic && (
+                  <div style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 3 }}>{job.current_stage_mechanic}</div>
+                )}
+              </Link>
+            ))}
+          </div>
+        </div>
       )}
 
       {dueVehicles.length > 0 && (
