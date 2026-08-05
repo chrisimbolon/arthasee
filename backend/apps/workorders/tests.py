@@ -1493,6 +1493,105 @@ class WorkOrderStageTests(WorkOrderAPITestBase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
 
+class SequentialJobLineCascadeTests(WorkOrderAPITestBase):
+    """
+    Made's own confirmed distinction, 5 Aug: sequential staged work
+    (bongkar -> pasang -> uji, one at a time) should flow
+    automatically — starting a stage starts its first task, finishing
+    one task starts the next. Deliberately a SOFT cascade only
+    (Chris's own explicit call): real shop-floor fluidity (a part
+    arriving early, work happening out of order) must never be
+    blocked by it, and undoing a completed item must never silently
+    erase a real timestamp a cascaded sibling already earned.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self.wo.status = "IN_PROGRESS"
+        self.wo.save(update_fields=["status"])
+        self.stage = WorkOrderStage.objects.create(organization=self.org, work_order=self.wo, name="Tune-up", sequence=1)
+        self.line1 = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=self.stage, description="Kuras Cairan",
+        )
+        self.line2 = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=self.stage, description="Pelepasan Komponen",
+        )
+        self.line3 = WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=self.wo, stage=self.stage, description="Pemasangan Kembali",
+        )
+
+    def test_starting_a_stage_auto_starts_its_first_job_line_only(self):
+        self.stage.start()
+        self.stage.save(update_fields=["started_at"])
+        self.line1.refresh_from_db()
+        self.line2.refresh_from_db()
+        self.assertIsNotNone(self.line1.started_at)
+        self.assertIsNone(self.line2.started_at)
+
+    def test_completing_a_job_line_auto_starts_the_next_sibling(self):
+        self.line1.start()
+        self.line1.save(update_fields=["started_at"])
+        self.line1.complete()
+        self.line1.save(update_fields=["completed_at"])
+        self.line2.refresh_from_db()
+        self.line3.refresh_from_db()
+        self.assertIsNotNone(self.line2.started_at)
+        self.assertIsNone(self.line2.completed_at)
+        self.assertIsNone(self.line3.started_at)
+
+    def test_cascade_never_touches_unstaged_job_lines(self):
+        """Made's own explicit distinction: only genuinely sequential,
+        staged work cascades — parallel, independent items stay
+        exactly as they already behave."""
+        unstaged_a = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Ganti Oli")
+        unstaged_b = WorkOrderJobLine.objects.create(organization=self.org, work_order=self.wo, description="Cek Ban")
+        unstaged_a.complete()
+        unstaged_a.save(update_fields=["started_at", "completed_at"])
+        unstaged_b.refresh_from_db()
+        self.assertIsNone(unstaged_b.started_at)
+
+    def test_soft_cascade_does_not_block_starting_a_later_item_out_of_order(self):
+        """The actual point of keeping this soft, Chris's own explicit
+        call: real shop-floor fluidity — a part arrives early, work
+        genuinely happens out of order — must never be blocked."""
+        self.line3.start()
+        self.line3.save(update_fields=["started_at"])
+        self.line1.refresh_from_db()
+        self.line2.refresh_from_db()
+        self.assertIsNotNone(self.line3.started_at)
+        self.assertIsNone(self.line1.started_at)
+        self.assertIsNone(self.line2.started_at)
+
+    def test_undo_never_reverts_a_cascaded_siblings_real_timestamp(self):
+        """Chris's own explicit call: real timestamps a cascaded
+        sibling already earned must never be silently erased just
+        because the item that triggered them got reset."""
+        self.line1.start()
+        self.line1.save(update_fields=["started_at"])
+        self.line1.complete()
+        self.line1.save(update_fields=["completed_at"])
+        self.line2.refresh_from_db()
+        line2_started_at = self.line2.started_at
+        self.assertIsNotNone(line2_started_at)
+
+        self.line1.reset()
+        self.line1.save(update_fields=["started_at", "completed_at"])
+        self.line2.refresh_from_db()
+        self.assertEqual(self.line2.started_at, line2_started_at)
+
+    def test_cascade_via_the_real_toggle_endpoint_end_to_end(self):
+        """Same real chain, but through the actual API a mechanic
+        clicks — not just the model methods directly."""
+        first_toggle = self.client.patch(f"/api/work-orders/job-lines/{self.line1.id}/toggle/")
+        self.assertEqual(first_toggle.status_code, status.HTTP_200_OK)
+        second_toggle = self.client.patch(f"/api/work-orders/job-lines/{self.line1.id}/toggle/")
+        self.assertTrue(second_toggle.data["job_line"]["is_done"])
+
+        self.line2.refresh_from_db()
+        self.assertIsNotNone(self.line2.started_at)
+
+
 class WorkOrderIsOverdueTests(WorkOrderAPITestBase):
     """
     Made's own literal example from the 28 Jul meeting: an oil

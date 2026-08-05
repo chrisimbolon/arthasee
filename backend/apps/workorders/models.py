@@ -554,12 +554,40 @@ class WorkOrderStage(TenantScopedModel):
         the entire point of a coherent, trustworthy timeline. Keeps
         the ordering guaranteed by construction: work overall always
         starts before any of its sub-phases can.
+
+        Also cascades: starting a stage auto-starts its first
+        sequential job line too (Made's own confirmed distinction,
+        5 Aug — see _cascade_start_first_job_line() below).
         """
         if self.work_order.status != "IN_PROGRESS":
             raise ValueError('Work order harus berstatus "Dikerjakan" sebelum tahap bisa dimulai.')
         if self.started_at is not None:
             return
         self.started_at = timezone.now()
+        self._cascade_start_first_job_line()
+
+    def _cascade_start_first_job_line(self):
+        """
+        Made's own confirmed distinction, 5 Aug: a sequential staged
+        job (bongkar -> pasang -> uji, one at a time) is a genuinely
+        different shape of work than parallel, independently-
+        clickable items — clicking "Mulai Tahap" already means "I'm
+        starting the first real task," not two separate clicks for
+        the same real moment. Auto-starts the first not-yet-started
+        job line under this stage, by creation order (Chris's own
+        confirmed call for v1 — no explicit sequence field needed
+        yet).
+
+        Explicitly saves the cascaded job line here, not left to the
+        caller — WorkOrderStage.start() itself only ever saves the
+        stage's own fields, and this method reaches into a genuinely
+        different model instance the caller has no reason to know
+        changed.
+        """
+        first_line = self.job_lines.filter(started_at__isnull=True).order_by("created_at").first()
+        if first_line:
+            first_line.start()
+            first_line.save(update_fields=["started_at"])
 
     def complete(self):
         """
@@ -685,14 +713,57 @@ class WorkOrderJobLine(TenantScopedModel):
         self.started_at = timezone.now()
 
     def complete(self):
-        """Mirrors WorkOrderStage.complete() exactly — auto-starts
+        """
+        Mirrors WorkOrderStage.complete() exactly — auto-starts
         first if never explicitly started, first-time-wins on
-        completed_at itself."""
+        completed_at itself. Also cascades: finishing one sequential
+        job line auto-starts the next one in the same stage (Made's
+        own confirmed distinction, 5 Aug — see
+        _cascade_start_next_sibling() below).
+        """
         if self.started_at is None:
             self.start()
         if self.completed_at is not None:
             return
         self.completed_at = timezone.now()
+        self._cascade_start_next_sibling()
+
+    def _cascade_start_next_sibling(self):
+        """
+        Made's own confirmed distinction, 5 Aug: sequential staged
+        work (bongkar -> pasang -> uji) should flow automatically —
+        checking off one step is the same real moment as starting the
+        next, not two separate clicks. Deliberately a SOFT cascade
+        only, Chris's own explicit call: finding the next not-yet-
+        started sibling and starting it is a convenience, not a hard
+        sequence lock. Nothing stops a mechanic starting a later item
+        directly (a part arrives early, work genuinely happens out of
+        order) — that's real shop-floor fluidity, not a bug to guard
+        against.
+
+        Unstaged job lines (stage_id is None) are untouched — Made's
+        own explicit distinction: only genuinely sequential, staged
+        work cascades. Independent, parallel items keep behaving
+        exactly as they already do.
+
+        Explicitly saves the cascaded sibling here, not left to the
+        caller — same reasoning as WorkOrderStage's own
+        _cascade_start_first_job_line(): the caller only knows to
+        save `self`, not a different model instance this method
+        reaches into.
+        """
+        if not self.stage_id:
+            return
+        next_line = (
+            WorkOrderJobLine.objects
+            .filter(stage_id=self.stage_id, started_at__isnull=True)
+            .exclude(pk=self.pk)
+            .order_by("created_at")
+            .first()
+        )
+        if next_line:
+            next_line.start()
+            next_line.save(update_fields=["started_at"])
 
     def reset(self):
         """
