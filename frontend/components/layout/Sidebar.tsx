@@ -4,7 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Package, Phone, Settings, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -18,6 +18,11 @@ const NAV = [
   { href: "/dashboard/leads",     icon: Phone,            label: "Leads" },
   { href: "/dashboard/contracts", icon: Briefcase,        label: "Kontrak" },
   { href: "/dashboard/mechanics", icon: Wrench,           label: "Mekanik" },
+  // D1, 6 Aug — Made's own confirmed answer: a real, day-to-day
+  // operational feature (an official letter registry), not an
+  // occasional admin task like Pengaturan below — belongs in the
+  // main nav, not the account section.
+  { href: "/dashboard/letters",   icon: Mail,             label: "Surat Masuk/Keluar" },
 ];
 
 export default function Sidebar() {
