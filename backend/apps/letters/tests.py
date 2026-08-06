@@ -6,7 +6,7 @@ from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
 from django.test import TestCase
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APITransactionTestCase
 
 from .models import IncomingLetter, LetterSequence, OutgoingLetter
 
@@ -105,6 +105,43 @@ class OutgoingLetterAPITests(LettersAPITestBase):
         OutgoingLetter.objects.create(organization=other_org, recipient="B", subject="B", source="STANDALONE")
         resp = self.client.get("/api/letters/outgoing/")
         self.assertEqual(len(resp.data["letters"]), 1)
+
+
+class OutgoingLetterCreationRealTransactionTests(APITransactionTestCase):
+    """
+    Caught live, 6 Aug: OutgoingLetterListView.post() crashed outright
+    with a generic 500 in real use, even though every test in
+    OutgoingLetterAPITests above passed cleanly. The reason: APITestCase
+    wraps EVERY test in its own transaction for isolation/rollback —
+    which accidentally satisfies select_for_update()'s real
+    requirement (LetterSequence.next_number() needs an active
+    transaction) during tests, while the actual view code never wraps
+    its own save() call in one at all. A real request has no such
+    surrounding transaction, so it hit TransactionManagementError in
+    production-shaped conditions the moment it was actually clicked.
+
+    APITransactionTestCase deliberately does NOT wrap tests in a
+    transaction (it truncates and reloads the test DB between runs
+    instead) — this is the one test class in this file that can
+    actually catch this exact class of bug, not just the fixed code
+    coincidentally passing under normal APITestCase isolation.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="CV. Arya Motor", invoice_code="AM")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.letterstxn@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_create_succeeds_with_no_surrounding_transaction(self):
+        resp = self.client.post(
+            "/api/letters/outgoing/", {"recipient": "Biro Humas Polda", "subject": "Permohonan Pencairan Dana"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn("/SK/AM/", resp.data["letter"]["number"])
 
 
 class IncomingLetterVehicleFilterTests(LettersAPITestBase):

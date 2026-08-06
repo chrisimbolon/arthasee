@@ -16,8 +16,23 @@ a user belongs to, correct for reading, but a POST still needs one
 real answer). Mirrors the exact same first-active-membership pattern
 already used in the one view I have direct, confirmed source for —
 MyOrganizationView.
+
+Fixed AGAIN, same day — caught live: OutgoingLetterListView.post()
+crashed outright (a generic 500, surfaced to the user as a blank
+"Gagal membuat surat.") because OutgoingLetter.save() calls
+LetterSequence.next_number(), which uses select_for_update() —
+requires an active transaction, raises TransactionManagementError on
+PostgreSQL otherwise. The two auto-generated hooks
+(Estimate.approve(), ContractImport.apply()) already run inside
+their own transaction.atomic() blocks; this standalone path never
+got one of its own. Exactly the same bug class
+EstimateSequence.next_number()'s own docstring already warns about —
+"already caused a real production failure once for WorkOrder" — just
+repeated here in a new app before this file had ever been through a
+real click.
 """
 from apps.core.views import TenantScopedAPIView
+from django.db import transaction
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -61,7 +76,8 @@ class OutgoingLetterListView(TenantScopedAPIView):
             )
         serializer = OutgoingLetterCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        letter = serializer.save(organization=org, source="STANDALONE", created_by=request.user)
+        with transaction.atomic():
+            letter = serializer.save(organization=org, source="STANDALONE", created_by=request.user)
         return Response(
             {"success": True, "letter": OutgoingLetterSerializer(letter).data},
             status=status.HTTP_201_CREATED,
