@@ -22,8 +22,7 @@ import { Suspense, forwardRef, useEffect, useImperativeHandle, useRef, useState 
 // Estimasi — the page itself flushes any real unsaved edit right
 // before approving. A genuine save failure (e.g. the odometer's own
 // hard-block validation) throws, so the caller can abort the
-// approval instead of silently discarding the value or approving
-// past a real validation error.
+// approval instead of silently discarding the value or approving past a real validation error.
 interface FieldCardHandle {
   flush: () => Promise<void>;
 }
