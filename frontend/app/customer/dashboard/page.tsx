@@ -6,8 +6,8 @@
 // sees every one of their vehicles in one place, not one link per
 // job. No auth wrapper/redirect middleware exists yet for this
 // route group — a missing/expired token just shows an empty state
-// with a link back to login, same low-friction spirit as the rest of
-// this flow, rather than a hard redirect loop.
+// with a link back to login, same low-friction spirit as the rest of his flow, rather than a hard redirect loop.
+
 import { customerAuthApi, customerTokenStorage, customerWorkOrdersApi, CustomerWorkOrderSummary } from "@/lib/api/customerAuth";
 import { Loader2, LogOut } from "lucide-react";
 import Link from "next/link";
