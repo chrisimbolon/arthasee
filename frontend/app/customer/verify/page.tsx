@@ -3,8 +3,7 @@
 // === frontend/app/customer/verify/page.tsx ===
 // =============================================================================
 // The page a customer actually lands on after clicking the magic
-// link. Query-param routing (?token=), same static-export reasoning
-// as every other param-driven page in this app.
+// link. Query-param routing (?token=), same static-export reasoning as every other param-driven page in this app.
 import { customerAuthApi, customerTokenStorage } from "@/lib/api/customerAuth";
 import { Loader2 } from "lucide-react";
 import Link from "next/link";
