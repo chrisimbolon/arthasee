@@ -113,8 +113,7 @@ export default function ContractsPage() {
   useEffect(() => {
     // Now a real backend filter — apps.service.views' CustomerListView
     // was reviewed and confirmed to support ?customer_type=, so this
-    // no longer needs the client-side workaround that fetched every
-    // customer and filtered in the browser.
+    // no longer needs the client-side workaround that fetched every customer and filtered in the browser.
     customersApi.list({ customerType: "INSTITUTIONAL" }).then(setCustomers);
   }, []);
 
