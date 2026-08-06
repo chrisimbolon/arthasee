@@ -22,7 +22,8 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from .models import IncomingLetter, OutgoingLetter
-from .serializers import (IncomingLetterSerializer, OutgoingLetterCreateSerializer,
+from .serializers import (IncomingLetterSerializer,
+                          OutgoingLetterCreateSerializer,
                           OutgoingLetterSerializer)
 
 
@@ -78,12 +79,20 @@ class OutgoingLetterDetailView(TenantScopedAPIView):
 
 class IncomingLetterListView(TenantScopedAPIView):
     """GET /api/letters/incoming/ — list, newest received first,
-    properly scoped via get_queryset(). POST — upload + metadata,
-    Made's own confirmed "not a blind file drop" shape."""
+    properly scoped via get_queryset(). Optional ?vehicle=<id> filter
+    — Made's own explicit ask: a linked letter should surface
+    directly in that vehicle's own history, not just live in a
+    separate mailroom list a real click away. Frontend uses this on
+    vehicle-detail rather than fetching every incoming letter in the
+    org and filtering client-side. POST — upload + metadata, Made's
+    own confirmed "not a blind file drop" shape."""
     model = IncomingLetter
 
     def get(self, request):
         letters = self.get_queryset().select_related("customer", "vehicle").order_by("-received_date", "-created_at")
+        vehicle_id = request.query_params.get("vehicle")
+        if vehicle_id:
+            letters = letters.filter(vehicle_id=vehicle_id)
         return Response({"success": True, "letters": IncomingLetterSerializer(letters, many=True).data})
 
     def post(self, request):

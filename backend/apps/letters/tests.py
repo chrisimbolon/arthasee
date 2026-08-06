@@ -107,6 +107,39 @@ class OutgoingLetterAPITests(LettersAPITestBase):
         self.assertEqual(len(resp.data["letters"]), 1)
 
 
+class IncomingLetterVehicleFilterTests(LettersAPITestBase):
+    """Real coverage for the vehicle-detail integration — the actual
+    endpoint that page's own new section calls."""
+
+    def test_vehicle_filter_returns_only_letters_linked_to_that_vehicle(self):
+        other_vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 2002 AS",
+            model="Xenia", manufacture_year=2019,
+        )
+        IncomingLetter.objects.create(
+            organization=self.org, sender="Vendor A", subject="Untuk kendaraan ini",
+            letter_date="2026-08-01", received_date="2026-08-01",
+            vehicle=self.vehicle, file="incoming_letters/a.pdf",
+        )
+        IncomingLetter.objects.create(
+            organization=self.org, sender="Vendor B", subject="Untuk kendaraan lain",
+            letter_date="2026-08-01", received_date="2026-08-01",
+            vehicle=other_vehicle, file="incoming_letters/b.pdf",
+        )
+        resp = self.client.get(f"/api/letters/incoming/?vehicle={self.vehicle.id}")
+        self.assertEqual(len(resp.data["letters"]), 1)
+        self.assertEqual(resp.data["letters"][0]["sender"], "Vendor A")
+
+    def test_no_filter_returns_every_letter_in_the_org(self):
+        IncomingLetter.objects.create(
+            organization=self.org, sender="Vendor A", subject="Test",
+            letter_date="2026-08-01", received_date="2026-08-01",
+            file="incoming_letters/a.pdf",
+        )
+        resp = self.client.get("/api/letters/incoming/")
+        self.assertEqual(len(resp.data["letters"]), 1)
+
+
 class IncomingLetterAPITests(LettersAPITestBase):
 
     def test_can_upload_an_incoming_letter_with_metadata(self):
