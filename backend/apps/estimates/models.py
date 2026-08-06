@@ -109,25 +109,11 @@ class Estimate(TenantScopedModel):
 
     diagnosis_notes = models.TextField(blank=True, verbose_name="Catatan Diagnosa")
 
-    # Chris's own framing, 31 Jul: "estimasi is like a gate" — the
-    # real odometer reading should be captured here, before any
-    # diagnosis/quote work happens, not left until WorkOrder creation
-    # (which only exists after approval). Nullable, matching
-    # WorkOrder.odometer_km_intake's own exact shape — not every
-    # estimate necessarily captures this immediately. Hard-block
-    # validation against Vehicle.last_service_odometer_km lives in
-    # the serializer (see validate_odometer_km_intake), since that's
-    # the real, only enforcement point — this field is never set any
-    # other way.
     odometer_km_intake = models.PositiveIntegerField(null=True, blank=True, verbose_name="KM Saat Masuk")
 
     rejection_reason = models.CharField(max_length=20, choices=REASON_CHOICES, blank=True, verbose_name="Alasan Penolakan")
     rejection_notes   = models.TextField(blank=True, verbose_name="Catatan Penolakan")
 
-    # Set only once, on approval — same "origin holds a pointer
-    # forward to what it produced" direction as WorkOrder.service_record.
-    # Django's reverse accessor (work_order.estimate) means WorkOrder
-    # needs zero schema change to support looking back at this.
     work_order = models.OneToOneField(
         "workorders.WorkOrder", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="estimate", verbose_name="Work Order",
@@ -170,6 +156,11 @@ class Estimate(TenantScopedModel):
         the job, rather than inventing a new priced-line concept on a
         model that's already proven and shouldn't be touched.
         """
+        # Local import, same cross-app reasoning as every other
+        # local import in this project (e.g. WorkOrder.close()'s own
+        # ServiceRecord import) — apps.estimates depends on
+        # apps.letters, not the other way around.
+        from apps.letters.models import OutgoingLetter
         from apps.workorders.models import (WorkOrder, WorkOrderJobLine,
                                             WorkOrderMaterialLine)
 
@@ -206,6 +197,26 @@ class Estimate(TenantScopedModel):
             self.status = "APPROVED"
             self.work_order = work_order
             self.save(update_fields=["status", "work_order", "updated_at"])
+
+            # D1 (Surat Keluar), Chris's own confirmed trigger, 6 Aug
+            # — an approved Estimate is the real, official moment a
+            # document goes out authorizing the work. Same
+            # transaction as everything above: a failure here rolls
+            # back the WorkOrder too, rather than leaving an approved
+            # Estimate with no corresponding letter. Silently skipped
+            # if the org has no invoice_code configured yet, rather
+            # than blocking Estimate approval entirely over a
+            # Settings gap unrelated to the estimate itself — real
+            # invoice creation already has its own hard block for
+            # this (see Invoice.save()), so nothing about billing
+            # integrity depends on this letter existing.
+            if self.organization.invoice_code:
+                OutgoingLetter.objects.create(
+                    organization=self.organization, source="ESTIMATE_APPROVAL", estimate=self,
+                    recipient=self.vehicle.customer.name,
+                    subject=f"Persetujuan Estimasi {self.number} — {self.vehicle.plate_number}",
+                    created_by=approved_by,
+                )
 
         return work_order
 

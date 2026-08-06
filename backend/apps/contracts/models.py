@@ -458,12 +458,15 @@ class ContractImport(TenantScopedModel):
         select_for_update()-needs-a-transaction gotcha documented
         elsewhere in this project.
         """
-        from apps.service.models import Vehicle  # local import, same
-
         # cross-app reasoning as WorkOrder.close()'s own local import
         # of ServiceRecord — apps.contracts depends on apps.service,
         # not the other way around, and this keeps that direction
         # obvious without a module-level circular-import risk.
+        from apps.letters.models import OutgoingLetter
+        from apps.service.models import Vehicle  # local import, same
+
+        # Same local-import reasoning — apps.contracts depends on
+        # apps.letters, not the other way around.
 
         if self.status != "PENDING_REVIEW":
             raise ValueError("Import ini sudah diproses sebelumnya.")
@@ -581,6 +584,25 @@ class ContractImport(TenantScopedModel):
             # snapshot, and why an already-realized period is
             # excluded from it.
             self.contract.recalculate_unrealized_termin_amounts()
+
+            # D1 (Surat Keluar), Chris's own confirmed trigger, 6 Aug
+            # — specifically, phone-confirmed: "plan to request or
+            # withdraw funds from Arya Motor to institutional." NOT
+            # Contract creation, NOT tied to an individual TerminPeriod
+            # — the moment a contract's scope/budget is confirmed via
+            # a successfully-applied import. Same transaction as
+            # everything above. Silently skipped if the org has no
+            # invoice_code configured — same reasoning as the
+            # Estimate.approve() hook, nothing about this import's own
+            # correctness depends on the letter existing.
+            if self.organization.invoice_code:
+                OutgoingLetter.objects.create(
+                    organization=self.organization, source="CONTRACT_FUNDS_REQUEST",
+                    contract_import=self,
+                    recipient=self.contract.customer.name,
+                    subject=f"Permohonan Pencairan Dana — {self.contract.title}",
+                    created_by=applied_by,
+                )
 
     def reject(self):
         if self.status != "PENDING_REVIEW":
