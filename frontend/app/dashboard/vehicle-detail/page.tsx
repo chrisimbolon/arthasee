@@ -47,13 +47,24 @@
 //     the same as DONE. They stay real, visible history, just in
 //     their own small section rather than implying they became a
 //     real visit.
+//
+// THIRD ROUND, 6 Aug — D1, Made's own explicit ask: an incoming
+// letter linked to a vehicle should surface directly in that
+// vehicle's own history, not just live in a separate mailroom page a
+// real click away. LinkedLettersSection below is deliberately
+// read-only — adding a letter still happens on the main Letters
+// page (/dashboard/letters), which already owns the full upload
+// form with customer/vehicle pickers; duplicating that whole modal
+// here would be real, avoidable maintenance surface for a feature
+// this page doesn't need to own.
 // =============================================================================
 import { EstimateStatus, EstimateSummary, estimatesApi } from "@/lib/api/estimates";
 import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
+import { IncomingLetter, lettersApi } from "@/lib/api/letters";
 import { ServiceRecord, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
 import { formatDateID } from "@/lib/format";
-import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Inbox, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -394,6 +405,43 @@ function EstimatesSection({
   );
 }
 
+// D1, 6 Aug — Made's own explicit ask: a letter linked to a vehicle
+// should surface directly here, not just live in a separate mailroom
+// page. Deliberately read-only (see the module-level comment at the
+// top of this file for why "add" stays on /dashboard/letters).
+function LinkedLettersSection({ vehicleId }: { vehicleId: string }) {
+  const [letters, setLetters] = useState<IncomingLetter[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    lettersApi.listIncoming(vehicleId).then(setLetters).finally(() => setLoading(false));
+  }, [vehicleId]);
+
+  if (loading || letters.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+        <Inbox size={16} /> Surat Terkait
+      </h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {letters.map((l) => (
+          <a
+            key={l.id} href={l.file} target="_blank" rel="noopener noreferrer"
+            className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}
+          >
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 600 }}>{l.subject}</div>
+              <div style={{ fontSize: 12, color: "var(--steel)" }}>Dari {l.sender}</div>
+            </div>
+            <span className="mono" style={{ fontSize: 12, color: "var(--steel)" }}>{formatDateID(l.received_date)}</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 
 // ── Vehicle Timeline ──────────────────────────────────────────────
 // Sansan's "Digital Medical Record" mockup, built against what's
@@ -669,6 +717,8 @@ function VehicleDetailContent() {
         }
         onActiveOrderChange={(has, number) => setActiveWorkOrder({ has, number })}
       />
+
+      <LinkedLettersSection vehicleId={vehicle.id} />
 
       <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14, marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
         <Wrench size={16} /> Riwayat Servis
