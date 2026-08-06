@@ -29,9 +29,7 @@ function money(v: string | number) {
 // own terbilang_rupiah() exactly — same recursive algorithm, same
 // output shape — so the on-screen Cetak view (window.print(), no
 // backend PDF involved) and the actual downloaded PDF never
-// disagree on what a given total spells out to. Verified against the
-// same real test cases as the Python version, including this app's
-// own Rp 740.000 example: "Tujuh Ratus Empat Puluh Ribu Rupiah."
+// disagree on what a given total spells out to.
 const ONES = ["", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan", "sepuluh", "sebelas"];
 
 function terbilangWords(n: number): string {
