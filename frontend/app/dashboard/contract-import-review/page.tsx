@@ -10,7 +10,6 @@
 // own. It only ever produces a diff sitting in PENDING_REVIEW, and
 // this screen is where a person actually looks at what would change
 // before an explicit "Terapkan Perubahan" confirms it.
-//
 // One thing this screen must do that no other review screen in this
 // app needs to: fill in gaps the source document itself can't
 // provide. Vehicle.manufacture_year is required on the backend, but
