@@ -4,8 +4,7 @@
 // Made's own words: "no money today doesn't mean no money forever."
 // Deliberately NOT linked to Customer/Vehicle/WorkOrder — confirmed
 // he's fine converting one into a real customer himself, manually,
-// if they come back. follow_up_status filtering IS the personal
-// call-list mechanism; no separate feature needed for that.
+// if they come back. 
 // =============================================================================
 import {
   FollowUpStatus, LeadReason, RejectedQuote, RejectedQuotePayload, leadsApi,
