@@ -25,8 +25,7 @@ export default function CustomerLoginPage() {
       const res = await customerAuthApi.requestMagicLink(email.trim());
       setSent(true);
       // Only ever present when the backend is running in DEBUG and a
-      // real email provider isn't wired in yet (Fase 2.5's own
-      // deliberately deferred half — see
+      // real email provider isn't wired in yet (Fase 2.5's own deliberately deferred half — see
       // CustomerMagicLinkRequestView's own docstring). Once a real
       // provider is chosen, this whole dev_token path disappears —
       // nothing else about this page needs to change.
