@@ -47,8 +47,7 @@ const IMPORT_STATUS_COLOR: Record<string, string> = {
 };
 
 // original_file stores the full storage path
-// ("contract_imports/2026/07/rencana_anggaran.xlsx") — only the
-// filename itself is useful to show on this screen.
+// ("contract_imports/2026/07/rencana_anggaran.xlsx") 
 function fileNameFromPath(path: string) {
   const parts = path.split("/");
   return parts[parts.length - 1] || path;
