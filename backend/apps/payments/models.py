@@ -136,17 +136,26 @@ class Payment(TenantScopedModel):
                 received_by=received_by,
             )
 
-            # --- Sprint 2, Task 2.1 hook point -----------------------------
-            # from apps.payments.events import PaymentReceived
-            # from apps.core.events.bus import default_bus
-            # default_bus.publish(PaymentReceived(
-            #     organization_id=invoice.organization_id,
-            #     invoice_id=invoice.id, payment_id=payment.id, amount=amount,
-            # ))
-            # ----------------------------------------------------------------
+            # Sprint 2, Task 2.1 — fires on every recorded payment,
+            # partial or full (Chris's own explicit call) — see
+            # apps.payments.events.PaymentReceived's own docstring.
+            # Placed unconditionally, BEFORE the balance_due check
+            # below, so it fires the same way regardless of whether
+            # this particular payment happens to complete the
+            # invoice — a partial payment is just as real a cash
+            # movement as one that zeroes the balance.
+            from apps.core.events.bus import default_bus
+            from apps.payments.events import PaymentReceived
+            default_bus.publish(PaymentReceived(
+                organization_id=invoice.organization_id,
+                invoice_id=invoice.id,
+                payment_id=payment.id,
+                amount=amount,
+                method=method,
+            ))
 
             if invoice.balance_due <= Decimal("0"):
                 invoice.status = "PAID"
                 invoice.save(update_fields=["status"])
-
+                
         return payment

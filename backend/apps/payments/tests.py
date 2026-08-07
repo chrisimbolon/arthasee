@@ -14,6 +14,7 @@ against them.
 from decimal import Decimal
 
 from apps.authentication.models import CustomUser
+from apps.core.models import Outbox
 from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
@@ -212,3 +213,59 @@ class PaymentTenantIsolationTests(PaymentsAPITestBase):
         self.client.force_authenticate(user=self.other_owner)
         resp = self.client.get(f"/api/invoices/{self.invoice_id}/payments/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+class PaymentReceivedEventTests(PaymentsAPITestBase):
+
+    def test_full_payment_publishes_payment_received(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self._pay(250000, method="cash")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        row = Outbox.objects.get(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(row.organization_id, self.org.id)
+        # Payment.amount is a raw stored DecimalField(decimal_places=2),
+        # not a multiplication result — 2 decimal places, not 4. See
+        # apps.payments.events.PaymentReceived's own docstring for why
+        # this differs from the other three Sprint 2 events, verified
+        # by hand before this assertion was written.
+        self.assertEqual(row.payload["amount"], "250000.00")
+        self.assertEqual(row.payload["method"], "cash")
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+
+    def test_partial_payment_still_publishes_payment_received(self):
+        """
+        Chris's own explicit call — a partial payment is just as real
+        a cash movement as a full one, and must publish the same way,
+        even though the invoice itself stays ISSUED afterward.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(100000, method="bank_transfer")
+
+        row = Outbox.objects.get(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(row.payload["amount"], "100000.00")
+        self.assertEqual(row.payload["method"], "bank_transfer")
+
+    def test_two_partial_payments_publish_two_separate_events(self):
+        self._pay(100000)
+        self._pay(150000)
+        rows = Outbox.objects.filter(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(rows.count(), 2)
+        amounts = sorted(row.payload["amount"] for row in rows)
+        self.assertEqual(amounts, ["100000.00", "150000.00"])
+
+    def test_payment_id_in_payload_matches_the_real_payment_row(self):
+        resp = self._pay(250000)
+        payment_id = resp.data["payment"]["id"]
+        row = Outbox.objects.get(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(row.payload["payment_id"], payment_id)
+
+    def test_rejected_overpayment_publishes_nothing(self):
+        """
+        The failed-validation path in Payment.record() raises before
+        ever reaching the publish() call — confirms that a rejected
+        attempt leaves no Outbox trace, same "fail before writing
+        anything" discipline as JournalEntry.post().
+        """
+        resp = self._pay(300000)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Outbox.objects.filter(event_type="PaymentReceived").count(), 0)
