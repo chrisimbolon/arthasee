@@ -4,9 +4,20 @@
 // Same query-param pattern as vehicle-detail — static export needs
 // every route's HTML identical regardless of ?id= value, since real
 // invoice UUIDs don't exist at build time.
+//
+// UPDATED — "Tandai Lunas" no longer PATCHes status directly. The
+// backend now rejects that outright (Invoice.status can only ever
+// become PAID by Payment.record() actually zeroing out balance_due —
+// see apps.invoicing.views.InvoiceStatusUpdateView's own docstring).
+// Replaced with a real payment-recording form hitting the new
+// /api/invoices/<id>/payments/ endpoint, plus a payment history list
+// — genuinely useful now that partial payments (a deposit, then a
+// balance payment later) are a real, supported case, not just a
+// single overwritable field.
 // =============================================================================
 import { Invoice, InvoiceStatus, invoicesApi } from "@/lib/api/invoicing";
 import { organizationsApi } from "@/lib/api/organizations";
+import { Payment, PaymentMethod, paymentsApi } from "@/lib/api/payments";
 import { ArrowLeft, Download, Loader2, Printer } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -17,6 +28,11 @@ const STATUS_LABEL: Record<InvoiceStatus, string> = {
 };
 const STATUS_COLOR: Record<InvoiceStatus, string> = {
   DRAFT: "var(--steel)", ISSUED: "var(--rust)", PAID: "#2e7d4f", CANCELLED: "var(--danger)",
+};
+// Mirrors backend/apps/payments/models.py's own METHOD_CHOICES
+// exactly — keep in sync if that list ever changes.
+const PAYMENT_METHOD_LABEL: Record<PaymentMethod, string> = {
+  cash: "Tunai", bank_transfer: "Transfer Bank", qris: "QRIS", card: "Kartu Debit/Kredit", other: "Lainnya",
 };
 
 function money(v: string | number) {
@@ -78,13 +94,32 @@ function InvoiceDetailContent() {
   const searchParams = useSearchParams();
   const invoiceId = searchParams.get("id") ?? "";
   const [invoice, setInvoice] = useState<Invoice | null>(null);
+  const [payments, setPayments] = useState<Payment[]>([]);
   const [orgName, setOrgName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => invoicesApi.get(invoiceId).then(setInvoice).finally(() => setLoading(false));
+  // Payment-form state — kept separate from `updating` (used for
+  // plain status transitions) since the two actions have genuinely
+  // different in-flight UI (a form to fill in vs. a single button).
+  const [showPaymentForm, setShowPaymentForm] = useState(false);
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
+  const [paymentReference, setPaymentReference] = useState("");
+  const [submittingPayment, setSubmittingPayment] = useState(false);
+
+  const load = () =>
+    invoicesApi.get(invoiceId)
+      .then((inv) => {
+        setInvoice(inv);
+        // Payment history is harmless to fetch regardless of status
+        // (empty for DRAFT/a never-paid CANCELLED invoice) — no
+        // status check needed before calling this.
+        return paymentsApi.list(inv.id).then(setPayments).catch(() => setPayments([]));
+      })
+      .finally(() => setLoading(false));
   useEffect(() => {
     if (invoiceId) load();
   }, [invoiceId]);
@@ -102,6 +137,44 @@ function InvoiceDetailContent() {
       setError("Gagal mengubah status invoice.");
     } finally {
       setUpdating(false);
+    }
+  };
+
+  // Defaults the amount field to the full remaining balance — one
+  // click through this form (open, then Simpan with no changes)
+  // reproduces the old one-click "Tandai Lunas" behavior for the
+  // common full-payment case, while still allowing a real partial
+  // amount when that's what actually happened.
+  const openPaymentForm = () => {
+    if (!invoice) return;
+    setPaymentAmount(invoice.balance_due);
+    setPaymentMethod("cash");
+    setPaymentReference("");
+    setError(null);
+    setShowPaymentForm(true);
+  };
+
+  const submitPayment = async () => {
+    if (!invoice) return;
+    setSubmittingPayment(true); setError(null);
+    try {
+      await paymentsApi.record(invoice.id, {
+        amount: paymentAmount,
+        method: paymentMethod,
+        reference: paymentReference || undefined,
+      });
+      setShowPaymentForm(false);
+      await load(); // re-fetch — status may now be PAID, and the new payment belongs in the history list
+    } catch (err: any) {
+      // Deliberate deviation from changeStatus()'s own generic
+      // catch above — Payment.record() returns real, specific,
+      // actionable messages (overpayment amount, wrong invoice
+      // status) that are genuinely more useful to show than a flat
+      // "gagal" string here, unlike a plain status PATCH which never
+      // had anything that specific to say.
+      setError(err?.response?.data?.message ?? "Gagal mencatat pembayaran.");
+    } finally {
+      setSubmittingPayment(false);
     }
   };
 
@@ -242,8 +315,18 @@ function InvoiceDetailContent() {
                 <span className="mono">− {money(invoice.deposit_amount)}</span>
               </div>
             )}
+            {/* New — mirrors the Deposit row above exactly, same
+                reasoning: balance_due now also nets out real Payment
+                rows, not just deposit_amount, so the total actually
+                paid so far deserves the same visible line item. */}
+            {payments.length > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13.5, marginBottom: 6 }}>
+                <span style={{ color: "var(--steel)" }}>Sudah Dibayar</span>
+                <span className="mono">− {money(payments.reduce((sum, p) => sum + Number(p.amount), 0))}</span>
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 17, fontWeight: 700, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
-              <span>{Number(invoice.deposit_amount) > 0 ? "Sisa Tagihan" : "Total"}</span>
+              <span>{Number(invoice.deposit_amount) > 0 || payments.length > 0 ? "Sisa Tagihan" : "Total"}</span>
               <span className="mono">{money(invoice.balance_due)}</span>
             </div>
             {/* Terbilang describes the SAME figure the row above
@@ -277,15 +360,105 @@ function InvoiceDetailContent() {
         )}
       </div>
 
+      {/* Payment history — internal/staff-facing only (no-print), same
+          reasoning as the status controls below: a customer's printed
+          invoice stays exactly as clean as it already was, this is
+          for Made/SA's own reference (e.g. "why does this say partially
+          paid") right on the same screen they're already looking at. */}
+      {payments.length > 0 && (
+        <div className="no-print card" style={{ maxWidth: 720, margin: "18px auto 0", padding: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "var(--steel)", textTransform: "uppercase" }}>
+            Riwayat Pembayaran
+          </div>
+          {payments.map((p) => (
+            <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center", fontSize: 13, padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
+              <span>
+                {PAYMENT_METHOD_LABEL[p.method]}
+                {p.reference && <span style={{ color: "var(--steel)" }}> — {p.reference}</span>}
+              </span>
+              <span className="mono" style={{ fontWeight: 600 }}>{money(p.amount)}</span>
+              <span style={{ color: "var(--steel)", fontSize: 11.5 }}>
+                {new Date(p.received_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Payment-recording form — replaces the old one-click "Tandai
+          Lunas" PATCH, which the backend no longer accepts. Amount
+          defaults to the full remaining balance (see openPaymentForm)
+          so the common "pay it all off" case is still a two-click
+          action (open, then Simpan), not a burdensome form fill. */}
+      {showPaymentForm && invoice.status === "ISSUED" && (
+        <div className="no-print card" style={{ maxWidth: 720, margin: "18px auto 0", padding: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Catat Pembayaran</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+            <div>
+              <label style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase" }}>Jumlah</label>
+              <input
+                type="number" className="mono" value={paymentAmount}
+                onChange={(e) => setPaymentAmount(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 5, marginTop: 4, boxSizing: "border-box" }}
+              />
+              <div style={{ fontSize: 11, color: "var(--steel)", marginTop: 4 }}>
+                Sisa tagihan saat ini: {money(invoice.balance_due)}
+              </div>
+            </div>
+            <div>
+              <label style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase" }}>Metode</label>
+              <select
+                value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
+                style={{ width: "100%", padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 5, marginTop: 4, boxSizing: "border-box" }}
+              >
+                {Object.entries(PAYMENT_METHOD_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase" }}>Referensi (opsional)</label>
+            <input
+              type="text" value={paymentReference} onChange={(e) => setPaymentReference(e.target.value)}
+              placeholder="No. transfer, ID transaksi QRIS, dll."
+              style={{ width: "100%", padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 5, marginTop: 4, boxSizing: "border-box" }}
+            />
+          </div>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button className="btn-ghost" disabled={submittingPayment} onClick={() => setShowPaymentForm(false)}>Batal</button>
+            <button
+              className="btn-rust" disabled={submittingPayment || !paymentAmount || Number(paymentAmount) <= 0}
+              onClick={submitPayment}
+            >
+              {submittingPayment && <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} />}
+              Simpan Pembayaran
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="no-print" style={{ maxWidth: 720, margin: "18px auto 0", display: "flex", gap: 10, justifyContent: "center" }}>
         {invoice.status === "DRAFT" && (
           <button className="btn-rust" disabled={updating} onClick={() => changeStatus("ISSUED")}>Terbitkan Invoice</button>
         )}
-        {invoice.status === "ISSUED" && (
-          <button className="btn-rust" disabled={updating} onClick={() => changeStatus("PAID")}>Tandai Lunas</button>
+        {invoice.status === "ISSUED" && !showPaymentForm && (
+          <button className="btn-rust" disabled={updating} onClick={openPaymentForm}>Catat Pembayaran</button>
         )}
         {(invoice.status === "DRAFT" || invoice.status === "ISSUED") && (
-          <button className="btn-ghost" disabled={updating} onClick={() => changeStatus("CANCELLED")}>Batalkan</button>
+          <button
+            className="btn-ghost" disabled={updating || payments.length > 0}
+            onClick={() => changeStatus("CANCELLED")}
+            // Proactive disable, mirroring the same "backend is the
+            // real enforcement, frontend just disables proactively"
+            // split already established elsewhere in this app (see
+            // WorkOrderJobTicketPdfView's own docstring) — the
+            // backend's own 409 guard on InvoiceStatusUpdateView is
+            // what actually stops this, this is just the UI signal.
+            title={payments.length > 0 ? "Invoice ini sudah memiliki pembayaran tercatat — tidak bisa dibatalkan langsung." : undefined}
+          >
+            Batalkan
+          </button>
         )}
       </div>
     </div>
