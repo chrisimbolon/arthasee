@@ -112,21 +112,66 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
     """
     PATCH /api/invoices/<id>/status/
 
-    The one deliberate exception to "invoices never change" — status
-    (DRAFT -> ISSUED -> PAID, or CANCELLED) is workflow metadata, not
-    financial content. Line items, prices, and snapshots stay frozen
-    regardless of how many times status changes.
+    UPDATED — "PAID" is no longer an accepted value here at all.
+    Chris's own explicit call: PAID must only ever be system-derived,
+    set the moment apps.payments.models.Payment.record() sees
+    balance_due actually reach zero — never a human's typed claim
+    with no relationship to real money received. Previously this
+    endpoint let any authenticated user PATCH straight to "PAID" with
+    zero validation against balance_due; that gap is what
+    apps.payments now closes.
+
+    Manually settable values are DRAFT, ISSUED, and CANCELLED only.
+    CANCELLED is additionally blocked if real payments already exist
+    against the invoice — cancelling it here would silently leave
+    money received with no reversal trail. A real refund/credit-memo
+    workflow for a PAID invoice belongs in Sprint 2, Task 2.3
+    (Roadmap v2.2's own Cancellation Logic section) — this is a
+    deliberate guard until that exists, not a permanent restriction.
+
+    Line items, prices, and snapshots stay frozen regardless of how
+    many times status changes — status is workflow metadata, not
+    financial content, same distinction as before.
     """
     model = Invoice
+
+    MANUALLY_SETTABLE_STATUSES = {"DRAFT", "ISSUED", "CANCELLED"}
 
     def patch(self, request, pk):
         invoice = self.get_object(pk)
         new_status = request.data.get("status")
-        if new_status not in dict(Invoice.STATUS_CHOICES):
+
+        if new_status == "PAID":
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "Status 'Lunas' tidak bisa diatur secara manual — "
+                        "catat pembayaran melalui endpoint pembayaran "
+                        "(/api/invoices/<id>/payments/), status akan berubah "
+                        "otomatis saat sisa tagihan mencapai nol."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if new_status not in self.MANUALLY_SETTABLE_STATUSES:
             return Response(
                 {"success": False, "message": "Status tidak valid."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if new_status == "CANCELLED" and invoice.payments.exists():
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "Invoice ini sudah memiliki pembayaran tercatat — "
+                        "tidak bisa dibatalkan langsung. Proses refund/credit "
+                        "memo belum tersedia (akan datang di Sprint 2)."
+                    ),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         invoice.status = new_status
         invoice.save(update_fields=["status"])
         return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
@@ -146,6 +191,12 @@ class InvoicePdfView(TenantScopedAPIView):
     if it were still valid. Enforced here, not just hidden in the
     frontend — a real API consumer hitting this URL directly must
     still be blocked regardless of what any UI button shows.
+
+    This gate is now meaningfully stronger than before — PAID can
+    only be reached via Payment.record() actually zeroing out
+    balance_due (see InvoiceStatusUpdateView above), so a PDF served
+    from here now genuinely corresponds to money received, not just
+    a status field someone set by hand.
 
     Returns a raw HttpResponse, not a DRF Response — same reasoning
     already established for ContractExportTerminView and

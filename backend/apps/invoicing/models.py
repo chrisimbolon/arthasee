@@ -24,6 +24,20 @@ Design decisions locked in with Made/Chris before writing this:
   - Sequence numbers reset every year (confirmed), scoped per
     organization — InvoiceSequence exists specifically to make that
     increment atomic under concurrent invoice creation.
+
+UPDATED — real Payment tracking: balance_due now nets out real
+Payment rows (apps.payments.models.Payment), not just deposit_amount.
+deposit_amount itself is left in place and still subtracted — it
+predates this change and nothing currently writes to it anywhere in
+invoicing/views.py or serializers.py as of this update, so it's
+effectively dormant today. Left alone rather than removed, since it's
+unclear whether it's meant to represent a pre-invoice down payment
+collected at a different stage (Estimate/WorkOrder) — worth a
+deliberate decision later, not something to silently delete here.
+status="PAID" is no longer settable via InvoiceStatusUpdateView's
+manual PATCH — see that view's own updated docstring — it is now
+ONLY ever set by apps.payments.models.Payment.record() the moment
+balance_due actually reaches zero.
 """
 import uuid
 from datetime import date
@@ -152,8 +166,19 @@ class Invoice(TenantScopedModel):
         return self.subtotal
 
     @property
+    def total_paid(self):
+        """
+        Sum of every real Payment recorded against this invoice
+        (apps.payments.models.Payment, related_name="payments").
+        Computed on read, same discipline as subtotal/total above —
+        no denormalized running total to let drift from the real
+        Payment rows that are the actual source of truth.
+        """
+        return sum((p.amount for p in self.payments.all()), Decimal("0"))
+
+    @property
     def balance_due(self):
-        return self.total - self.deposit_amount
+        return self.total - self.deposit_amount - self.total_paid
 
     def save(self, *args, **kwargs):
         creating = self._state.adding
