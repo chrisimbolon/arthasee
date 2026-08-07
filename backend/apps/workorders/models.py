@@ -62,6 +62,7 @@ Design locked in with Chris/Made:
 """
 import uuid
 from datetime import date, timedelta
+from decimal import Decimal
 
 from apps.core.models import TenantScopedModel
 from apps.inventory.models import Part, PartUsage, StockAdjustment
@@ -455,6 +456,34 @@ class WorkOrder(TenantScopedModel):
             self.status = "DONE"
             self.service_record = record
             self.save(update_fields=["status", "service_record", "updated_at"])
+
+            # Sprint 2, Task 2.1 — total is exactly what apps.accounting's
+            # future posting rule needs for Dr COGS Sparepart (5001) /
+            # Cr WIP (1302). Computed from the same material_lines list
+            # already collected earlier in this method — not a second
+            # query. Summed here, not inside WorkOrderCompleted itself,
+            # so the event class stays a plain data container with no
+            # business logic of its own. Published even when material_
+            # lines is empty (a labor-only job) — see
+            # apps.workorders.events.WorkOrderCompleted's own docstring
+            # for why that's a deliberate call, not an oversight.
+            # Local imports, same established convention as the
+            # cross-app ServiceRecord import at the top of this method,
+            # and PartConsumed's own publish call in
+            # WorkOrderMaterialLine.save().
+            from apps.core.events.bus import default_bus
+            from apps.workorders.events import WorkOrderCompleted
+            total_amount = sum(
+                (line.quantity * line.unit_price_at_time for line in material_lines),
+                Decimal("0"),
+            )
+            default_bus.publish(WorkOrderCompleted(
+                organization_id=self.organization_id,
+                work_order_id=self.id,
+                service_record_id=record.id,
+                amount=total_amount,
+                material_line_count=len(material_lines),
+            ))
 
         return record
 

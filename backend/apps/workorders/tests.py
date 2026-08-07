@@ -700,6 +700,59 @@ class WorkOrderCloseTests(WorkOrderAPITestBase):
         self.assertEqual(self.wo.status, "DONE")
         self.assertEqual(self.wo.service_record, record)
 
+    def test_close_publishes_work_order_completed_with_correct_amount(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            record = self.wo.close(closed_by=self.owner)
+
+        row = Outbox.objects.get(event_type="WorkOrderCompleted", payload__work_order_id=str(self.wo.id))
+        self.assertEqual(row.organization_id, self.org.id)
+        self.assertEqual(row.payload["service_record_id"], str(record.id))
+        # self.wo has exactly one material line from setUp() — quantity
+        # 2.00 at self.part.unit_price 250000.00 (WorkOrderAPITestBase's
+        # own fixture) — 2.00 * 250000.00 = 500000.0000.
+        self.assertEqual(row.payload["amount"], "500000.0000")
+        self.assertEqual(row.payload["material_line_count"], 1)
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+
+    def test_close_publishes_work_order_completed_with_zero_amount_for_labor_only_job(self):
+        """
+        Chris's own explicit call: a labor-only job (zero material
+        lines) still publishes WorkOrderCompleted, just with
+        amount=0 — a real audit-trail fact regardless of whether
+        there's a nonzero COGS line for accounting to post.
+        """
+        labor_only_wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        self._ready_to_close(labor_only_wo)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            record = labor_only_wo.close(closed_by=self.owner)
+
+        row = Outbox.objects.get(event_type="WorkOrderCompleted", payload__work_order_id=str(labor_only_wo.id))
+        self.assertEqual(row.payload["amount"], "0")
+        self.assertEqual(row.payload["material_line_count"], 0)
+        self.assertEqual(row.payload["service_record_id"], str(record.id))
+
+    def test_close_sums_multiple_material_lines_into_one_amount(self):
+        second_part = Part.objects.create(
+            organization=self.org, name="Oli Mesin", unit="liter", unit_price=Decimal("60000.00"),
+        )
+        StockAdjustment.objects.create(
+            organization=self.org, part=second_part, quantity_change=Decimal("5.00"), reason="restock",
+        )
+        WorkOrderMaterialLine.objects.create(
+            organization=self.org, work_order=self.wo, part=second_part, quantity=Decimal("1.00"),
+        )
+        # self.wo now carries TWO material lines: the original 2.00 x
+        # 250000.00 from setUp() (500000.0000) plus this new 1.00 x
+        # 60000.00 (60000.0000) — total 560000.0000.
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.wo.close(closed_by=self.owner)
+
+        row = Outbox.objects.get(event_type="WorkOrderCompleted", payload__work_order_id=str(self.wo.id))
+        self.assertEqual(row.payload["amount"], "560000.0000")
+        self.assertEqual(row.payload["material_line_count"], 2)
+
     def test_close_via_api(self):
         resp = self.client.post(f"/api/work-orders/{self.wo.id}/close/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
