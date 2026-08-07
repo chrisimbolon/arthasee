@@ -294,6 +294,14 @@ class InvoicePdfTests(InvoicingAPITestBase):
     """
 
     def _create_and_pay(self):
+        """
+        UPDATED — status="PAID" can no longer be reached via a manual
+        PATCH (see apps.invoicing.views.InvoiceStatusUpdateView's own
+        updated docstring, and apps.payments.models.Payment.record()).
+        This now pays the invoice for real through the actual payment
+        endpoint, same as production — the second PATCH this used to
+        end with is exactly the shortcut that no longer exists.
+        """
         create = self.client.post(
             f"/api/service-records/{self.service_record.id}/invoice/",
             {"labor_lines": [{"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 150000}]},
@@ -301,7 +309,13 @@ class InvoicePdfTests(InvoicingAPITestBase):
         )
         invoice_id = create.data["invoice"]["id"]
         self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
-        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "PAID"}, format="json")
+
+        total = create.data["invoice"]["total"]
+        self.client.post(
+            f"/api/invoices/{invoice_id}/payments/",
+            {"amount": total, "method": "cash"},
+            format="json",
+        )
         return invoice_id
 
     def test_returns_a_real_pdf_for_a_paid_invoice(self):
