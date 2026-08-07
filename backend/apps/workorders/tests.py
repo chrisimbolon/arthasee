@@ -7,6 +7,7 @@ from io import StringIO
 from unittest.mock import PropertyMock, patch
 
 from apps.authentication.models import CustomUser
+from apps.core.models import Outbox
 from apps.estimates.models import Estimate
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
@@ -473,6 +474,105 @@ class WorkOrderMaterialLineTests(WorkOrderAPITestBase):
         delete = self.client.delete(f"/api/work-orders/material-lines/{line_id}/")
         self.assertEqual(delete.status_code, status.HTTP_409_CONFLICT)
 
+class PartConsumedEventTests(WorkOrderAPITestBase):
+    """
+    Proves the thing a plain green full-suite run can't: that
+    creating a real WorkOrderMaterialLine through the real endpoint
+    produces a real PartConsumed Outbox row with the right payload —
+    not just that nothing else broke. No handler is subscribed to
+    "PartConsumed" yet, so this only ever touches Outbox, never any
+    downstream posting — see apps.inventory.events.PartConsumed's own
+    module docstring for the full reasoning.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+
+    def test_material_line_creation_publishes_part_consumed(self):
+        resp = self.client.post(
+            f"/api/work-orders/{self.wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "2.00"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        line_id = resp.data["material_line"]["id"]
+
+        row = Outbox.objects.get(event_type="PartConsumed", payload__material_line_id=line_id)
+        self.assertEqual(row.organization_id, self.org.id)
+        self.assertEqual(row.payload["part_id"], str(self.part.id))
+        self.assertEqual(row.payload["work_order_id"], str(self.wo.id))
+        self.assertEqual(row.payload["quantity"], "2.00")
+        # self.part.unit_price is 250000.00, set in WorkOrderAPITestBase's
+        # own setUp() — real fixture value, not invented here.
+        self.assertEqual(row.payload["unit_price_at_time"], "250000.00")
+        self.assertEqual(row.payload["amount"], "500000.0000")
+
+    def test_no_subscribers_yet_means_outbox_row_is_marked_processed(self):
+        """
+        No accounting handler exists until Sprint 2's posting-engine
+        work lands — a PROCESSED status with zero handlers having run
+        is the correct, expected state right now, not a silent bug.
+
+        Wrapped in captureOnCommitCallbacks(execute=True) deliberately
+        — Django's TestCase wraps every test method in its own
+        transaction that gets rolled back, never actually committed,
+        so transaction.on_commit() callbacks (how EventDispatcher
+        defers handler dispatch — see apps/core/events/dispatcher.py)
+        never fire by default inside a test. Without this, the status
+        assertion below would always see PENDING regardless of
+        whether the real dispatch logic is correct — exactly what
+        happened on the first pass of this test. The other three
+        tests in this class don't need this wrapper: they only assert
+        on the Outbox row's existence/count/payload, all set
+        synchronously inside publish() itself, before any commit —
+        only a status-after-dispatch assertion actually depends on
+        the callback running.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/api/work-orders/{self.wo.id}/material-lines/",
+                {"part": str(self.part.id), "quantity": "1.00"}, format="json",
+            )
+        line_id = resp.data["material_line"]["id"]
+        row = Outbox.objects.get(event_type="PartConsumed", payload__material_line_id=line_id)
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+        
+    def test_deleting_material_line_does_not_publish_a_second_event(self):
+        """
+        Deletion reverses stock via a genuine StockAdjustment (see
+        WorkOrderMaterialLineDetailView.delete() in views.py), never
+        by touching WorkOrderMaterialLine.save() again — confirms
+        that reversal path doesn't accidentally trigger a second
+        PartConsumed for the same physical part movement.
+        """
+        create = self.client.post(
+            f"/api/work-orders/{self.wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "1.00"}, format="json",
+        )
+        line_id = create.data["material_line"]["id"]
+        self.assertEqual(Outbox.objects.filter(event_type="PartConsumed").count(), 1)
+
+        self.client.delete(f"/api/work-orders/material-lines/{line_id}/")
+        self.assertEqual(Outbox.objects.filter(event_type="PartConsumed").count(), 1)
+
+    def test_work_order_close_does_not_publish_a_second_event_for_the_same_material(self):
+        """
+        The exact real risk this whole design guards against — see
+        WorkOrder.close()'s own docstring on why PartUsage is created
+        via bulk_create() specifically to skip a second deduction.
+        This proves the accounting-event side of that same guarantee:
+        closing must not produce a second PartConsumed for material
+        already accounted for at creation time.
+        """
+        self.client.post(
+            f"/api/work-orders/{self.wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "1.00"}, format="json",
+        )
+        self.assertEqual(Outbox.objects.filter(event_type="PartConsumed").count(), 1)
+
+        self._ready_to_close(self.wo)
+        self.wo.close(closed_by=self.owner)
+        self.assertEqual(Outbox.objects.filter(event_type="PartConsumed").count(), 1)
 
 class WorkOrderCloseTests(WorkOrderAPITestBase):
     """

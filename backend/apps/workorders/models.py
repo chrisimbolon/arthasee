@@ -854,3 +854,25 @@ class WorkOrderMaterialLine(TenantScopedModel):
             Part.objects.filter(pk=self.part_id).update(
                 current_stock=models.F("current_stock") - self.quantity
             )
+            # Sprint 2, Task 2.1 — the F() deduction directly above IS
+            # the real-world event PartConsumed describes. Published
+            # here, not from apps.inventory, because this is the one
+            # place that deduction actually happens — see
+            # apps.inventory.events.PartConsumed's own module
+            # docstring for the full reasoning. Local imports, same
+            # established convention as WorkOrder.close()'s own
+            # cross-app import of ServiceRecord — kept local to the
+            # one method that needs them, not module-level, so the
+            # dependency direction stays obvious without hunting
+            # through the whole file.
+            from apps.core.events.bus import default_bus
+            from apps.inventory.events import PartConsumed
+            default_bus.publish(PartConsumed(
+                organization_id=self.organization_id,
+                part_id=self.part_id,
+                work_order_id=self.work_order_id,
+                material_line_id=self.id,
+                quantity=self.quantity,
+                unit_price_at_time=self.unit_price_at_time,
+                amount=self.quantity * self.unit_price_at_time,
+            ))
