@@ -1,6 +1,8 @@
 # =============================================================================
 # === backend/apps/invoicing/views.py ===
 # =============================================================================
+from decimal import Decimal
+
 from apps.core.views import TenantScopedAPIView
 from apps.service.models import ServiceRecord
 from django.db import transaction
@@ -112,22 +114,23 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
     """
     PATCH /api/invoices/<id>/status/
 
-    UPDATED — "PAID" is no longer an accepted value here at all.
-    Chris's own explicit call: PAID must only ever be system-derived,
-    set the moment apps.payments.models.Payment.record() sees
-    balance_due actually reach zero — never a human's typed claim
-    with no relationship to real money received. Previously this
-    endpoint let any authenticated user PATCH straight to "PAID" with
-    zero validation against balance_due; that gap is what
-    apps.payments now closes.
+    "PAID" is not an accepted value here at all — Chris's own
+    explicit call: PAID must only ever be system-derived, set the
+    moment apps.payments.models.Payment.record() sees balance_due
+    actually reach zero — never a human's typed claim with no
+    relationship to real money received.
 
-    Manually settable values are DRAFT, ISSUED, and CANCELLED only.
-    CANCELLED is additionally blocked if real payments already exist
-    against the invoice — cancelling it here would silently leave
-    money received with no reversal trail. A real refund/credit-memo
-    workflow for a PAID invoice belongs in Sprint 2, Task 2.3
-    (Roadmap v2.2's own Cancellation Logic section) — this is a
-    deliberate guard until that exists, not a permanent restriction.
+    UPDATED — DRAFT is now a one-way exit. Once an invoice leaves
+    DRAFT (to ISSUED or CANCELLED), it can never be PATCHed back to
+    DRAFT. This closes a real gap: without it, ISSUED -> DRAFT ->
+    ISSUED again would fire InvoiceIssued (see below) a second time
+    for the same invoice, double-recognizing revenue. Chris's own
+    explicit call, once this was surfaced — not assumed silently.
+
+    Manually settable values are DRAFT (only from DRAFT itself, i.e.
+    a no-op), ISSUED, and CANCELLED. CANCELLED is additionally
+    blocked if real payments already exist against the invoice — see
+    the existing comment on that check below, unchanged from before.
 
     Line items, prices, and snapshots stay frozen regardless of how
     many times status changes — status is workflow metadata, not
@@ -140,6 +143,7 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
     def patch(self, request, pk):
         invoice = self.get_object(pk)
         new_status = request.data.get("status")
+        old_status = invoice.status
 
         if new_status == "PAID":
             return Response(
@@ -159,6 +163,17 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
                 {"success": False, "message": "Status tidak valid."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if new_status == "DRAFT" and old_status != "DRAFT":
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "Invoice sudah pernah diterbitkan atau dibatalkan — "
+                        "tidak bisa dikembalikan ke status Draf."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if new_status == "CANCELLED" and invoice.payments.exists():
             return Response(
                 {
@@ -172,8 +187,39 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        invoice.status = new_status
-        invoice.save(update_fields=["status"])
+        with transaction.atomic():
+            invoice.status = new_status
+            invoice.save(update_fields=["status"])
+
+            # Sprint 2, Task 2.1 — revenue recognition fires exactly
+            # once, at the real DRAFT -> ISSUED transition. The DRAFT
+            # one-way guard above is what makes "exactly once" an
+            # actual guarantee rather than just an intention — without
+            # it, this same `if` would fire again on a later re-issue.
+            if old_status == "DRAFT" and new_status == "ISSUED":
+                from apps.core.events.bus import default_bus
+                from apps.invoicing.events import InvoiceIssued
+
+                # Computed the same way Invoice.subtotal itself already
+                # does — sum() over the .subtotal property, not a DB
+                # aggregate — consistent with that existing idiom.
+                service_amount = sum(
+                    (li.subtotal for li in invoice.line_items.filter(kind="labor")),
+                    Decimal("0"),
+                )
+                parts_amount = sum(
+                    (li.subtotal for li in invoice.line_items.filter(kind="part")),
+                    Decimal("0"),
+                )
+                default_bus.publish(InvoiceIssued(
+                    organization_id=invoice.organization_id,
+                    invoice_id=invoice.id,
+                    service_amount=service_amount,
+                    parts_amount=parts_amount,
+                    total=service_amount + parts_amount,
+                    line_item_count=invoice.line_items.count(),
+                ))
+
         return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
 
 

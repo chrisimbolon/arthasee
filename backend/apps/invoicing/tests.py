@@ -4,6 +4,7 @@
 from decimal import Decimal
 
 from apps.authentication.models import CustomUser
+from apps.core.models import Outbox
 from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
@@ -255,6 +256,97 @@ class InvoiceStatusTests(InvoicingAPITestBase):
         update = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "MADE_UP"}, format="json")
         self.assertEqual(update.status_code, status.HTTP_400_BAD_REQUEST)
 
+class InvoiceIssuedEventTests(InvoicingAPITestBase):
+    """
+    Proves both halves of what changed in InvoiceStatusUpdateView:
+    the real InvoiceIssued publish with a correct revenue split, and
+    the DRAFT one-way guard that's what makes "exactly once" an
+    actual guarantee for that publish, not just an intention.
+    """
+
+    def _issued_invoice(self):
+        """
+        One part line (via PartUsage, quantity 1.00 @ self.part's
+        250000.00) + one labor line (quantity 1 @ 100000) — real
+        split across both revenue categories, not a same-category
+        coincidence that would pass even with the fields swapped.
+        """
+        PartUsage.objects.create(
+            organization=self.org, service_record=self.service_record, part=self.part,
+            quantity=Decimal("1.00"), unit_price_at_time=Decimal("250000.00"),
+        )
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 100000}]},
+            format="json",
+        )
+        return create.data["invoice"]["id"]
+
+    def test_issuing_invoice_publishes_invoice_issued_with_correct_split(self):
+        invoice_id = self._issued_invoice()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        row = Outbox.objects.get(event_type="InvoiceIssued", payload__invoice_id=invoice_id)
+        self.assertEqual(row.organization_id, self.org.id)
+        # 1.00 * 100000.00 (labor) and 1.00 * 250000.00 (part) —
+        # verified by hand before writing this assertion, see
+        # conversation for the standalone check.
+        self.assertEqual(row.payload["service_amount"], "100000.0000")
+        self.assertEqual(row.payload["parts_amount"], "250000.0000")
+        self.assertEqual(row.payload["total"], "350000.0000")
+        self.assertEqual(row.payload["line_item_count"], 2)
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+
+    def test_creating_invoice_alone_does_not_publish_invoice_issued(self):
+        """
+        The trigger is specifically the DRAFT -> ISSUED transition,
+        not invoice creation itself — an invoice sits in DRAFT the
+        moment it's created (see Invoice.STATUS_CHOICES default) and
+        must not recognize revenue before it's actually issued.
+        """
+        self._issued_invoice()  # creates but never PATCHes to ISSUED
+        self.assertEqual(Outbox.objects.filter(event_type="InvoiceIssued").count(), 0)
+
+    def test_cannot_revert_issued_invoice_to_draft(self):
+        invoice_id = self._issued_invoice()
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+
+        resp = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "DRAFT"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        invoice = Invoice.objects.get(id=invoice_id)
+        self.assertEqual(invoice.status, "ISSUED")  # unchanged by the rejected attempt
+        # Exactly one InvoiceIssued — the guard blocks the illegal
+        # revert outright, it isn't merely suppressing a second
+        # publish while quietly allowing the revert itself through.
+        self.assertEqual(
+            Outbox.objects.filter(event_type="InvoiceIssued", payload__invoice_id=invoice_id).count(), 1,
+        )
+
+    def test_cannot_revert_cancelled_invoice_to_draft(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json")
+
+        resp = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "DRAFT"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_draft_to_draft_is_still_allowed(self):
+        """
+        Precision check on the guard — it blocks a REAL reversion
+        (old_status != DRAFT), not every PATCH that merely names
+        DRAFT as the target. A same-state no-op must still succeed.
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+
+        resp = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "DRAFT"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 class InvoiceTenantIsolationTests(InvoicingAPITestBase):
 
