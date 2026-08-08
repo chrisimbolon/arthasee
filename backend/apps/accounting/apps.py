@@ -11,16 +11,18 @@ class AccountingConfig(AppConfig):
 
     def ready(self):
         """
-        Subscribes AccountingEventHandler to the shared event bus
-        once, at Django startup. Imports are local, not module-level
-        — apps.py is loaded very early in Django's own startup
-        sequence, before every app's models are necessarily ready;
-        importing apps.accounting.handlers (which imports
+        Subscribes both accounting event handlers to the shared
+        event bus once, at Django startup. Imports are local, not
+        module-level — apps.py is loaded very early in Django's own
+        startup sequence, before every app's models are necessarily
+        ready; importing apps.accounting.handlers (which imports
         apps.accounting.models) at module level here risks
         AppRegistryNotReady. Standard Django pattern for this exact
         situation, not a workaround specific to this codebase.
         """
-        from apps.accounting.handlers import AccountingEventHandler
+        from apps.accounting.handlers import (AccountingEventHandler,
+                                              CancellationEventHandler)
         from apps.core.events.bus import default_bus
 
         default_bus.subscribe(AccountingEventHandler())
+        default_bus.subscribe(CancellationEventHandler())
