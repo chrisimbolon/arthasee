@@ -21,9 +21,12 @@ from apps.core.models import Outbox
 from apps.invoicing.events import InvoiceRefunded
 from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
+from apps.payments.models import SupplierPayment
+from apps.purchasing.models import Supplier, SupplierInvoice
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
 from django.core.management import call_command
+from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -457,3 +460,40 @@ class InvoiceRefundTests(PaymentsAPITestBase):
         self.assertIn("CancellationEventHandler", row.last_error)
 
         self.assertFalse(JournalEntry.objects.filter(event_type="InvoiceRefunded").exists())
+
+class SupplierPaymentMadeEventTests(TestCase):
+    """
+    Sprint 3, Stage 2 — needs its own fixture, not
+    PaymentsAPITestBase (that fixture is built around a customer
+    Invoice, not a SupplierInvoice). Proves paying a supplier
+    actually posts Dr AP / Cr Cash-or-Bank, clearing the payable for
+    real.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.invoice = SupplierInvoice.record(
+                organization=self.org, supplier=self.supplier,
+                amount=Decimal("450000.00"), invoice_date="2026-08-09",
+            )
+
+    def test_payment_clears_ap_and_credits_bank(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            SupplierPayment.record(supplier_invoice=self.invoice, method="bank_transfer")
+
+        ap   = Account.objects.get(organization=self.org, code="2001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(ap.balance(), Decimal("0.00"))          # payable cleared
+        self.assertEqual(bank.balance(), Decimal("-450000.00"))  # real cash outflow
+
+    def test_payment_via_cash_credits_cash_not_bank(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            SupplierPayment.record(supplier_invoice=self.invoice, method="cash")
+
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("-450000.00"))
+        self.assertEqual(bank.balance(), Decimal("0.00"))

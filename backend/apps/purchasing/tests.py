@@ -2,19 +2,17 @@
 # === backend/apps/purchasing/tests.py ===
 # =============================================================================
 """
-Sprint 3, Stage 1 — model-layer tests only. No HTTP endpoints exist
-yet (that's a later stage), and no domain events fire yet (Stage 2) —
-these prove GoodsReceivedNote.receive() / SupplierInvoice.record() /
-SupplierPayment.record() are correct in isolation, the same
-"models first, confirm solid" discipline the Stage 1 delivery itself
-was built around.
+Sprint 3 — model-layer tests (Stage 1) plus real event/posting proof
+(Stage 2). No HTTP endpoints exist yet — that's a later stage.
 """
 from decimal import Decimal
 
+from apps.accounting.models import Account
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, StockAdjustment
 from apps.organizations.models import Organization
 from apps.payments.models import SupplierPayment
+from django.core.management import call_command
 from django.test import TestCase
 
 from .models import GoodsReceivedNote, Supplier, SupplierInvoice
@@ -24,6 +22,11 @@ class PurchasingModelTestBase(TestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Required now that GoodsReceivedNote.receive() / SupplierInvoice.
+        # record() actually publish real domain events — see
+        # apps.payments.tests.PaymentsAPITestBase's own setUp for the
+        # exact same reasoning, first surfaced there.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.purchasing@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
@@ -51,11 +54,6 @@ class GoodsReceivedNoteTests(PurchasingModelTestBase):
         self.assertEqual(grn.sequence_number, 1)
 
     def test_receive_increments_part_stock_via_real_stock_adjustment(self):
-        """
-        The real point of Stage 1 — proves receiving goods reuses
-        StockAdjustment(reason="restock"), not a fourth independent
-        copy of stock math.
-        """
         self.assertEqual(self.part_a.current_stock, Decimal("0"))
 
         GoodsReceivedNote.receive(
@@ -91,18 +89,9 @@ class GoodsReceivedNoteTests(PurchasingModelTestBase):
                 {"part": self.part_b, "quantity": Decimal("4.00"), "unit_cost": Decimal("40000.00")},
             ],
         )
-        # 10*45000 + 4*40000 = 450000 + 160000 = 610000 — verified by
-        # hand before this assertion was written.
         self.assertEqual(grn.total_cost, Decimal("610000.00"))
 
     def test_unit_cost_is_independent_of_part_unit_price(self):
-        """
-        The real gap this whole design was built to close —
-        unit_cost (what was PAID) must never be confused with
-        Part.unit_price (what's CHARGED to customers). Buying at a
-        discount below the normal selling price must not silently
-        alter what customers get charged.
-        """
         grn = GoodsReceivedNote.receive(
             organization=self.org, supplier=self.supplier,
             lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("50000.00")}],
@@ -142,10 +131,6 @@ class SupplierInvoiceTests(PurchasingModelTestBase):
         )
 
     def test_invoice_can_link_multiple_grns(self):
-        """
-        The real point of Half B's design decision — one supplier
-        invoice consolidating several separate deliveries.
-        """
         grn1 = self._receive(Decimal("450000.00"))
         grn2 = self._receive(Decimal("200000.00"))
 
@@ -162,16 +147,10 @@ class SupplierInvoiceTests(PurchasingModelTestBase):
         self.assertEqual(invoice.goods_received_notes.count(), 2)
 
     def test_amount_is_not_derived_from_grn_totals(self):
-        """
-        Deliberate — proves the "no 3-way matching" design decision
-        actually holds: a supplier's stated total can legitimately
-        differ from what was accrued, and this doesn't get silently
-        corrected or blocked.
-        """
         grn = self._receive(Decimal("450000.00"))
         invoice = SupplierInvoice.record(
             organization=self.org, supplier=self.supplier,
-            amount=Decimal("475000.00"),  # deliberately different from the GRN's own 450000
+            amount=Decimal("475000.00"),
             invoice_date="2026-08-09", goods_received_notes=[grn],
         )
         self.assertEqual(invoice.amount, Decimal("475000.00"))
@@ -234,12 +213,86 @@ class SupplierPaymentTests(PurchasingModelTestBase):
             SupplierPayment.record(supplier_invoice=invoice, method="bank_transfer")
 
     def test_payment_method_defaults_to_bank_transfer(self):
-        """
-        Deliberately different default from Payment/Refund's own
-        "cash" default — a real business reflection: shops pay
-        suppliers by bank transfer far more often than they receive
-        cash from customers.
-        """
         invoice = self._unpaid_invoice()
         payment = SupplierPayment.record(supplier_invoice=invoice)
         self.assertEqual(payment.method, "bank_transfer")
+
+
+class GoodsReceivedEventTests(PurchasingModelTestBase):
+    """
+    Sprint 3, Stage 2 — proves receiving goods actually posts the
+    real GR/IR clearing entry, not just that the model layer runs
+    without error.
+    """
+
+    def test_receive_posts_inventory_and_accrued_inventory(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            GoodsReceivedNote.receive(
+                organization=self.org, supplier=self.supplier,
+                lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+            )
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        accrued   = Account.objects.get(organization=self.org, code="2010")
+        # 10 * 45000 = 450000 — verified by hand before this
+        # assertion was written.
+        self.assertEqual(inventory.balance(), Decimal("450000.00"))
+        self.assertEqual(accrued.balance(), Decimal("450000.00"))
+
+
+class SupplierInvoiceReceivedEventTests(PurchasingModelTestBase):
+    """
+    Sprint 3, Stage 2 — proves recording a supplier invoice clears
+    Accrued Inventory into real Accounts Payable, AND proves the
+    "no 3-way matching" design decision holds all the way to the
+    ledger, not just in the model layer.
+    """
+
+    def _received_grn(self, cost=Decimal("450000.00")):
+        with self.captureOnCommitCallbacks(execute=True):
+            return GoodsReceivedNote.receive(
+                organization=self.org, supplier=self.supplier,
+                lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": cost / Decimal("10.00")}],
+            )
+
+    def test_invoice_clears_accrued_inventory_into_accounts_payable(self):
+        grn = self._received_grn()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            SupplierInvoice.record(
+                organization=self.org, supplier=self.supplier,
+                amount=Decimal("450000.00"), invoice_date="2026-08-09",
+                goods_received_notes=[grn],
+            )
+
+        accrued = Account.objects.get(organization=self.org, code="2010")
+        ap      = Account.objects.get(organization=self.org, code="2001")
+        # Net effect across both events: accrued back to zero, AP now
+        # holds the real payable.
+        self.assertEqual(accrued.balance(), Decimal("0.00"))
+        self.assertEqual(ap.balance(), Decimal("450000.00"))
+
+    def test_invoice_amount_mismatch_with_grn_still_posts_the_stated_amount(self):
+        """
+        The real proof the design decision holds — a supplier's
+        stated total that differs from what was accrued posts exactly
+        as stated, leaving a real, visible variance on Accrued
+        Inventory rather than being silently force-corrected to match
+        the GRN.
+        """
+        grn = self._received_grn(Decimal("450000.00"))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            SupplierInvoice.record(
+                organization=self.org, supplier=self.supplier,
+                amount=Decimal("475000.00"),  # deliberately different from the GRN's own 450000
+                invoice_date="2026-08-09", goods_received_notes=[grn],
+            )
+
+        accrued = Account.objects.get(organization=self.org, code="2010")
+        ap      = Account.objects.get(organization=self.org, code="2001")
+        # +450000 (GRN credit) - 475000 (invoice debit) = -25000 — a
+        # real, visible variance, verified by hand before this
+        # assertion was written, not hidden or auto-corrected.
+        self.assertEqual(accrued.balance(), Decimal("-25000.00"))
+        self.assertEqual(ap.balance(), Decimal("475000.00"))
