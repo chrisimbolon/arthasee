@@ -180,8 +180,10 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
                     "success": False,
                     "message": (
                         "Invoice ini sudah memiliki pembayaran tercatat — "
-                        "tidak bisa dibatalkan langsung. Proses refund/credit "
-                        "memo belum tersedia (akan datang di Sprint 2)."
+                        "tidak bisa dibatalkan langsung melalui endpoint ini. "
+                        "Gunakan endpoint refund "
+                        "(POST /api/invoices/<id>/refund/) untuk memproses "
+                        "pengembalian dana sekaligus membatalkan invoice ini."
                     ),
                 },
                 status=status.HTTP_409_CONFLICT,

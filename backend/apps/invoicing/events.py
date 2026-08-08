@@ -51,31 +51,55 @@ class InvoiceCancelled(DomainEvent):
     Fired when an ISSUED invoice with NO recorded payments is
     cancelled — the unpaid case (Task 2.3, Half A). Deliberately does
     NOT fire for DRAFT -> CANCELLED (nothing was ever posted for an
-    invoice that never left DRAFT — publishing an event with nothing
-    to reverse would just be audit-trail noise), and does NOT fire
-    for a paid invoice being refunded (InvoiceRefunded, Task 2.3 Half
-    B — a structurally different reversal that credits Cash/Bank
-    instead of AR, not yet built).
+    invoice that never left DRAFT), and does NOT fire for a paid
+    invoice being refunded (InvoiceRefunded, below — a structurally
+    different reversal that credits Cash/Bank instead of AR).
 
     issued_event_id is Invoice.issued_event_id at the moment of
     cancellation — the exact InvoiceIssued.event_id whose
     JournalEntry needs reversing, carried explicitly rather than
     re-derived, so apps.accounting.cancellations never has to guess
     which posting this cancellation corresponds to. Nullable: a
-    legacy invoice issued before this field existed (or one whose
-    original InvoiceIssued never actually posted — e.g. unseeded COA
-    at the time) genuinely has nothing on record to reverse.
-    cancellations.reverse_for_event() treats None as "nothing to
-    reverse," not an error.
-
-    No amount fields here on purpose — unlike InvoiceIssued, which
-    computes its own amounts, this event doesn't carry a dollar
-    figure at all. The reversal reads its numbers directly from the
-    ORIGINAL JournalEntry's own posted lines (see
-    apps.accounting.cancellations), guaranteeing the reversal matches
-    what's REALLY in the ledger rather than what this event's
-    publisher believes should be there.
+    legacy invoice issued before this field existed genuinely has
+    nothing on record to reverse.
     """
     invoice_id: uuid.UUID
     issued_event_id: uuid.UUID | None
     event_type: str = field(init=False, default="InvoiceCancelled", kw_only=True)
+
+
+@dataclass(frozen=True)
+class InvoiceRefunded(DomainEvent):
+    """
+    Fired when a fully-PAID invoice is refunded — Task 2.3, Half B.
+    Published from apps.payments.models.Refund.record(), not from
+    anywhere in this app — same cross-app pattern as
+    apps.inventory.events.PartConsumed (defined where it conceptually
+    belongs — an Invoice lifecycle event lives with the others here —
+    published wherever the real trigger actually is).
+
+    Posting rule: reverses ONLY the revenue lines of the original
+    InvoiceIssued posting — Dr Service/Parts Revenue (matching
+    whatever was actually credited) / Cr Cash(1001) or Bank(1101)
+    depending on method. Deliberately does NOT touch Accounts
+    Receivable (1201) — unlike InvoiceCancelled's generic line-flip,
+    AR is already correctly at zero by the time an invoice reaches
+    PAID (cleared by the PaymentReceived postings that got it there);
+    re-crediting it here would push it negative. See
+    apps.accounting.cancellations.reverse_for_refund_event() for the
+    actual bespoke reversal — NOT the same generic flip
+    InvoiceCancelled uses.
+
+    issued_event_id mirrors InvoiceCancelled's own field exactly.
+    amount/method describe the refund itself for audit-trail
+    readability; the reversal's own dollar figures are still read
+    from the original JournalEntry's real lines, not recomputed from
+    these — same "trust the real ledger, not the publisher"
+    discipline as Half A.
+    """
+    invoice_id: uuid.UUID
+    refund_id: uuid.UUID
+    issued_event_id: uuid.UUID | None
+    amount: Decimal
+    method: str
+    event_type: str = field(init=False, default="InvoiceRefunded", kw_only=True)
