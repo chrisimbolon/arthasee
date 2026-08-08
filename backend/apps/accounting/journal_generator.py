@@ -28,12 +28,12 @@ def post_for_event(event) -> JournalEntry | None:
     already posted before (idempotency guard above).
 
     Deliberately does not catch or wrap any exception raised here
-    (e.g. Account.DoesNotExist if the Chart of Accounts hasn't been
-    seeded for this organization — see _get_account's own clearer
-    error message for that specific case). apps.core.events.dispatcher
-    already catches per-handler exceptions, marks the Outbox row
-    FAILED with the error captured, and logs it — swallowing the
-    error here would just hide it one layer earlier for no benefit.
+    (e.g. the ValueError Account.resolve() raises if the Chart of
+    Accounts hasn't been seeded for this organization).
+    apps.core.events.dispatcher already catches per-handler
+    exceptions, marks the Outbox row FAILED with the error captured,
+    and logs it — swallowing the error here would just hide it one
+    layer earlier for no benefit.
     """
     if JournalEntry.objects.filter(reference_event_id=event.event_id).exists():
         return None
@@ -45,7 +45,7 @@ def post_for_event(event) -> JournalEntry | None:
     organization = Organization.objects.get(id=event.organization_id)
     lines = [
         {
-            "account": _get_account(organization, entry["account_code"]),
+            "account": Account.resolve(organization, entry["account_code"]),
             "debit":  entry["amount"] if entry["side"] == "debit" else None,
             "credit": entry["amount"] if entry["side"] == "credit" else None,
         }
@@ -61,14 +61,3 @@ def post_for_event(event) -> JournalEntry | None:
         memo=resolved["memo"],
         lines=lines,
     )
-
-
-def _get_account(organization, code):
-    try:
-        return Account.objects.get(organization=organization, code=code)
-    except Account.DoesNotExist as exc:
-        raise ValueError(
-            f"No Account with code={code!r} found for organization "
-            f"{organization.name!r} — has the Chart of Accounts been "
-            f"seeded (python manage.py seed_coa)?"
-        ) from exc

@@ -103,6 +103,26 @@ class Account(TenantScopedModel):
             return debit - credit
         return credit - debit
 
+    @classmethod
+    def resolve(cls, organization, code):
+        """
+        The one real place "account code -> real Account row" gets
+        resolved, with a clear, actionable error if the Chart of
+        Accounts hasn't been seeded. Used by both
+        apps.accounting.journal_generator (posting NEW facts) and
+        apps.accounting.cancellations (reversing OLD ones) — one
+        shared implementation, so a missing-COA failure reads
+        identically no matter which path hit it, not two slightly
+        different messages that could drift apart.
+        """
+        try:
+            return cls.objects.get(organization=organization, code=code)
+        except cls.DoesNotExist as exc:
+            raise ValueError(
+                f"No Account with code={code!r} found for organization "
+                f"{organization.name!r} — has the Chart of Accounts been "
+                f"seeded (python manage.py seed_coa)?"
+            ) from exc
 
 class AccountingPeriod(TenantScopedModel):
     """

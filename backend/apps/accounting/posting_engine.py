@@ -27,6 +27,18 @@ from apps.payments.events import PaymentReceived
 from apps.workorders.events import WorkOrderCompleted
 
 
+def cash_or_bank_account_code(method: str) -> str:
+    """
+    Which account a given payment method maps to — shared between
+    PaymentReceived's own posting rule below AND
+    apps.accounting.cancellations.reverse_for_refund_event()'s refund
+    reversal (Task 2.3, Half B). One real definition, not two copies
+    that could quietly drift apart if the mapping ever gets more
+    nuanced (a dedicated QRIS account, say).
+    """
+    return "1001" if method == "cash" else "1101"
+
+
 def _lines(*entries):
     """
     Drops any entry whose amount is exactly zero. Real requirement,
@@ -81,12 +93,11 @@ def resolve(event) -> dict:
         }
 
     if isinstance(event, PaymentReceived):
-        cash_or_bank = "1001" if event.method == "cash" else "1101"
         return {
             "memo": f"Payment received — {event.payment_id}",
             "lines": _lines(
-                {"account_code": cash_or_bank, "side": "debit",  "amount": event.amount},
-                {"account_code": "1201",       "side": "credit", "amount": event.amount},
+                {"account_code": cash_or_bank_account_code(event.method), "side": "debit",  "amount": event.amount},
+                {"account_code": "1201",                                   "side": "credit", "amount": event.amount},
             ),
         }
 
