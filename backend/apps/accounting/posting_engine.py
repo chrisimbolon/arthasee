@@ -13,28 +13,30 @@ specific organization's actual seeded Chart of Accounts.
 journal_generator.py is what turns these codes into real Account rows
 for a specific organization and actually posts them.
 
-Module-level imports of the four event classes are deliberate here,
-not hidden behind local imports the way cross-app FK declarations are
+Module-level imports of the event classes are deliberate here, not
+hidden behind local imports the way cross-app FK declarations are
 elsewhere in this codebase — this file's entire job IS mapping these
-four specific types to posting rules; the dependency is the point,
-not an incidental reach into another domain.
+specific types to posting rules; the dependency is the point, not an
+incidental reach into another domain.
 """
 from decimal import Decimal
 
 from apps.inventory.events import PartConsumed
 from apps.invoicing.events import InvoiceIssued
-from apps.payments.events import PaymentReceived
+from apps.payments.events import PaymentReceived, SupplierPaymentMade
+from apps.purchasing.events import GoodsReceived, SupplierInvoiceReceived
 from apps.workorders.events import WorkOrderCompleted
 
 
 def cash_or_bank_account_code(method: str) -> str:
     """
     Which account a given payment method maps to — shared between
-    PaymentReceived's own posting rule below AND
+    PaymentReceived's own posting rule, SupplierPaymentMade's own
+    posting rule (below), AND
     apps.accounting.cancellations.reverse_for_refund_event()'s refund
-    reversal (Task 2.3, Half B). One real definition, not two copies
-    that could quietly drift apart if the mapping ever gets more
-    nuanced (a dedicated QRIS account, say).
+    reversal (Task 2.3, Half B). One real definition, not multiple
+    copies that could quietly drift apart if the mapping ever gets
+    more nuanced (a dedicated QRIS account, say).
     """
     return "1001" if method == "cash" else "1101"
 
@@ -98,6 +100,33 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": cash_or_bank_account_code(event.method), "side": "debit",  "amount": event.amount},
                 {"account_code": "1201",                                   "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, GoodsReceived):
+        return {
+            "memo": f"Goods received — GRN {event.goods_received_note_id}",
+            "lines": _lines(
+                {"account_code": "1301", "side": "debit",  "amount": event.amount},
+                {"account_code": "2010", "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, SupplierInvoiceReceived):
+        return {
+            "memo": f"Supplier invoice received — {event.supplier_invoice_id}",
+            "lines": _lines(
+                {"account_code": "2010", "side": "debit",  "amount": event.amount},
+                {"account_code": "2001", "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, SupplierPaymentMade):
+        return {
+            "memo": f"Supplier payment made — {event.supplier_payment_id}",
+            "lines": _lines(
+                {"account_code": "2001",                                   "side": "debit",  "amount": event.amount},
+                {"account_code": cash_or_bank_account_code(event.method),  "side": "credit", "amount": event.amount},
             ),
         }
 
