@@ -211,13 +211,41 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
                     (li.subtotal for li in invoice.line_items.filter(kind="part")),
                     Decimal("0"),
                 )
-                default_bus.publish(InvoiceIssued(
+                event = InvoiceIssued(
                     organization_id=invoice.organization_id,
                     invoice_id=invoice.id,
                     service_amount=service_amount,
                     parts_amount=parts_amount,
                     total=service_amount + parts_amount,
                     line_item_count=invoice.line_items.count(),
+                )
+                # Task 2.3, Half A's own reason this field exists —
+                # the one durable reference a later cancellation needs
+                # to find and reverse this exact posting. Saved BEFORE
+                # publish() so it's durable even if publish() itself
+                # ever changed behavior — event_id is generated at
+                # construction time above, not by publish() itself.
+                invoice.issued_event_id = event.event_id
+                invoice.save(update_fields=["issued_event_id"])
+                default_bus.publish(event)
+
+            # Task 2.3, Half A — the unpaid-cancellation reversal.
+            # Deliberately scoped to old_status == "ISSUED" only: a
+            # DRAFT invoice cancelled directly never had anything
+            # posted for it (InvoiceIssued never fired), so publishing
+            # a cancellation event for it would just be audit-trail
+            # noise with nothing to reverse. The CANCELLED-with-
+            # payments guard above already keeps this branch
+            # unpaid-only — a paid refund is Task 2.3 Half B, not yet
+            # built, and still hits that guard's 409 today.
+            if new_status == "CANCELLED" and old_status == "ISSUED":
+                from apps.core.events.bus import default_bus
+                from apps.invoicing.events import InvoiceCancelled
+
+                default_bus.publish(InvoiceCancelled(
+                    organization_id=invoice.organization_id,
+                    invoice_id=invoice.id,
+                    issued_event_id=invoice.issued_event_id,
                 ))
 
         return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
