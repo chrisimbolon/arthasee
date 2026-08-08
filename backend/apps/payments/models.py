@@ -4,26 +4,18 @@
 """
 Arthasee — Payments
 
-Three real write paths now: Payment.record() (money in from
-customers), Refund.record() (money back to customers), and
-SupplierPayment.record() (money out to suppliers — Sprint 3, Task
-3.3). All three mirror JournalEntry.post() / WorkOrder.close()'s own
-shape: each owns its own transaction.atomic(), validates before
-writing anything, and each is the ONLY place its respective status
-transition happens anywhere in the system.
+Three real write paths: Payment.record() (money in from customers),
+Refund.record() (money back to customers), and SupplierPayment.record()
+(money out to suppliers — Sprint 3, Task 3.3). All three mirror
+JournalEntry.post() / WorkOrder.close()'s own shape: each owns its
+own transaction.atomic(), validates before writing anything, and each
+is the ONLY place its respective status transition happens anywhere
+in the system.
 
 SupplierPayment lives here, not in apps.purchasing, per the Roadmap's
 own posting matrix — it lists SupplierPaymentMade under the payments
-domain, not purchasing. This app is already "all real money
-movement"; a payment out to a supplier is the natural third leg of
-that same concern, not a purchasing concern. Reuses
-Payment.METHOD_CHOICES directly, same as Refund already does.
-
-Stage 1 of 2 (Sprint 3) — SupplierPayment.record()'s real event
-publish is a stubbed comment, same precedent as Payment.record()
-itself when it first shipped; Stage 2 fills in
-apps.payments.events.SupplierPaymentMade and wires it into the
-posting engine.
+domain, not purchasing. Reuses Payment.METHOD_CHOICES directly, same
+as Refund already does.
 """
 import uuid
 from decimal import Decimal
@@ -236,9 +228,8 @@ class SupplierPayment(TenantScopedModel):
     """
     One real payment made TO a supplier against one SupplierInvoice
     (Sprint 3, Task 3.3) — mirrors Refund's own shape exactly
-    (full-amount-only, per Chris's own call), not Payment's partial-
-    amount support. Reuses Payment.METHOD_CHOICES directly, same as
-    Refund does — no reason to invent a third copy of the same list.
+    (full-amount-only), not Payment's partial-amount support. Reuses
+    Payment.METHOD_CHOICES directly, same as Refund does.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     supplier_invoice = models.ForeignKey(
@@ -306,14 +297,14 @@ class SupplierPayment(TenantScopedModel):
             supplier_invoice.status = "PAID"
             supplier_invoice.save(update_fields=["status"])
 
-            # --- Stage 2 hook point -----------------------------------------
-            # from apps.core.events.bus import default_bus
-            # from apps.payments.events import SupplierPaymentMade
-            # default_bus.publish(SupplierPaymentMade(
-            #     organization_id=supplier_invoice.organization_id,
-            #     supplier_invoice_id=supplier_invoice.id,
-            #     supplier_payment_id=payment.id, amount=amount, method=method,
-            # ))
-            # ------------------------------------------------------------------
+            from apps.core.events.bus import default_bus
+            from apps.payments.events import SupplierPaymentMade
+            default_bus.publish(SupplierPaymentMade(
+                organization_id=supplier_invoice.organization_id,
+                supplier_invoice_id=supplier_invoice.id,
+                supplier_payment_id=payment.id,
+                amount=amount,
+                method=method,
+            ))
 
         return payment

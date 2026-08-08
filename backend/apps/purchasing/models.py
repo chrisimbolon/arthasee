@@ -2,21 +2,16 @@
 # === backend/apps/purchasing/models.py ===
 # =============================================================================
 """
-Arthasee — Purchasing (Sprint 3, Stage 1: models only)
+Arthasee — Purchasing (Sprint 3)
 
 Lean scope, deliberately — no PurchaseRequisition or PurchaseOrder
 model. Chris's own explicit call: build what the accounting actually
 needs (Supplier, GoodsReceivedNote, SupplierInvoice), defer the
-requisition/approval workflow until a real shop asks for it, rather
-than build it preemptively.
+requisition/approval workflow until a real shop asks for it.
 
-Stage 1 of 2 — this file has real, working model logic (sequence
-numbering, the GRN->StockAdjustment link, the GRN<->SupplierInvoice
-relationship) but the actual domain-event publish() calls are
-deliberately stubbed as comments, not wired yet. Same precedent as
-apps.payments.models.Payment.record() when it first shipped in
-Sprint 2 — models get proven solid on their own first; Stage 2 fills
-in the real apps.purchasing.events / accounting posting rules.
+Stage 2 — the domain-event publish() calls that were stubbed as
+comments in Stage 1 are now real, wired to apps.purchasing.events and
+the accounting posting engine.
 """
 import uuid
 from decimal import Decimal
@@ -84,8 +79,8 @@ class GoodsReceivedNoteSequence(TenantScopedModel):
 class GoodsReceivedNote(TenantScopedModel):
     """
     One real delivery of parts arriving at the shop — the actual
-    physical/economic event GoodsReceived (Stage 2) describes. Frozen
-    once created, same "never delete, always audit" discipline as
+    physical/economic event GoodsReceived describes. Frozen once
+    created, same "never delete, always audit" discipline as
     everywhere else — no update/delete endpoint is planned; a wrong
     GRN gets corrected via a real StockAdjustment
     (reason="correction"), not by editing history.
@@ -154,7 +149,10 @@ class GoodsReceivedNote(TenantScopedModel):
         never construct GoodsReceivedNote + line items separately.
         Mirrors WorkOrder.close()'s own shape: owns its own
         transaction.atomic(), creates the document AND every line
-        item together.
+        item together, and publishes exactly ONE GoodsReceived event
+        for the whole document — aggregating every line's cost into
+        one total, same "one document, one accounting fact" pattern
+        as WorkOrderCompleted, not PartConsumed's per-line shape.
 
         `lines` is a plain list of dicts:
             [{"part": <Part>, "quantity": Decimal, "unit_cost": Decimal}, ...]
@@ -162,8 +160,7 @@ class GoodsReceivedNote(TenantScopedModel):
         Uses .create() in a loop, not bulk_create() — each line item
         needs its own save()-time side effect (the real
         StockAdjustment it creates), which bulk_create() would skip
-        entirely, same consideration already established for
-        PartUsage elsewhere in this codebase.
+        entirely.
         """
         if not lines:
             raise ValueError("Goods Received Note harus memiliki minimal satu item.")
@@ -185,17 +182,17 @@ class GoodsReceivedNote(TenantScopedModel):
             # created its own StockAdjustment(reason="restock") —
             # no separate stock-update step needed here.
 
-            total_cost = sum((li.subtotal for li in line_items), Decimal("0"))  # noqa: F841
+            total_cost = sum((li.subtotal for li in line_items), Decimal("0"))
 
-            # --- Stage 2 hook point -----------------------------------------
-            # from apps.core.events.bus import default_bus
-            # from apps.purchasing.events import GoodsReceived
-            # default_bus.publish(GoodsReceived(
-            #     organization_id=organization.id, goods_received_note_id=grn.id,
-            #     supplier_id=supplier.id, amount=total_cost,
-            #     line_item_count=len(line_items),
-            # ))
-            # ------------------------------------------------------------------
+            from apps.core.events.bus import default_bus
+            from apps.purchasing.events import GoodsReceived
+            default_bus.publish(GoodsReceived(
+                organization_id=organization.id,
+                goods_received_note_id=grn.id,
+                supplier_id=supplier.id,
+                amount=total_cost,
+                line_item_count=len(line_items),
+            ))
 
         return grn
 
@@ -206,20 +203,12 @@ class GoodsReceivedNoteLineItem(TenantScopedModel):
     GoodsReceivedNote. Creating one atomically increases
     Part.current_stock via a real StockAdjustment(reason="restock")
     row — reusing the EXACT mechanism already built for this in
-    apps.inventory (StockAdjustment.save()'s own F()-based increment
-    — "restock" was already sitting in REASON_CHOICES, labeled
-    "Restock / Pembelian", built for exactly this moment and never
-    wired to a real trigger until now), not a third independent copy
-    of stock math. PartUsage.save() and WorkOrderMaterialLine.save()
-    are the other two — each has its own real reason to exist
-    independently; this one doesn't, so it reuses what's already there.
+    apps.inventory, not a fourth independent copy of stock math.
 
     unit_cost is a deliberate, separate field from Part.unit_price —
     that field is explicitly documented as the SELLING price;
     conflating it with what was actually PAID to the supplier would
-    be a real, silent accounting error. Snapshotted here, same
-    "never let a later price change rewrite history" discipline as
-    PartUsage.unit_price_at_time.
+    be a real, silent accounting error.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     goods_received_note = models.ForeignKey(
@@ -289,18 +278,18 @@ class SupplierInvoiceSequence(TenantScopedModel):
 class SupplierInvoice(TenantScopedModel):
     """
     The supplier's own bill — may correspond to one or several
-    GoodsReceivedNotes (a real one-to-many, Chris's own explicit
-    call: some suppliers consolidate several deliveries onto one
-    invoice — see GoodsReceivedNote.supplier_invoice, the reverse FK
-    that makes this relationship real).
+    GoodsReceivedNotes (a real one-to-many — see
+    GoodsReceivedNote.supplier_invoice, the reverse FK that makes
+    this relationship real).
 
     amount is entered directly from what the supplier's bill actually
     states — NOT derived from the linked GRNs' own total costs.
     Deliberate consequence of "no 3-way matching" (this app's own
     lean scope): if the supplier's stated total differs from what was
-    accrued via GoodsReceived, that's a real bookkeeping variance for
-    a future manual adjusting journal (Phase 4) to resolve, not
-    something this lean version silently force-balances.
+    accrued via GoodsReceived, that shows up as a real, visible
+    variance on Accrued Inventory (2010) for a future manual
+    adjusting journal (Phase 4) to resolve — not something this lean
+    version silently force-balances.
     """
     STATUS_CHOICES = [
         ("UNPAID", "Belum Dibayar"),
@@ -353,10 +342,7 @@ class SupplierInvoice(TenantScopedModel):
         The one real entry point — never construct SupplierInvoice
         directly. Links any given GoodsReceivedNotes to this invoice
         (clearing their Accrued Inventory) — each GRN passed in must
-        not already be linked to a different invoice; the FK itself
-        would eventually enforce this too, but failing here first
-        gives a clear, actionable message instead of a raw
-        IntegrityError.
+        not already be linked to a different invoice.
         """
         if amount is None or amount <= Decimal("0"):
             raise ValueError("Jumlah invoice harus lebih dari nol.")
@@ -375,13 +361,13 @@ class SupplierInvoice(TenantScopedModel):
                 grn.supplier_invoice = invoice
                 grn.save(update_fields=["supplier_invoice"])
 
-            # --- Stage 2 hook point -----------------------------------------
-            # from apps.core.events.bus import default_bus
-            # from apps.purchasing.events import SupplierInvoiceReceived
-            # default_bus.publish(SupplierInvoiceReceived(
-            #     organization_id=organization.id, supplier_invoice_id=invoice.id,
-            #     supplier_id=supplier.id, amount=amount,
-            # ))
-            # ------------------------------------------------------------------
+            from apps.core.events.bus import default_bus
+            from apps.purchasing.events import SupplierInvoiceReceived
+            default_bus.publish(SupplierInvoiceReceived(
+                organization_id=organization.id,
+                supplier_invoice_id=invoice.id,
+                supplier_id=supplier.id,
+                amount=amount,
+            ))
 
         return invoice
