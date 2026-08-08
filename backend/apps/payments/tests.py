@@ -11,10 +11,14 @@ laziness — this is genuinely the only way any of these objects come
 into existence in production, so it's the only honest way to test
 against them.
 """
+import uuid
 from decimal import Decimal
 
+from apps.accounting import cancellations
+from apps.accounting.models import Account, JournalEntry
 from apps.authentication.models import CustomUser
 from apps.core.models import Outbox
+from apps.invoicing.events import InvoiceRefunded
 from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
@@ -70,10 +74,21 @@ class PaymentsAPITestBase(APITestCase):
             {"labor_lines": [{"description": "Jasa Servis", "quantity": 1, "unit_price": 250000}]},
             format="json",
         )
+
         self.invoice_id = create.data["invoice"]["id"]
-        self.client.patch(
-            f"/api/invoices/{self.invoice_id}/status/", {"status": "ISSUED"}, format="json",
-        )
+        # Wrapped in captureOnCommitCallbacks — this fixture predates
+        # InvoiceIssued (written before that event existed), so this
+        # PATCH was never deferring anything at the time. Now it
+        # triggers InvoiceIssued, whose JournalEntry several tests
+        # depend on existing (InvoiceRefundTests especially — its
+        # whole point is finding and reversing this exact posting).
+        # Without this wrapper, the on_commit callback never fires
+        # inside a test, and the original posting silently never
+        # happens — invisible until a test actually checked for it.
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(
+                f"/api/invoices/{self.invoice_id}/status/", {"status": "ISSUED"}, format="json",
+            )
 
     def _pay(self, amount, **extra):
         body = {"amount": str(amount), "method": "cash", **extra}
@@ -271,3 +286,122 @@ class PaymentReceivedEventTests(PaymentsAPITestBase):
         resp = self._pay(300000)
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Outbox.objects.filter(event_type="PaymentReceived").count(), 0)
+
+class InvoiceRefundTests(PaymentsAPITestBase):
+    """
+    Task 2.3, Half B — proves refunding a fully-paid invoice reverses
+    the exact revenue posting WITHOUT touching AR (which is already
+    correctly at zero from the payment that got it there), and
+    credits the right cash/bank account based on the refund's own
+    method — independent of whatever method the original payment used.
+    """
+
+    def _pay_in_full(self, method="cash"):
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(250000, method=method)
+
+    def test_refunding_paid_invoice_reverses_revenue_not_ar(self):
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PAID")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "CANCELLED")
+
+        service_rev = Account.objects.get(organization=self.org, code="4001")
+        cash        = Account.objects.get(organization=self.org, code="1001")
+        ar          = Account.objects.get(organization=self.org, code="1201")
+
+        # Revenue reversed to net zero.
+        self.assertEqual(service_rev.balance(), Decimal("0.00"))
+        # AR untouched by the refund — already correctly zero from
+        # PaymentReceived clearing it, not re-credited by this reversal.
+        self.assertEqual(ar.balance(), Decimal("0.00"))
+        # Cash: +250000 from the payment, -250000 from the refund.
+        self.assertEqual(cash.balance(), Decimal("0.00"))
+
+    def test_refund_method_is_independent_of_payment_method(self):
+        """
+        The original payment came in as cash; the refund goes out via
+        bank transfer — a completely normal real-world case. Cash
+        should show ONLY the original inflow (untouched by this
+        refund); Bank should show ONLY the refund outflow.
+        """
+        self._pay_in_full(method="cash")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "bank_transfer"}, format="json",
+            )
+
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("250000.00"))    # payment only, untouched by refund
+        self.assertEqual(bank.balance(), Decimal("-250000.00"))   # refund only
+
+    def test_cannot_refund_an_unpaid_invoice(self):
+        # self.invoice_id is ISSUED, unpaid, straight from
+        # PaymentsAPITestBase's own setUp — never paid in this test.
+        resp = self.client.post(
+            f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_refunding_twice_is_blocked_by_status_guard(self):
+        self._pay_in_full(method="cash")
+        with self.captureOnCommitCallbacks(execute=True):
+            first = self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+            )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        # Invoice is now CANCELLED, not PAID — Refund.record()'s own
+        # status guard rejects it, same as any already-refunded invoice.
+        second = self.client.post(
+            f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_calling_reverse_for_refund_event_twice_does_not_double_reverse(self):
+        """
+        Idempotency guard, proven directly against cancellations.
+        reverse_for_refund_event() itself — same reasoning as every
+        other idempotency test this sprint: going through
+        default_bus.publish() twice for the same event_id would hit
+        Outbox's own unique constraint first, so the guard is tested
+        by calling the function directly instead.
+        """
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+
+        refund_event = InvoiceRefunded(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            refund_id=uuid.uuid4(), issued_event_id=invoice.issued_event_id,
+            amount=Decimal("250000.00"), method="cash",
+        )
+        cancellations.reverse_for_refund_event(refund_event)
+        cancellations.reverse_for_refund_event(refund_event)  # same event, called again directly
+
+        self.assertEqual(
+            JournalEntry.objects.filter(reference_event_id=refund_event.event_id).count(), 1,
+        )
+
+    def test_status_patch_to_cancelled_on_paid_invoice_points_at_refund_endpoint(self):
+        """
+        The old guard on InvoiceStatusUpdateView still blocks the raw
+        status PATCH for a paid invoice — confirms the message was
+        actually updated to reference the new endpoint, not just that
+        the block still exists (already covered elsewhere).
+        """
+        self._pay_in_full(method="cash")
+        resp = self.client.patch(
+            f"/api/invoices/{self.invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("refund", resp.data["message"].lower())
