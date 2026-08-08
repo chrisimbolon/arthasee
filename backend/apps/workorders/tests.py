@@ -25,6 +25,7 @@ class WorkOrderAPITestBase(APITestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.workorders@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,

@@ -19,6 +19,7 @@ from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -30,6 +31,7 @@ class PaymentsAPITestBase(APITestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.payments@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,

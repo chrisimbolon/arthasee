@@ -9,6 +9,7 @@ from apps.inventory.models import Part, PartUsage, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.core.management import call_command
 from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework import status
@@ -21,6 +22,15 @@ class InvoicingAPITestBase(APITestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Now required — AccountingEventHandler is permanently
+        # subscribed to default_bus from the moment apps.accounting's
+        # AppConfig.ready() runs, for the rest of this test process.
+        # Every InvoiceIssued this file's tests publish now also
+        # attempts a real posting; without a seeded Chart of Accounts,
+        # that attempt fails loudly (Outbox row marked FAILED, not
+        # silently skipped) — this line keeps that failure from
+        # leaking into tests that aren't actually about accounting.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.invoicing@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
