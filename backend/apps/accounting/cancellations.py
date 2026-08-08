@@ -2,31 +2,38 @@
 # === backend/apps/accounting/cancellations.py ===
 # =============================================================================
 """
-Arthasee — Reversal & Cancellation Posting (Task 2.3, Half A)
+Arthasee — Reversal & Cancellation Posting (Task 2.3)
 
 Genuinely different concern from posting_engine.py / journal_generator.py
 — those post NEW economic facts from domain events, using zero ORM
 queries by design (see posting_engine.py's own module docstring).
 This file reverses a PREVIOUSLY posted fact when a billing document
-gets cancelled, which fundamentally REQUIRES a database lookup — the
-original JournalEntry has to actually be found before anything can
-be reversed. Deliberately not forced into posting_engine.py's
-query-free shape; this gets its own file, exactly as Sprint Plan
-v1.1's own Task 2.3 already specified.
+gets cancelled or refunded, which fundamentally REQUIRES a database
+lookup — the original JournalEntry has to actually be found before
+anything can be reversed.
 
-Handles InvoiceCancelled only, for now (Half A — unpaid invoices).
-InvoiceRefunded (Half B, paid invoices) is a deliberately separate,
-not-yet-built event with its own bespoke reversal shape — it credits
-Cash/Bank, not AR, so it can't reuse the generic line-flip below.
+Two reversal shapes, not one — reverse_for_event() (Half A, unpaid
+cancellation) and reverse_for_refund_event() (Half B, paid refund)
+are deliberately separate functions, not a shared "reverse whatever
+you find" helper. By the time an invoice reaches PAID, Accounts
+Receivable is already correctly at zero (cleared by the
+PaymentReceived postings that got it there) — Half A's generic
+line-flip would re-credit AR and push it negative if applied to a
+paid invoice's original entry. Half B touches only the revenue lines
+and credits Cash/Bank instead. Same underlying JournalEntry.post()
+write path, genuinely different accounting logic above it.
 """
-from apps.accounting.models import JournalEntry
+from decimal import Decimal
+
+from apps.accounting.models import Account, JournalEntry
+from apps.accounting.posting_engine import cash_or_bank_account_code
 from apps.organizations.models import Organization
 
 
 def reverse_for_event(event) -> JournalEntry | None:
     """
-    Returns the reversing JournalEntry, or None if there was nothing
-    to reverse:
+    Task 2.3, Half A — unpaid invoice cancellation. Returns the
+    reversing JournalEntry, or None if there was nothing to reverse:
       - event.issued_event_id is None — a legacy invoice issued
         before that field existed, or one whose original
         InvoiceIssued never actually posted (e.g. the Chart of
@@ -35,8 +42,7 @@ def reverse_for_event(event) -> JournalEntry | None:
         "original posting never really happened" case, found instead
         of assumed.
       - This cancellation was already reversed before (idempotency
-        guard, same discipline as journal_generator.post_for_event —
-        checked first, before any lookup work happens).
+        guard, checked first, before any lookup work happens).
     """
     if JournalEntry.objects.filter(reference_event_id=event.event_id).exists():
         return None
@@ -55,9 +61,7 @@ def reverse_for_event(event) -> JournalEntry | None:
     # ACTUALLY posted is exactly what gets undone, for any number of
     # lines or accounts — no need to hardcode 4001/4002 here and risk
     # drifting from what InvoiceIssued really posted for this
-    # specific invoice (a labor-only or parts-only invoice only ever
-    # had one revenue line to begin with — this handles that
-    # correctly without any special-casing).
+    # specific invoice.
     lines = [
         {
             "account": line.account,
@@ -74,5 +78,68 @@ def reverse_for_event(event) -> JournalEntry | None:
         event_type=event.event_type,
         reference_event_id=event.event_id,
         memo=f"Reversal of {original.entry_number} — invoice cancelled",
+        lines=lines,
+    )
+
+
+def reverse_for_refund_event(event) -> JournalEntry | None:
+    """
+    Task 2.3, Half B — paid invoice refund. Bespoke, NOT a reuse of
+    reverse_for_event()'s generic flip — see this module's own
+    docstring for exactly why. Touches only the revenue lines of the
+    original InvoiceIssued posting, crediting Cash(1001) or
+    Bank(1101) based on the refund's own method (independent of
+    whatever method the original payment used).
+
+    Same three no-op cases as reverse_for_event(): already reversed,
+    issued_event_id is None, or no original entry found.
+    """
+    if JournalEntry.objects.filter(reference_event_id=event.event_id).exists():
+        return None
+
+    if event.issued_event_id is None:
+        return None
+
+    original = JournalEntry.objects.filter(reference_event_id=event.issued_event_id).first()
+    if original is None:
+        return None
+
+    organization = Organization.objects.get(id=event.organization_id)
+
+    # Every credit line on an InvoiceIssued-sourced entry IS a
+    # revenue line, by construction — posting_engine.resolve()'s own
+    # InvoiceIssued rule always shapes it Dr AR (debit) / Cr Service
+    # + Cr Parts Revenue (credits). Filtering for credits here
+    # naturally excludes the AR debit line without hardcoding
+    # 4001/4002 and risking drift from what was really posted.
+    revenue_lines = [line for line in original.lines.all() if line.credit_amount > 0]
+    total_revenue = sum((line.credit_amount for line in revenue_lines), Decimal("0"))
+
+    if total_revenue <= Decimal("0"):
+        # Structurally shouldn't happen — an InvoiceIssued entry
+        # always has at least one revenue credit line, since
+        # JournalEntry.post() itself refuses a zero-total posting —
+        # checked anyway rather than silently posting nothing for a
+        # real refund.
+        return None
+
+    lines = [
+        {"account": line.account, "debit": line.credit_amount, "credit": None}
+        for line in revenue_lines
+    ] + [
+        {
+            "account": Account.resolve(organization, cash_or_bank_account_code(event.method)),
+            "debit": None,
+            "credit": total_revenue,
+        },
+    ]
+
+    return JournalEntry.post(
+        organization=organization,
+        posting_date=event.occurred_at.date(),
+        source=JournalEntry.Source.DOMAIN_EVENT,
+        event_type=event.event_type,
+        reference_event_id=event.event_id,
+        memo=f"Refund of {original.entry_number} — invoice refunded",
         lines=lines,
     )

@@ -11,14 +11,9 @@ Two handlers, two bounded concerns — matching EventHandler's own
     WorkOrderCompleted, InvoiceIssued, PaymentReceived) via
     posting_engine.py/journal_generator.py.
   - CancellationEventHandler reverses PREVIOUSLY posted facts
-    (InvoiceCancelled, and InvoiceRefunded once Task 2.3 Half B
-    lands) via cancellations.py.
-
-Deliberately not one handler branching internally — "post a new
-fact" and "reverse an old one" are different enough operations
-(different files, different DB-query shapes) that keeping them as
-separate handler classes keeps each one simple and single-purpose,
-even though both end up subscribed to the same bus.
+    (InvoiceCancelled, InvoiceRefunded) via cancellations.py — routed
+    by event_type, since the two reversal shapes are genuinely
+    different (see cancellations.py's own module docstring).
 """
 from apps.core.events.handlers import EventHandler
 from apps.core.events.interfaces import DomainEvent
@@ -34,7 +29,10 @@ class AccountingEventHandler(EventHandler):
 
 
 class CancellationEventHandler(EventHandler):
-    handles = ("InvoiceCancelled",)  # InvoiceRefunded added when Task 2.3 Half B lands
+    handles = ("InvoiceCancelled", "InvoiceRefunded")
 
     def handle(self, event: DomainEvent) -> None:
-        cancellations.reverse_for_event(event)
+        if event.event_type == "InvoiceCancelled":
+            cancellations.reverse_for_event(event)
+        elif event.event_type == "InvoiceRefunded":
+            cancellations.reverse_for_refund_event(event)
