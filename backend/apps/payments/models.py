@@ -4,20 +4,26 @@
 """
 Arthasee — Payments
 
-New domain, not an extraction — apps.invoicing never had a real
-Payment model. It had one overwritable Invoice.deposit_amount field
-that nothing in invoicing/views.py or serializers.py ever actually
-writes to, and a status field any authenticated user could PATCH
-straight to "PAID" with zero connection to real money received (see
-InvoiceStatusUpdateView, apps.invoicing.views — fixed alongside this
-app). This app is the real fix for that gap, independent of Sprint
-2's own need for a PaymentReceived domain event.
+Three real write paths now: Payment.record() (money in from
+customers), Refund.record() (money back to customers), and
+SupplierPayment.record() (money out to suppliers — Sprint 3, Task
+3.3). All three mirror JournalEntry.post() / WorkOrder.close()'s own
+shape: each owns its own transaction.atomic(), validates before
+writing anything, and each is the ONLY place its respective status
+transition happens anywhere in the system.
 
-Payment.record() and Refund.record() are the two real write paths —
-mirror JournalEntry.post() and WorkOrder.close()'s own shape: each
-owns its own transaction.atomic(), validates before writing anything,
-and each is the ONLY place its respective Invoice.status transition
-happens anywhere in the system.
+SupplierPayment lives here, not in apps.purchasing, per the Roadmap's
+own posting matrix — it lists SupplierPaymentMade under the payments
+domain, not purchasing. This app is already "all real money
+movement"; a payment out to a supplier is the natural third leg of
+that same concern, not a purchasing concern. Reuses
+Payment.METHOD_CHOICES directly, same as Refund already does.
+
+Stage 1 of 2 (Sprint 3) — SupplierPayment.record()'s real event
+publish is a stubbed comment, same precedent as Payment.record()
+itself when it first shipped; Stage 2 fills in
+apps.payments.events.SupplierPaymentMade and wires it into the
+posting engine.
 """
 import uuid
 from decimal import Decimal
@@ -134,18 +140,13 @@ class Payment(TenantScopedModel):
 class Refund(TenantScopedModel):
     """
     One real refund issued against one fully-PAID Invoice — the
-    inverse of Payment. Reuses Payment.METHOD_CHOICES directly rather
-    than duplicating the list; a refund's own method is genuinely
-    independent of how the original payment(s) came in (paid by
-    card, refunded via bank transfer is completely normal — see
-    Refund.record()'s own docstring).
+    inverse of Payment. Reuses Payment.METHOD_CHOICES directly; a
+    refund's own method is genuinely independent of how the original
+    payment(s) came in.
 
-    Deliberately full-invoice-only for now (Task 2.3, Half B's own
-    scope) — Refund.record() requires status == "PAID" and always
-    refunds the invoice's full total_paid, never a partial amount.
-    Cancelling a PARTIALLY paid invoice is deliberately still blocked
-    (see InvoiceStatusUpdateView's own guard) until that's explicitly
-    scoped as its own piece of work.
+    Deliberately full-invoice-only — Refund.record() requires status
+    == "PAID" and always refunds the invoice's full total_paid, never
+    a partial amount.
     """
     id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     invoice = models.ForeignKey(
@@ -184,17 +185,12 @@ class Refund(TenantScopedModel):
         """
         The one real entry point for recording a refund — never
         construct Refund directly. Deliberately no `amount` argument:
-        the refund always covers the invoice's full total_paid,
-        computed here, never a caller-supplied partial figure — see
-        class docstring for why.
+        the refund always covers the invoice's full total_paid.
 
         Sets Invoice.status to "CANCELLED" the moment the refund is
         recorded — same "one action does both the money and the
         status" symmetry as Payment.record()'s own transition to
-        PAID, just inverted. This is the ONLY place a PAID invoice
-        can ever become CANCELLED — InvoiceStatusUpdateView's own
-        guard blocks that transition through the generic status PATCH
-        entirely, redirecting here instead.
+        PAID, just inverted.
         """
         if invoice.status != "PAID":
             raise ValueError(
@@ -205,11 +201,6 @@ class Refund(TenantScopedModel):
 
         amount = invoice.total_paid
         if amount <= Decimal("0"):
-            # Should be structurally impossible — status == "PAID"
-            # implies total_paid fully covers total, which is > 0 by
-            # JournalEntry.post()'s own zero-total guard on the
-            # original InvoiceIssued posting. Checked anyway, fail
-            # loudly rather than silently create a $0 refund.
             raise ValueError("Invoice ini tidak memiliki riwayat pembayaran untuk di-refund.")
 
         with transaction.atomic():
@@ -239,3 +230,90 @@ class Refund(TenantScopedModel):
             ))
 
         return refund
+
+
+class SupplierPayment(TenantScopedModel):
+    """
+    One real payment made TO a supplier against one SupplierInvoice
+    (Sprint 3, Task 3.3) — mirrors Refund's own shape exactly
+    (full-amount-only, per Chris's own call), not Payment's partial-
+    amount support. Reuses Payment.METHOD_CHOICES directly, same as
+    Refund does — no reason to invent a third copy of the same list.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    supplier_invoice = models.ForeignKey(
+        "purchasing.SupplierInvoice", on_delete=models.PROTECT, related_name="supplier_payments",
+        verbose_name="Invoice Supplier",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Jumlah")
+    method = models.CharField(
+        max_length=20, choices=Payment.METHOD_CHOICES, default="bank_transfer", verbose_name="Metode",
+    )
+    paid_at = models.DateTimeField(verbose_name="Waktu Dibayar")
+    reference = models.CharField(
+        max_length=100, blank=True, verbose_name="Referensi",
+        help_text="Nomor transfer, referensi pembayaran, dll — opsional.",
+    )
+    notes = models.TextField(blank=True, verbose_name="Catatan")
+    paid_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="Dibayar Oleh",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Supplier Payment"
+        verbose_name_plural  = "Supplier Payments"
+        ordering             = ["paid_at"]
+
+    def __str__(self):
+        return f"{self.supplier_invoice.number} — {self.amount} ({self.get_method_display()})"
+
+    def _resolve_organization(self):
+        return self.supplier_invoice.organization
+
+    @classmethod
+    def record(cls, *, supplier_invoice, method="bank_transfer", paid_at=None, reference="", notes="", paid_by=None):
+        """
+        The one real entry point — never construct SupplierPayment
+        directly. Full-invoice-only: amount is always
+        supplier_invoice.amount, not an argument.
+
+        Sets SupplierInvoice.status to "PAID" the moment payment is
+        recorded — same "one action does both the money and the
+        status" symmetry as Payment.record()/Refund.record().
+        """
+        if supplier_invoice.status != "UNPAID":
+            raise ValueError(
+                f"Invoice supplier ini berstatus '{supplier_invoice.get_status_display()}' — "
+                f"tidak bisa dibayar lagi."
+            )
+
+        amount = supplier_invoice.amount
+
+        with transaction.atomic():
+            payment = cls.objects.create(
+                organization=supplier_invoice.organization,
+                supplier_invoice=supplier_invoice,
+                amount=amount,
+                method=method,
+                paid_at=paid_at or timezone.now(),
+                reference=reference,
+                notes=notes,
+                paid_by=paid_by,
+            )
+
+            supplier_invoice.status = "PAID"
+            supplier_invoice.save(update_fields=["status"])
+
+            # --- Stage 2 hook point -----------------------------------------
+            # from apps.core.events.bus import default_bus
+            # from apps.payments.events import SupplierPaymentMade
+            # default_bus.publish(SupplierPaymentMade(
+            #     organization_id=supplier_invoice.organization_id,
+            #     supplier_invoice_id=supplier_invoice.id,
+            #     supplier_payment_id=payment.id, amount=amount, method=method,
+            # ))
+            # ------------------------------------------------------------------
+
+        return payment

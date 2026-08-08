@@ -3,7 +3,7 @@
 # =============================================================================
 from django.contrib import admin
 
-from .models import Payment, Refund
+from .models import Payment, Refund, SupplierPayment
 
 
 @admin.register(Payment)
@@ -24,10 +24,19 @@ class RefundAdmin(admin.ModelAdmin):
     list_filter   = ("method", "organization")
     search_fields = ("invoice__number", "reference")
     ordering      = ("-refunded_at",)
-    # Refunds are only ever created via Refund.record() — admin is
-    # for inspection/audit, matching PaymentAdmin's own read-only
-    # posture.
     readonly_fields = (
         "invoice", "amount", "method", "refunded_at",
         "reference", "notes", "refunded_by", "organization",
+    )
+
+
+@admin.register(SupplierPayment)
+class SupplierPaymentAdmin(admin.ModelAdmin):
+    list_display  = ("supplier_invoice", "amount", "method", "paid_at", "paid_by", "organization")
+    list_filter   = ("method", "organization")
+    search_fields = ("supplier_invoice__number", "reference")
+    ordering      = ("-paid_at",)
+    readonly_fields = (
+        "supplier_invoice", "amount", "method", "paid_at",
+        "reference", "notes", "paid_by", "organization",
     )
