@@ -135,6 +135,7 @@ class Invoice(TenantScopedModel):
 
     status          = models.CharField(max_length=20, choices=STATUS_CHOICES, default="DRAFT", verbose_name="Status")
     deposit_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name="Deposit")
+    issued_event_id = models.UUIDField(null=True, blank=True, editable=False, verbose_name="ID Event Penerbitan")
 
     created_by = models.ForeignKey(
         "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
