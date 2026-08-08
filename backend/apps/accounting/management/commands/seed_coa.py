@@ -2,50 +2,22 @@
 # === backend/apps/accounting/management/commands/seed_coa.py ===
 # =============================================================================
 """
-Arthasee — Seed Chart of Accounts
+Arthasee — Seed Chart of Accounts (CLI)
 
-Idempotent by design — get_or_create per (organization, code), safe
-to run repeatedly (e.g. after STANDARD_COA gains a new account later)
-without duplicating anything or overwriting a name/type a shop's own
-accountant has since customized in Settings.
+The STANDARD_COA list and the actual seeding logic now live in
+apps.accounting.coa — this command is a thin CLI wrapper around
+seed_chart_of_accounts(), the same function
+apps.authentication.views.RegisterView.post() calls automatically on
+real signup. One implementation, two callers — not two copies of the
+same list that could quietly drift apart.
 
 Usage:
     python manage.py seed_coa                      # every active Organization
     python manage.py seed_coa --organization <uuid>  # one specific Organization
 """
-from apps.accounting.models import Account
+from apps.accounting.coa import STANDARD_COA, seed_chart_of_accounts
 from apps.organizations.models import Organization
 from django.core.management.base import BaseCommand, CommandError
-
-# (code, name, account_type, normal_balance) — matches Roadmap v2.2's
-# COA Blueprint exactly, including 2010 (Accrued Inventory / GR-IR
-# clearing) and 2101 (Tax Payable — seeded now as a placeholder;
-# Roadmap v2.2 Open Decision #4 explicitly defers wiring any posting
-# rule to it until a later phase).
-STANDARD_COA = [
-    ("1001", "Cash",                              Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1101", "Bank",                               Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1201", "Accounts Receivable",                Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1301", "Inventory",                          Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1302", "Work In Progress (WIP)",              Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1401", "Fixed Assets",                        Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("2001", "Accounts Payable",                    Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
-    ("2010", "Accrued Inventory (Unbilled AP)",      Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
-    ("2101", "Tax Payable",                         Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
-    ("3001", "Owner Capital",                        Account.AccountType.EQUITY,    Account.NormalBalance.CREDIT),
-    ("3101", "Retained Earnings",                    Account.AccountType.EQUITY,    Account.NormalBalance.CREDIT),
-    ("4001", "Service Revenue",                      Account.AccountType.REVENUE,   Account.NormalBalance.CREDIT),
-    ("4002", "Parts Revenue",                        Account.AccountType.REVENUE,   Account.NormalBalance.CREDIT),
-    ("4003", "Sublet / Outsourcing Revenue",         Account.AccountType.REVENUE,   Account.NormalBalance.CREDIT),
-    ("5001", "HPP Sparepart (COGS)",                 Account.AccountType.COGS,      Account.NormalBalance.DEBIT),
-    ("5002", "HPP Sublet / Jasa Luar",                Account.AccountType.COGS,      Account.NormalBalance.DEBIT),
-    ("5003", "HPP Pelumas & Fluida",                  Account.AccountType.COGS,      Account.NormalBalance.DEBIT),
-    ("6001", "Beban Gaji",                            Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6002", "Beban Sewa",                            Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6003", "Beban Listrik, Air, Telp",               Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6004", "Beban Penyusutan",                      Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6005", "Beban Lain-lain",                       Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-]
 
 
 class Command(BaseCommand):
@@ -72,33 +44,10 @@ class Command(BaseCommand):
                 return
 
         for org in organizations:
-            created_count = 0
-            for code, name, account_type, normal_balance in STANDARD_COA:
-                _, created = Account.objects.get_or_create(
-                    organization=org, code=code,
-                    defaults={
-                        "name": name,
-                        "account_type": account_type,
-                        "normal_balance": normal_balance,
-                    },
-                )
-                if created:
-                    created_count += 1
-
+            created_count = seed_chart_of_accounts(org)
             already_existed = len(STANDARD_COA) - created_count
-            # Guarded on verbosity, read from `options` — this is the
-            # correction from an earlier, wrong attempt that used
-            # self.verbosity, which is NOT an attribute BaseCommand
-            # sets for you automatically (that claim was mine and it
-            # was wrong, caught by your own test run, not verified by
-            # me before shipping it). options["verbosity"] is the
-            # correct, standard way to read it inside handle() —
-            # Django's own --verbosity argument is always present in
-            # options, default 1. Real CLI use
-            # (`python manage.py seed_coa`) still prints normally;
-            # test fixtures calling this via
-            # call_command(..., verbosity=0) now stay quiet, instead
-            # of printing this line once per test that uses them.
+            # options["verbosity"] — not self.verbosity, that's not
+            # an attribute BaseCommand sets for you automatically.
             if options["verbosity"] >= 1:
                 self.stdout.write(self.style.SUCCESS(
                     f"{org.name}: {created_count} account(s) created, "

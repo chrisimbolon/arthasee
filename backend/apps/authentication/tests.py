@@ -1,10 +1,10 @@
 # =============================================================================
 # === backend/apps/authentication/tests.py ===
 # =============================================================================
+from apps.accounting.models import Account
+from apps.organizations.models import Organization, OrganizationMembership
 from rest_framework import status
 from rest_framework.test import APITestCase
-
-from apps.organizations.models import Organization, OrganizationMembership
 
 from .models import CustomUser
 
@@ -52,6 +52,40 @@ class RegisterViewTests(APITestCase):
         )
         self.assertEqual(me_resp.status_code, status.HTTP_200_OK)
         self.assertEqual(me_resp.data["user"]["email"], "owner.register@test.id")
+
+    def test_register_seeds_chart_of_accounts(self):
+        """
+        Proves the actual new behavior through the real endpoint —
+        apps.accounting.tests already covers seed_chart_of_accounts()
+        in isolation; this proves a real signup through this exact
+        view genuinely results in a seeded ledger, not just that the
+        underlying function works when called directly.
+        """
+        resp = self.client.post("/api/auth/register/", self._payload(), format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        org = Organization.objects.get(name="Arya Motor Test")
+        self.assertEqual(Account.objects.filter(organization=org).count(), 22)
+
+    def test_register_still_creates_nothing_on_duplicate_email_with_seeding_added(self):
+        """
+        The existing atomicity guarantee (see
+        test_duplicate_email_rejected above) must still hold with the
+        new COA-seeding call added inside the same transaction.atomic()
+        block — this is the one guarantee that call could plausibly
+        have broken if it had been placed outside the atomic block by
+        mistake. Same request shape as test_duplicate_email_rejected,
+        with an explicit check that no Organization leaked through
+        on the rejected second attempt.
+        """
+        self.client.post("/api/auth/register/", self._payload(), format="json")
+        resp = self.client.post(
+            "/api/auth/register/",
+            self._payload(organization_name="Should Not Exist"),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Organization.objects.filter(name="Should Not Exist").exists())
 
     def test_duplicate_email_rejected(self):
         self.client.post("/api/auth/register/", self._payload(), format="json")

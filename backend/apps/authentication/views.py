@@ -1,14 +1,13 @@
 # =============================================================================
 # === backend/apps/authentication/views.py ===
 # =============================================================================
+from apps.organizations.models import Organization, OrganizationMembership
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-
-from apps.organizations.models import Organization, OrganizationMembership
 
 from .models import CustomUser
 from .serializers import RegisterSerializer, UserSerializer
@@ -46,6 +45,25 @@ class RegisterView(APIView):
             OrganizationMembership.objects.create(
                 organization=org, user=user, role="owner", is_active=True,
             )
+
+            # Real production signup gets a seeded Chart of Accounts
+            # automatically — every domain event this shop's staff
+            # ever triggers (PartConsumed, WorkOrderCompleted,
+            # InvoiceIssued, PaymentReceived) needs real Account rows
+            # to post against, or AccountingEventHandler fails loudly
+            # rather than silently (see
+            # journal_generator._get_account's own error message).
+            # Same "all three rows, or none" philosophy this method
+            # already applies to user/org/membership — a shop that
+            # exists without a seeded ledger is as broken as one
+            # without an owner. Local import, not module-level —
+            # matches this codebase's own established convention for
+            # cross-app dependencies (e.g. WorkOrder.close()'s own
+            # import of ServiceRecord), keeping the dependency
+            # direction obvious without coupling apps.authentication
+            # to apps.accounting at import time.
+            from apps.accounting.coa import seed_chart_of_accounts
+            seed_chart_of_accounts(org)
 
         refresh = RefreshToken.for_user(user)
         return Response({
