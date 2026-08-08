@@ -1,11 +1,15 @@
 # =============================================================================
 # === backend/apps/invoicing/tests.py ===
 # =============================================================================
+import uuid
 from decimal import Decimal
 
+from apps.accounting import cancellations
+from apps.accounting.models import Account, JournalEntry
 from apps.authentication.models import CustomUser
 from apps.core.models import Outbox
 from apps.inventory.models import Part, PartUsage, StockAdjustment
+from apps.invoicing.events import InvoiceCancelled
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
@@ -357,6 +361,133 @@ class InvoiceIssuedEventTests(InvoicingAPITestBase):
 
         resp = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "DRAFT"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+class InvoiceCancelledEventTests(InvoicingAPITestBase):
+    """
+    Task 2.3, Half A — proves an unpaid, issued invoice's cancellation
+    actually reverses the exact posting InvoiceIssued made (net
+    effect on every touched account is zero), not just that the
+    invoice's status field flips to CANCELLED.
+    """
+
+    def _issue_mixed_invoice(self):
+        """
+        Same real mixed part+labor shape as InvoiceIssuedEventTests'
+        own _issued_invoice() helper — one part line, one labor line,
+        so the reversal has to correctly flip a real 3-line entry,
+        not a trivial 2-line one.
+        """
+        PartUsage.objects.create(
+            organization=self.org, service_record=self.service_record, part=self.part,
+            quantity=Decimal("1.00"), unit_price_at_time=Decimal("250000.00"),
+        )
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 100000}]},
+            format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        return invoice_id
+
+    def test_cancelling_unpaid_issued_invoice_reverses_the_original_posting(self):
+        invoice_id = self._issue_mixed_invoice()
+
+        # Confirm the original posting really happened first — the
+        # reversal proof is meaningless if there was nothing to reverse.
+        self.assertEqual(JournalEntry.objects.filter(event_type="InvoiceIssued").count(), 1)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(JournalEntry.objects.filter(event_type="InvoiceCancelled").count(), 1)
+        reversal = JournalEntry.objects.get(event_type="InvoiceCancelled")
+        self.assertEqual(reversal.lines.count(), 3)
+
+        # The real proof — net effect across BOTH entries (the
+        # original issue + this reversal) must be exactly zero on
+        # every account either one touched.
+        ar = Account.objects.get(organization=self.org, code="1201")
+        service_rev = Account.objects.get(organization=self.org, code="4001")
+        parts_rev = Account.objects.get(organization=self.org, code="4002")
+        self.assertEqual(ar.balance(), Decimal("0.00"))
+        self.assertEqual(service_rev.balance(), Decimal("0.00"))
+        self.assertEqual(parts_rev.balance(), Decimal("0.00"))
+
+    def test_cancelling_draft_invoice_does_not_publish_invoice_cancelled(self):
+        """
+        A DRAFT invoice cancelled directly never had anything posted
+        for it — InvoiceIssued never fired. Publishing a cancellation
+        event here would be pure audit-trail noise with nothing to
+        reverse.
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(Outbox.objects.filter(event_type="InvoiceCancelled").count(), 0)
+
+    def test_cancelling_with_no_matching_original_entry_does_not_crash(self):
+        """
+        Simulates a real historical edge case — an invoice whose
+        issued_event_id doesn't correspond to any JournalEntry that
+        actually exists (e.g. the original InvoiceIssued failed to
+        post because the Chart of Accounts wasn't seeded yet at the
+        time). Cancellation itself must still succeed; the reversal
+        must simply not happen, not crash the request.
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+        invoice.issued_event_id = uuid.uuid4()  # a real UUID, matching nothing
+        invoice.save(update_fields=["issued_event_id"])
+
+        journal_count_before = JournalEntry.objects.count()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(JournalEntry.objects.count(), journal_count_before)  # nothing new posted
+        row = Outbox.objects.filter(event_type="InvoiceCancelled").first()
+        self.assertIsNotNone(row)
+        # Succeeded — the handler ran, it just had nothing to reverse.
+        # This is NOT a failure case, same distinction already proven
+        # for WorkOrderCompleted's zero-amount case.
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+
+    def test_calling_reverse_for_event_twice_does_not_double_reverse(self):
+        """
+        Idempotency guard, proven directly against cancellations.
+        reverse_for_event() itself — same reasoning and same pattern
+        as journal_generator.post_for_event()'s own idempotency test:
+        going through default_bus.publish() twice for the same
+        event_id would hit Outbox's own unique constraint first,
+        before ever reaching this guard, so the guard is tested by
+        calling the function directly instead.
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            issued_event_id=invoice.issued_event_id,
+        )
+        cancellations.reverse_for_event(cancel_event)
+        cancellations.reverse_for_event(cancel_event)  # same event, called again directly
+
+        self.assertEqual(
+            JournalEntry.objects.filter(reference_event_id=cancel_event.event_id).count(), 1,
+        )
 
 class InvoiceTenantIsolationTests(InvoicingAPITestBase):
 
