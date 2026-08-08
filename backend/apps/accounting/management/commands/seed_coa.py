@@ -86,7 +86,21 @@ class Command(BaseCommand):
                     created_count += 1
 
             already_existed = len(STANDARD_COA) - created_count
-            self.stdout.write(self.style.SUCCESS(
-                f"{org.name}: {created_count} account(s) created, "
-                f"{already_existed} already existed."
-            ))
+            # Guarded on verbosity, read from `options` — this is the
+            # correction from an earlier, wrong attempt that used
+            # self.verbosity, which is NOT an attribute BaseCommand
+            # sets for you automatically (that claim was mine and it
+            # was wrong, caught by your own test run, not verified by
+            # me before shipping it). options["verbosity"] is the
+            # correct, standard way to read it inside handle() —
+            # Django's own --verbosity argument is always present in
+            # options, default 1. Real CLI use
+            # (`python manage.py seed_coa`) still prints normally;
+            # test fixtures calling this via
+            # call_command(..., verbosity=0) now stay quiet, instead
+            # of printing this line once per test that uses them.
+            if options["verbosity"] >= 1:
+                self.stdout.write(self.style.SUCCESS(
+                    f"{org.name}: {created_count} account(s) created, "
+                    f"{already_existed} already existed."
+                ))
