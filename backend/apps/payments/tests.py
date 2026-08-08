@@ -405,3 +405,55 @@ class InvoiceRefundTests(PaymentsAPITestBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
         self.assertIn("refund", resp.data["message"].lower())
+
+    def test_missing_cash_account_marks_outbox_failed_not_silent(self):
+        """
+        Closes the gap flagged after Half B shipped — Account.resolve()
+        is called from TWO places now: journal_generator.py (already
+        proven to fail loudly via
+        apps.accounting.tests.PostingEngineIntegrationTests) and
+        cancellations.py's own refund reversal, for the cash/bank
+        credit line specifically. Proves the second call site
+        degrades the exact same correct way: Outbox marked FAILED
+        with the error captured, no partial JournalEntry ever created
+        — not a silent, incomplete reversal.
+
+        Pays via bank_transfer specifically, not cash — Cash(1001)
+        then has zero real JournalLine history for this org, so it
+        can actually be deleted for the test (Account has
+        on_delete=PROTECT; deleting an account with real postings
+        against it would raise ProtectedError, which is correct
+        behavior, not something to route around). The refund is then
+        requested via method="cash" — deliberately mismatched from
+        the payment's own method — forcing the reversal to need
+        exactly the account that's now missing.
+
+        The refund itself still succeeds (201, invoice really becomes
+        CANCELLED) even though the reversal posting fails — the
+        handler runs AFTER Refund.record()'s own transaction has
+        already committed (deferred via transaction.on_commit()), so
+        its failure can't roll back the business action that
+        triggered it. Same deliberate guarantee this whole event
+        system has had since Sprint 1, not a new inconsistency — the
+        accounting reversal failing is a real, visible problem for
+        someone to go fix (a FAILED Outbox row, an unreversed
+        ledger), not a reason to have blocked the refund itself.
+        """
+        self._pay_in_full(method="bank_transfer")
+
+        Account.objects.get(organization=self.org, code="1001").delete()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "CANCELLED")  # the refund itself still went through
+
+        row = Outbox.objects.get(event_type="InvoiceRefunded", payload__invoice_id=str(invoice.id))
+        self.assertEqual(row.status, Outbox.Status.FAILED)
+        self.assertIn("CancellationEventHandler", row.last_error)
+
+        self.assertFalse(JournalEntry.objects.filter(event_type="InvoiceRefunded").exists())
