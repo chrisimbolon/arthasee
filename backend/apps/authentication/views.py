@@ -47,23 +47,22 @@ class RegisterView(APIView):
             )
 
             # Real production signup gets a seeded Chart of Accounts
-            # automatically — every domain event this shop's staff
-            # ever triggers (PartConsumed, WorkOrderCompleted,
-            # InvoiceIssued, PaymentReceived) needs real Account rows
-            # to post against, or AccountingEventHandler fails loudly
-            # rather than silently (see
-            # journal_generator._get_account's own error message).
-            # Same "all three rows, or none" philosophy this method
-            # already applies to user/org/membership — a shop that
-            # exists without a seeded ledger is as broken as one
-            # without an owner. Local import, not module-level —
-            # matches this codebase's own established convention for
-            # cross-app dependencies (e.g. WorkOrder.close()'s own
-            # import of ServiceRecord), keeping the dependency
-            # direction obvious without coupling apps.authentication
-            # to apps.accounting at import time.
+            # AND a real Accounting Period automatically — every
+            # domain event this shop's staff ever triggers needs both
+            # to exist before JournalEntry.post() will accept
+            # anything (Task 4.3's own strict period-lock: no period
+            # covering a posting date is now a hard failure, not a
+            # silent pass-through). Same "all rows, or none"
+            # philosophy this method already applies to user/org/
+            # membership — a shop that exists without a seeded ledger
+            # OR without a period to post into is exactly as broken
+            # as one without an owner. Local imports, not module-
+            # level — matches this codebase's own established
+            # convention for cross-app dependencies.
             from apps.accounting.coa import seed_chart_of_accounts
+            from apps.accounting.periods import ensure_current_year_period
             seed_chart_of_accounts(org)
+            ensure_current_year_period(org)
 
         refresh = RefreshToken.for_user(user)
         return Response({
