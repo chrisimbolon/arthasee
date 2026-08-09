@@ -10,10 +10,12 @@ from decimal import Decimal
 from apps.accounting.models import Account
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, StockAdjustment
-from apps.organizations.models import Organization
+from apps.organizations.models import Organization, OrganizationMembership
 from apps.payments.models import SupplierPayment
 from django.core.management import call_command
 from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from .models import GoodsReceivedNote, Supplier, SupplierInvoice
 
@@ -296,3 +298,174 @@ class SupplierInvoiceReceivedEventTests(PurchasingModelTestBase):
         # assertion was written, not hidden or auto-corrected.
         self.assertEqual(accrued.balance(), Decimal("-25000.00"))
         self.assertEqual(ap.balance(), Decimal("475000.00"))
+
+class PurchasingAPITestBase(APITestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.purchasing.api@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+        self.part = Part.objects.create(
+            organization=self.org, name="Oli Mesin", unit="liter",
+            unit_price=Decimal("75000.00"), current_stock=Decimal("0"),
+        )
+        self.client.force_authenticate(user=self.owner)
+
+
+class SupplierAPITests(PurchasingAPITestBase):
+
+    def test_create_supplier(self):
+        resp = self.client.post("/api/suppliers/", {"name": "Supplier Baru"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["supplier"]["name"], "Supplier Baru")
+
+    def test_list_suppliers_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Purchasing API")
+        Supplier.objects.create(organization=other_org, name="Supplier Org Lain")
+
+        resp = self.client.get("/api/suppliers/")
+        names = [s["name"] for s in resp.data["suppliers"]]
+        self.assertIn("PT Sparepart Jaya", names)
+        self.assertNotIn("Supplier Org Lain", names)
+
+
+class GoodsReceivedNoteAPITests(PurchasingAPITestBase):
+
+    def test_create_grn_via_api_posts_real_journal_entry(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post("/api/goods-received-notes/", {
+                "supplier": str(self.supplier.id),
+                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+            }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("10.00"))
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        accrued   = Account.objects.get(organization=self.org, code="2010")
+        self.assertEqual(inventory.balance(), Decimal("450000.00"))
+        self.assertEqual(accrued.balance(), Decimal("450000.00"))
+
+    def test_create_grn_rejects_cross_tenant_part(self):
+        """
+        The real proof the UUIDField-not-PrimaryKeyRelatedField
+        design decision actually holds — referencing another shop's
+        Part must be structurally impossible, not just discouraged.
+        This is the single most important test in this whole batch.
+        """
+        other_org = Organization.objects.create(name="Bengkel Lain GRN Part")
+        other_part = Part.objects.create(
+            organization=other_org, name="Part Org Lain", unit="pcs",
+            unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
+        )
+
+        resp = self.client.post("/api/goods-received-notes/", {
+            "supplier": str(self.supplier.id),
+            "lines": [{"part": str(other_part.id), "quantity": "1.00", "unit_cost": "1000.00"}],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(GoodsReceivedNote.objects.exists())  # nothing partial got created
+
+    def test_create_grn_rejects_cross_tenant_supplier(self):
+        other_org = Organization.objects.create(name="Bengkel Lain GRN Supplier")
+        other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Org Lain")
+
+        resp = self.client.post("/api/goods-received-notes/", {
+            "supplier": str(other_supplier.id),
+            "lines": [{"part": str(self.part.id), "quantity": "1.00", "unit_cost": "1000.00"}],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_org_b_cannot_see_org_a_goods_received_notes(self):
+        GoodsReceivedNote.receive(
+            organization=self.org, supplier=self.supplier,
+            lines=[{"part": self.part, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
+        other_org = Organization.objects.create(name="Bengkel Lain GRN List")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.grn@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=other_org, user=other_owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/goods-received-notes/")
+        self.assertEqual(resp.data["goods_received_notes"], [])
+
+
+class SupplierInvoiceAPITests(PurchasingAPITestBase):
+
+    def test_full_round_trip_receive_invoice_and_pay(self):
+        """
+        The real end-to-end proof — receive goods, bill it, pay it,
+        all through the actual HTTP endpoints, confirming the ledger
+        is correct at every step, not just that each call returns
+        the right status code.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            grn_resp = self.client.post("/api/goods-received-notes/", {
+                "supplier": str(self.supplier.id),
+                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+            }, format="json")
+        grn_id = grn_resp.data["goods_received_note"]["id"]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            invoice_resp = self.client.post("/api/supplier-invoices/", {
+                "supplier": str(self.supplier.id),
+                "amount": "450000.00",
+                "invoice_date": "2026-08-09",
+                "goods_received_note_ids": [grn_id],
+            }, format="json")
+        self.assertEqual(invoice_resp.status_code, status.HTTP_201_CREATED)
+        supplier_invoice_id = invoice_resp.data["supplier_invoice"]["id"]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            pay_resp = self.client.post(
+                f"/api/supplier-invoices/{supplier_invoice_id}/pay/",
+                {"method": "bank_transfer"}, format="json",
+            )
+        self.assertEqual(pay_resp.status_code, status.HTTP_201_CREATED)
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        accrued   = Account.objects.get(organization=self.org, code="2010")
+        ap        = Account.objects.get(organization=self.org, code="2001")
+        bank      = Account.objects.get(organization=self.org, code="1101")
+
+        self.assertEqual(inventory.balance(), Decimal("450000.00"))  # real stock received
+        self.assertEqual(accrued.balance(), Decimal("0.00"))          # cleared by the invoice
+        self.assertEqual(ap.balance(), Decimal("0.00"))               # cleared by the payment
+        self.assertEqual(bank.balance(), Decimal("-450000.00"))       # real cash outflow
+
+    def test_invoice_endpoint_rejects_cross_tenant_grn(self):
+        other_org = Organization.objects.create(name="Bengkel Lain SINV GRN")
+        other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Org Lain")
+        other_part = Part.objects.create(
+            organization=other_org, name="Part Org Lain", unit="pcs",
+            unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
+        )
+        other_grn = GoodsReceivedNote.receive(
+            organization=other_org, supplier=other_supplier,
+            lines=[{"part": other_part, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
+
+        resp = self.client.post("/api/supplier-invoices/", {
+            "supplier": str(self.supplier.id),
+            "amount": "1000.00",
+            "invoice_date": "2026-08-09",
+            "goods_received_note_ids": [str(other_grn.id)],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(SupplierInvoice.objects.exists())
