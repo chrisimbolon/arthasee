@@ -83,17 +83,29 @@ class Account(TenantScopedModel):
     def __str__(self):
         return f"{self.code} — {self.name}"
 
-    def balance(self, *, as_of=None) -> Decimal:
+    def balance(self, *, since=None, as_of=None) -> Decimal:
         """
         Computed on the fly from JournalLine, the real source of
         truth — no denormalized running total on this model. Unlike
         Part.current_stock (a deliberate, documented exception to
         that rule elsewhere in this codebase), an Account's balance
-        feeds directly into real financial statements (Phase 4) —
+        feeds directly into real financial statements (Task 4.1) —
         getting a cached figure wrong would misstate them. The extra
         aggregate query is worth it.
+
+        `since`, added for Task 4.1's P&L/Balance-Sheet reporting —
+        without it, this is cumulative since the account's own
+        inception (as_of alone), correct for Trial Balance and
+        Balance Sheet. A Profit & Loss statement needs a genuine date
+        RANGE ("revenue THIS MONTH," not "revenue ever") — passing
+        since=X restricts to postings on or after that date. Fully
+        backward compatible: every existing caller across three
+        sprints only ever passes as_of=, so since=None (the default)
+        preserves today's exact behavior unchanged.
         """
         qs = JournalLine.objects.filter(account=self)
+        if since is not None:
+            qs = qs.filter(journal_entry__posting_date__gte=since)
         if as_of is not None:
             qs = qs.filter(journal_entry__posting_date__lte=as_of)
         totals = qs.aggregate(debit=Sum("debit_amount"), credit=Sum("credit_amount"))
