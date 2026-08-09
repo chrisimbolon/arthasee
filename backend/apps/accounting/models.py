@@ -289,6 +289,51 @@ class JournalEntry(TenantScopedModel):
                 )
 
         with transaction.atomic():
+            # Task 4.3 — Fiscal Period Lock. Auto-resolves the period
+            # for posting_date if the caller didn't already pass one
+            # (nobody has, historically — accounting_period has sat
+            # unused by every event handler since Sprint 1). Chris's
+            # own explicit call: NO period found is a hard failure,
+            # not a silent pass-through — "every posting must belong
+            # to a real period, no exceptions." This is what makes
+            # apps.accounting.periods.ensure_current_year_period() a
+            # genuine prerequisite for a new organization now, same
+            # as seed_chart_of_accounts() already was — see that
+            # function's own module docstring.
+            if accounting_period is None:
+                accounting_period = AccountingPeriod.objects.filter(
+                    organization=organization,
+                    start_date__lte=posting_date, end_date__gte=posting_date,
+                ).first()
+
+            if accounting_period is None:
+                raise ValueError(
+                    f"Tidak ada periode akuntansi yang mencakup tanggal "
+                    f"{posting_date} untuk organisasi '{organization.name}' — "
+                    f"buat AccountingPeriod yang mencakup tanggal ini sebelum "
+                    f"memposting jurnal."
+                )
+            if accounting_period.is_closed:
+                raise ValueError(
+                    f"Periode akuntansi {accounting_period.start_date}–"
+                    f"{accounting_period.end_date} sudah ditutup — tidak bisa "
+                    f"memposting jurnal apa pun ke periode ini."
+                )
+            # Locked blocks automatic (DOMAIN_EVENT) postings only —
+            # a manual adjusting journal (Task 4.4) can still post
+            # through a locked period, Chris's own explicit call.
+            # CLOSED, above, blocks everything unconditionally,
+            # including manual entries — a genuinely different,
+            # stronger state than locked, checked first and never
+            # bypassed by source.
+            if accounting_period.is_locked and source != cls.Source.MANUAL:
+                raise ValueError(
+                    f"Periode akuntansi {accounting_period.start_date}–"
+                    f"{accounting_period.end_date} sedang terkunci — hanya "
+                    f"jurnal manual (adjusting journal) yang bisa diposting "
+                    f"ke periode ini."
+                )
+
             entry = cls.objects.create(
                 organization=organization,
                 posting_date=posting_date,
