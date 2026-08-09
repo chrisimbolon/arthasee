@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from .models import Payment, Refund
+from .models import Payment, Refund, SupplierPayment
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -44,23 +44,38 @@ class RefundSerializer(serializers.ModelSerializer):
             "id", "invoice", "amount", "method", "refunded_at",
             "reference", "notes", "refunded_by", "refunded_by_name", "created_at",
         ]
-        # amount is read-only here too, but for a DIFFERENT reason
-        # than the others — it's not merely server-managed metadata,
-        # it's structurally computed (invoice.total_paid) and can
-        # never be supplied by a caller at all. See
-        # RefundRecordSerializer below, which has no amount field.
         read_only_fields = ["id", "invoice", "amount", "refunded_by", "refunded_by_name", "created_at"]
 
 
 class RefundRecordSerializer(serializers.Serializer):
     """
     Write-only input for POST /api/invoices/<id>/refund/. No amount
-    field — deliberately, per Task 2.3 Half B's own scope: a refund
-    always covers the invoice's full total_paid, never a caller-
-    supplied partial figure (Refund.record() computes it). Only HOW
-    the money went back is a real choice here, and it's genuinely
-    independent of whichever method(s) the original payment(s) used.
+    field — a refund always covers the invoice's full total_paid.
     """
     method    = serializers.ChoiceField(choices=Payment.METHOD_CHOICES, default="cash")
+    reference = serializers.CharField(required=False, allow_blank=True, default="")
+    notes     = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class SupplierPaymentSerializer(serializers.ModelSerializer):
+    paid_by_name = serializers.CharField(source="paid_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = SupplierPayment
+        fields = [
+            "id", "supplier_invoice", "amount", "method", "paid_at",
+            "reference", "notes", "paid_by", "paid_by_name", "created_at",
+        ]
+        read_only_fields = ["id", "supplier_invoice", "amount", "paid_by", "paid_by_name", "created_at"]
+
+
+class SupplierPaymentRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/supplier-invoices/<id>/pay/. No
+    amount field — mirrors RefundRecordSerializer exactly:
+    SupplierPayment.record() always pays supplier_invoice.amount in
+    full (Sprint 3, Task 3.3's own scope — full-payment-only).
+    """
+    method    = serializers.ChoiceField(choices=Payment.METHOD_CHOICES, default="bank_transfer")
     reference = serializers.CharField(required=False, allow_blank=True, default="")
     notes     = serializers.CharField(required=False, allow_blank=True, default="")
