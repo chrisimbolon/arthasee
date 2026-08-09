@@ -790,8 +790,8 @@ class ReportingAPITests(APITestCase):
     def test_profit_loss_accepts_explicit_date_range(self):
         resp = self.client.get("/api/accounting/profit-loss/?since=2026-01-01&as_of=2026-06-30")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["since"], "2026-01-01")
-
+        self.assertEqual(resp.data["since"], date(2026, 1, 1))
+        
     def test_balance_sheet_endpoint(self):
         resp = self.client.get("/api/accounting/balance-sheet/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
