@@ -806,3 +806,131 @@ class ReportingAPITests(APITestCase):
         resp = self.client.get("/api/accounting/aging-ap/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn("buckets", resp.data)
+
+class ManualJournalAPITests(APITestCase):
+    """
+    Task 4.4 — proves the authorization gate, the reason requirement,
+    balance validation surfacing cleanly through the API, the
+    control-account warning, and — the real payoff of Task 4.3's own
+    locked-vs-closed distinction — a manual journal actually posting
+    through a locked period via a real HTTP call, not just a direct
+    model call this time.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+        self.owner = CustomUser.objects.create_user(
+            email="owner.manualjournal@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+
+        self.staff = CustomUser.objects.create_user(
+            email="staff.manualjournal@test.id", password="pass12345!",
+            full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+
+        self.client.force_authenticate(user=self.owner)
+
+    def _post(self, reason="Selisih stock opname", lines=None):
+        return self.client.post("/api/accounting/manual-journals/", {
+            "posting_date": str(date.today()),
+            "reason": reason,
+            "lines": lines or [
+                {"account_code": "5003", "debit": "50000"},
+                {"account_code": "1301", "credit": "50000"},
+            ],
+        }, format="json")
+
+    def test_owner_can_post_manual_journal(self):
+        resp = self._post()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["manual_journal"]["memo"], "Selisih stock opname")
+        self.assertNotIn("warning", resp.data)
+
+    def test_non_owner_cannot_post_manual_journal(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self._post()
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_manual_journal_requires_reason(self):
+        resp = self._post(reason="")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unbalanced_lines_rejected(self):
+        resp = self._post(lines=[
+            {"account_code": "5003", "debit": "1000"},
+            {"account_code": "1301", "credit": "999"},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_touching_ar_returns_warning(self):
+        """
+        The real proof of the "warn, don't block" decision — a
+        legitimate manual AR write-off still succeeds, but the
+        response makes clear a control account was touched directly.
+        """
+        resp = self._post(reason="Penghapusan piutang macet", lines=[
+            {"account_code": "6005", "debit": "100000"},
+            {"account_code": "1201", "credit": "100000"},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn("warning", resp.data)
+        self.assertIn("1201", resp.data["warning"])
+
+    def test_manual_journal_not_touching_control_accounts_has_no_warning(self):
+        resp = self._post()  # 5003/1301 — neither is a control account
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn("warning", resp.data)
+
+    def test_invalid_account_code_rejected_cleanly(self):
+        resp = self._post(lines=[
+            {"account_code": "9999", "debit": "1000"},
+            {"account_code": "1301", "credit": "1000"},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_manual_journal_can_post_into_locked_period(self):
+        """
+        The real payoff of Task 4.3's own locked-vs-closed
+        distinction — proven here for the first time through an
+        actual endpoint, not just a direct JournalEntry.post() call.
+        """
+        period = AccountingPeriod.objects.get(organization=self.org)
+        period.is_locked = True
+        period.save(update_fields=["is_locked"])
+
+        resp = self._post(reason="Penyesuaian akhir periode", lines=[
+            {"account_code": "6004", "debit": "200000"},
+            {"account_code": "1401", "credit": "200000"},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_manual_journal_blocked_in_closed_period(self):
+        period = AccountingPeriod.objects.get(organization=self.org)
+        period.is_closed = True
+        period.save(update_fields=["is_closed"])
+
+        resp = self._post(reason="Coba tembus periode tertutup", lines=[
+            {"account_code": "6004", "debit": "1000"},
+            {"account_code": "1401", "credit": "1000"},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_manual_journals_scoped_to_organization(self):
+        self._post(reason="Entry org A")
+
+        other_org = Organization.objects.create(name="Bengkel Lain Manual Journal")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.mj@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/manual-journals/")
+        self.assertEqual(resp.data["manual_journals"], [])
