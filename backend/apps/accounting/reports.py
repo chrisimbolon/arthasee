@@ -1,0 +1,263 @@
+# =============================================================================
+# === backend/apps/accounting/reports.py ===
+# =============================================================================
+"""
+Arthasee — Financial Reporting (Task 4.1)
+
+Real report-computation logic, separated from apps.accounting.views
+the same way posting_engine.py / journal_generator.py / cancellations.py
+are already separated from handlers.py — views stay thin (parse query
+params, call a function, return a Response), the actual accounting
+logic lives here where it can be tested directly against real ledger
+data without going through HTTP.
+"""
+from datetime import date
+from decimal import Decimal
+
+from apps.accounting.models import Account, AccountingPeriod
+from apps.invoicing.models import Invoice
+from apps.purchasing.models import SupplierInvoice
+
+
+def trial_balance(organization, *, as_of=None) -> dict:
+    """
+    Every active Account's balance as of a point in time.
+    total_debit/total_credit are re-derived from each account's OWN
+    normal_balance (a debit-normal account's positive balance IS a
+    debit-column entry, and vice versa) — not a separate query, so
+    is_balanced is a genuine structural proof the ledger is
+    internally consistent, not just a label attached after the fact.
+    """
+    as_of = as_of or date.today()
+    accounts = Account.objects.filter(organization=organization, is_active=True).order_by("code")
+
+    rows = []
+    total_debit = Decimal("0")
+    total_credit = Decimal("0")
+    for account in accounts:
+        balance = account.balance(as_of=as_of)
+        rows.append({
+            "code": account.code,
+            "name": account.name,
+            "account_type": account.account_type,
+            "normal_balance": account.normal_balance,
+            "balance": balance,
+        })
+        if account.normal_balance == Account.NormalBalance.DEBIT:
+            total_debit += balance
+        else:
+            total_credit += balance
+
+    return {
+        "as_of": as_of,
+        "accounts": rows,
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "is_balanced": total_debit == total_credit,
+    }
+
+
+def _period_totals(organization, account_type, *, since, as_of):
+    """
+    Shared by profit_and_loss() and balance_sheet()'s own current-
+    year-earnings computation — every account of a given type
+    (REVENUE, COGS, EXPENSE), for a real date RANGE, not a
+    cumulative-since-inception balance.
+    """
+    accounts = Account.objects.filter(
+        organization=organization, account_type=account_type, is_active=True,
+    ).order_by("code")
+    rows = []
+    total = Decimal("0")
+    for account in accounts:
+        amount = account.balance(since=since, as_of=as_of)
+        rows.append({"code": account.code, "name": account.name, "amount": amount})
+        total += amount
+    return rows, total
+
+
+def profit_and_loss(organization, *, since, as_of) -> dict:
+    """
+    ⚠️ "gross_profit" here reflects Service + Parts revenue against
+    COGS only — NOT a true job-level gross margin. Mechanic labor is
+    posted as period opex (account 6001), not job-costed COGS
+    (Roadmap v2.2, Open Decision #1 — a deliberate scope call made
+    when the roadmap was first written, not an oversight here). The
+    caveat ships as a real field in this response
+    (gross_profit_note), specifically so a future frontend can't
+    silently drop it — the roadmap's own Task 4.1 note explicitly
+    required this stay visible in the UI.
+    """
+    revenue, total_revenue = _period_totals(organization, Account.AccountType.REVENUE, since=since, as_of=as_of)
+    cogs, total_cogs       = _period_totals(organization, Account.AccountType.COGS,    since=since, as_of=as_of)
+    expenses, total_expenses = _period_totals(organization, Account.AccountType.EXPENSE, since=since, as_of=as_of)
+
+    gross_profit = total_revenue - total_cogs
+    net_income   = gross_profit - total_expenses
+
+    return {
+        "since": since,
+        "as_of": as_of,
+        "revenue": revenue,
+        "total_revenue": total_revenue,
+        "cogs": cogs,
+        "total_cogs": total_cogs,
+        "gross_profit": gross_profit,
+        "gross_profit_note": (
+            "Termasuk margin Jasa & Sparepart saja — biaya tenaga kerja "
+            "mekanik dicatat sebagai beban operasional (6001), bukan HPP "
+            "per pekerjaan."
+        ),
+        "expenses": expenses,
+        "total_expenses": total_expenses,
+        "net_income": net_income,
+    }
+
+
+def _current_period_start(organization, as_of):
+    period = AccountingPeriod.objects.filter(
+        organization=organization, start_date__lte=as_of, end_date__gte=as_of,
+    ).first()
+    return period.start_date if period else None
+
+
+def balance_sheet(organization, *, as_of=None) -> dict:
+    """
+    Folds current-period net income into Equity explicitly — nothing
+    in this system performs period-end closing entries (zeroing
+    Revenue/COGS/Expense into Retained Earnings), so unclosed net
+    income has nowhere else to go. Without this, Assets would not
+    equal Liabilities + Equity the moment there's been any real
+    activity at all — not a bug, just unclosed books; this makes the
+    report balance honestly rather than pretending the gap doesn't
+    exist.
+
+    period_start comes from the real AccountingPeriod covering
+    as_of (Task 4.3's own concept) — if none is found (e.g. a
+    historical as_of predating period tracking), falls back to
+    since=None (all-time net income) rather than crashing a report
+    over an out-of-range date.
+    """
+    as_of = as_of or date.today()
+
+    assets = Account.objects.filter(organization=organization, account_type=Account.AccountType.ASSET, is_active=True).order_by("code")
+    asset_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in assets]
+    total_assets = sum((r["balance"] for r in asset_rows), Decimal("0"))
+
+    liabilities = Account.objects.filter(organization=organization, account_type=Account.AccountType.LIABILITY, is_active=True).order_by("code")
+    liability_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in liabilities]
+    total_liabilities = sum((r["balance"] for r in liability_rows), Decimal("0"))
+
+    equity = Account.objects.filter(organization=organization, account_type=Account.AccountType.EQUITY, is_active=True).order_by("code")
+    equity_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in equity]
+    total_equity_accounts = sum((r["balance"] for r in equity_rows), Decimal("0"))
+
+    period_start = _current_period_start(organization, as_of)
+    _, total_revenue  = _period_totals(organization, Account.AccountType.REVENUE, since=period_start, as_of=as_of)
+    _, total_cogs     = _period_totals(organization, Account.AccountType.COGS,    since=period_start, as_of=as_of)
+    _, total_expenses = _period_totals(organization, Account.AccountType.EXPENSE, since=period_start, as_of=as_of)
+    current_year_earnings = total_revenue - total_cogs - total_expenses
+
+    total_equity = total_equity_accounts + current_year_earnings
+    total_liabilities_and_equity = total_liabilities + total_equity
+
+    return {
+        "as_of": as_of,
+        "assets": asset_rows,
+        "total_assets": total_assets,
+        "liabilities": liability_rows,
+        "total_liabilities": total_liabilities,
+        "equity": equity_rows,
+        "current_year_earnings": current_year_earnings,
+        "total_equity": total_equity,
+        "total_liabilities_and_equity": total_liabilities_and_equity,
+        "is_balanced": total_assets == total_liabilities_and_equity,
+    }
+
+
+def _age_bucket(age_days: int) -> str:
+    if age_days <= 30:
+        return "0-30"
+    if age_days <= 60:
+        return "31-60"
+    if age_days <= 90:
+        return "61-90"
+    return "90+"
+
+
+def aging_ar(organization, *, as_of=None) -> dict:
+    """
+    Reads the real sub-ledger (Invoice rows), not the GL — AR (1201)
+    is a single control account; individual invoice detail only
+    exists in apps.invoicing.Invoice. Ages from created_at — Invoice
+    has no separate "issued_at" timestamp (only issued_event_id, a
+    reference, not a date), so created_at is the closest real proxy
+    for "when this became a receivable" (Chris's own explicit call).
+    """
+    as_of = as_of or date.today()
+    invoices = Invoice.objects.filter(organization=organization, status="ISSUED")
+
+    rows = []
+    buckets = {"0-30": Decimal("0"), "31-60": Decimal("0"), "61-90": Decimal("0"), "90+": Decimal("0")}
+    total_outstanding = Decimal("0")
+
+    for invoice in invoices:
+        balance_due = invoice.balance_due
+        if balance_due <= Decimal("0"):
+            continue  # fully covered by payments already, not really outstanding
+        age_days = (as_of - invoice.created_at.date()).days
+        bucket = _age_bucket(age_days)
+        rows.append({
+            "id": str(invoice.id),
+            "number": invoice.number,
+            "customer_name": invoice.customer_name_snapshot,
+            "balance_due": balance_due,
+            "age_days": age_days,
+            "bucket": bucket,
+        })
+        buckets[bucket] += balance_due
+        total_outstanding += balance_due
+
+    return {
+        "as_of": as_of,
+        "invoices": rows,
+        "buckets": buckets,
+        "total_outstanding": total_outstanding,
+    }
+
+
+def aging_ap(organization, *, as_of=None) -> dict:
+    """
+    Reads SupplierInvoice rows directly, same reasoning as
+    aging_ar() above. Ages from due_date when set, falling back to
+    invoice_date when it isn't (due_date is nullable on
+    SupplierInvoice).
+    """
+    as_of = as_of or date.today()
+    invoices = SupplierInvoice.objects.filter(organization=organization, status="UNPAID").select_related("supplier")
+
+    rows = []
+    buckets = {"0-30": Decimal("0"), "31-60": Decimal("0"), "61-90": Decimal("0"), "90+": Decimal("0")}
+    total_outstanding = Decimal("0")
+
+    for invoice in invoices:
+        reference_date = invoice.due_date or invoice.invoice_date
+        age_days = (as_of - reference_date).days
+        bucket = _age_bucket(age_days)
+        rows.append({
+            "id": str(invoice.id),
+            "number": invoice.number,
+            "supplier_name": invoice.supplier.name,
+            "amount": invoice.amount,
+            "age_days": age_days,
+            "bucket": bucket,
+        })
+        buckets[bucket] += invoice.amount
+        total_outstanding += invoice.amount
+
+    return {
+        "as_of": as_of,
+        "supplier_invoices": rows,
+        "buckets": buckets,
+        "total_outstanding": total_outstanding,
+    }
