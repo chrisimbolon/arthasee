@@ -473,3 +473,98 @@ class PostingEngineIntegrationTests(TestCase):
         self.assertIn("AccountingEventHandler", row.last_error)
         self.assertFalse(JournalEntry.objects.filter(reference_event_id=event.event_id).exists())
 
+class AccountingPeriodLockTests(TestCase):
+    """
+    Task 4.3 — proves the fiscal period lock actually holds, for
+    every real combination: no period at all, closed, locked with an
+    automatic posting, locked with a manual one, and the normal open
+    case. Both of Chris's own explicit decisions are proven directly
+    here, not just asserted in a docstring:
+      - strict block when no AccountingPeriod covers the posting date
+      - a locked period still accepts a manual adjusting journal even
+        though it blocks every automatic domain-event posting
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.wip       = Account.objects.get(organization=self.org, code="1302")
+        self.inventory = Account.objects.get(organization=self.org, code="1301")
+        # The one period seed_coa's own widened scope just created —
+        # see apps.accounting.periods.ensure_current_year_period().
+        self.period = AccountingPeriod.objects.get(organization=self.org)
+
+    def _post(self, source=JournalEntry.Source.DOMAIN_EVENT, posting_date=None):
+        return JournalEntry.post(
+            organization=self.org,
+            posting_date=posting_date or date.today(),
+            source=source,
+            lines=[
+                {"account": self.wip, "debit": Decimal("1000")},
+                {"account": self.inventory, "credit": Decimal("1000")},
+            ],
+        )
+
+    def test_seed_coa_creates_a_current_year_period(self):
+        today = date.today()
+        self.assertEqual(self.period.start_date, date(today.year, 1, 1))
+        self.assertEqual(self.period.end_date, date(today.year, 12, 31))
+        self.assertFalse(self.period.is_closed)
+        self.assertFalse(self.period.is_locked)
+
+    def test_seed_coa_period_seeding_is_idempotent(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.assertEqual(AccountingPeriod.objects.filter(organization=self.org).count(), 1)
+
+    def test_posting_with_no_period_at_all_is_blocked(self):
+        """
+        The real proof of the strict-block decision — an org that
+        somehow has no AccountingPeriod covering the posting date
+        cannot post anything at all, not even the routine two-line
+        entries every existing event handler produces.
+        """
+        self.period.delete()
+        with self.assertRaises(ValueError):
+            self._post()
+        self.assertEqual(JournalEntry.objects.count(), 0)
+
+    def test_posting_into_open_period_succeeds(self):
+        entry = self._post()
+        self.assertEqual(entry.accounting_period_id, self.period.id)
+
+    def test_posting_into_closed_period_is_blocked_even_for_domain_events(self):
+        self.period.is_closed = True
+        self.period.save(update_fields=["is_closed"])
+        with self.assertRaises(ValueError):
+            self._post(source=JournalEntry.Source.DOMAIN_EVENT)
+
+    def test_posting_into_closed_period_is_blocked_even_for_manual_journals(self):
+        """
+        The real proof CLOSED is a strictly stronger state than
+        LOCKED — a manual adjusting journal, which CAN override a
+        locked period (see below), must still be blocked by a closed
+        one. Closed means closed, no exceptions.
+        """
+        self.period.is_closed = True
+        self.period.save(update_fields=["is_closed"])
+        with self.assertRaises(ValueError):
+            self._post(source=JournalEntry.Source.MANUAL)
+
+    def test_posting_into_locked_period_is_blocked_for_domain_events(self):
+        self.period.is_locked = True
+        self.period.save(update_fields=["is_locked"])
+        with self.assertRaises(ValueError):
+            self._post(source=JournalEntry.Source.DOMAIN_EVENT)
+        self.assertEqual(JournalEntry.objects.count(), 0)
+
+    def test_posting_into_locked_period_is_allowed_for_manual_journals(self):
+        """
+        The key nuanced distinction Chris's own decision was about —
+        a locked period still accepts a manual adjusting journal,
+        even though the exact same period blocks every automatic
+        domain-event posting one test above.
+        """
+        self.period.is_locked = True
+        self.period.save(update_fields=["is_locked"])
+        entry = self._post(source=JournalEntry.Source.MANUAL)
+        self.assertEqual(entry.source, JournalEntry.Source.MANUAL)
