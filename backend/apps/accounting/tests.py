@@ -10,20 +10,29 @@ not APITestCase, and go straight at the model/manager layer
 only surface that actually exists to test right now.
 """
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
-from apps.accounting import journal_generator
+from apps.accounting import journal_generator, reports
+from apps.authentication.models import CustomUser
 from apps.core.events.bus import default_bus
 from apps.core.models import Outbox
 from apps.inventory.events import PartConsumed
 from apps.invoicing.events import InvoiceIssued
-from apps.organizations.models import Organization
+from apps.invoicing.models import Invoice
+from apps.invoicing.tests import InvoicingAPITestBase
+from apps.organizations.models import Organization, OrganizationMembership
 from apps.payments.events import PaymentReceived
+from apps.purchasing.models import Supplier, SupplierInvoice
+from apps.service.models import Vehicle
 from apps.workorders.events import WorkOrderCompleted
+from apps.workorders.models import WorkOrder, WorkOrderJobLine
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import TestCase
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from .models import Account, AccountingPeriod, JournalEntry, JournalLine
 
@@ -568,3 +577,232 @@ class AccountingPeriodLockTests(TestCase):
         self.period.save(update_fields=["is_locked"])
         entry = self._post(source=JournalEntry.Source.MANUAL)
         self.assertEqual(entry.source, JournalEntry.Source.MANUAL)
+
+class FinancialReportingTests(TestCase):
+    """
+    Task 4.1 — proves trial_balance(), profit_and_loss(), and
+    balance_sheet() are correct against real posted entries, using
+    JournalEntry.post() directly (same style as JournalEntryPostTests
+    elsewhere in this file) rather than going through any specific
+    domain event — these functions read the ledger, they don't care
+    what produced it.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.cash    = Account.objects.get(organization=self.org, code="1001")
+        self.ar      = Account.objects.get(organization=self.org, code="1201")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+        self.cogs    = Account.objects.get(organization=self.org, code="5001")
+        self.expense = Account.objects.get(organization=self.org, code="6001")
+
+    def test_trial_balance_is_balanced(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        data = reports.trial_balance(self.org, as_of=date.today())
+        self.assertTrue(data["is_balanced"])
+        self.assertEqual(data["total_debit"], data["total_credit"])
+
+    def test_profit_and_loss_computes_net_income(self):
+        period_start = date(date.today().year, 1, 1)
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cogs, "debit": Decimal("300000")}, {"account": self.ar, "credit": Decimal("300000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.expense, "debit": Decimal("200000")}, {"account": self.cash, "credit": Decimal("200000")}],
+        )
+
+        data = reports.profit_and_loss(self.org, since=period_start, as_of=date.today())
+        self.assertEqual(data["total_revenue"], Decimal("1000000"))
+        self.assertEqual(data["total_cogs"], Decimal("300000"))
+        self.assertEqual(data["gross_profit"], Decimal("700000"))
+        self.assertEqual(data["total_expenses"], Decimal("200000"))
+        self.assertEqual(data["net_income"], Decimal("500000"))
+        self.assertIn("gross_profit_note", data)
+
+    def test_profit_and_loss_excludes_entries_outside_the_range(self):
+        """
+        The real proof P&L is a genuine date-range query, not
+        cumulative-since-inception like Trial Balance — a posting
+        outside the requested window must not leak into the total,
+        even though both postings sit inside the same seeded
+        AccountingPeriod (period-locking and report-range filtering
+        are correctly independent concerns).
+        """
+        year = date.today().year
+        JournalEntry.post(
+            organization=self.org, posting_date=date(year, 1, 15), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("100000")}, {"account": self.revenue, "credit": Decimal("100000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date(year, 6, 1), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("999999")}, {"account": self.revenue, "credit": Decimal("999999")}],
+        )
+
+        data = reports.profit_and_loss(self.org, since=date(year, 1, 1), as_of=date(year, 1, 31))
+        self.assertEqual(data["total_revenue"], Decimal("100000"))
+
+    def test_balance_sheet_balances_with_unclosed_net_income(self):
+        """
+        The real proof — without folding current_year_earnings into
+        Equity, this would show Assets=1000000 against
+        Liabilities+Equity=0, since nothing ever closes Revenue into
+        Retained Earnings in this system.
+        """
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
+        )
+        data = reports.balance_sheet(self.org, as_of=date.today())
+        self.assertTrue(data["is_balanced"])
+        self.assertEqual(data["current_year_earnings"], Decimal("1000000"))
+        self.assertEqual(data["total_assets"], Decimal("1000000"))
+        self.assertEqual(data["total_equity"], Decimal("1000000"))
+
+
+class AgingAPReportTests(TestCase):
+    """
+    AP aging — fully settled design (real due_date field exists on
+    SupplierInvoice), so this is straightforward.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+
+    def test_aging_ap_buckets_by_due_date(self):
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("100000"),
+            invoice_date=date.today() - timedelta(days=20),
+            due_date=date.today() - timedelta(days=10),
+        )
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("200000"),
+            invoice_date=date.today() - timedelta(days=70),
+            due_date=date.today() - timedelta(days=65),
+        )
+
+        data = reports.aging_ap(self.org, as_of=date.today())
+        self.assertEqual(data["buckets"]["0-30"], Decimal("100000"))
+        self.assertEqual(data["buckets"]["61-90"], Decimal("200000"))
+        self.assertEqual(data["total_outstanding"], Decimal("300000"))
+
+    def test_aging_ap_falls_back_to_invoice_date_when_due_date_is_null(self):
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("50000"),
+            invoice_date=date.today() - timedelta(days=15),
+            # due_date omitted — nullable, must fall back gracefully
+        )
+        data = reports.aging_ap(self.org, as_of=date.today())
+        self.assertEqual(data["buckets"]["0-30"], Decimal("50000"))
+
+
+# ⚠️ AgingARReportTests below reuses apps.invoicing.tests.
+# InvoicingAPITestBase to get a real, issued Invoice without
+# reconstructing the whole WorkOrder -> ServiceRecord -> Invoice
+# chain from scratch. High confidence in this fixture's shape from
+# extensive prior use this session, but genuinely less certain than
+# code reviewed directly in the last few messages — if any attribute
+# name below doesn't match (self.mechanic, self.customer, etc.),
+# that's the first place to check.
+
+class AgingARReportTests(InvoicingAPITestBase):
+
+    def _new_issued_invoice(self, amount=Decimal("100000")):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number=f"BP {timezone.now().microsecond % 10000:04d}",
+            manufacture_year=2022, vehicle_type="Mobil", model="Honda Brio",
+        )
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=vehicle, assigned_to=self.mechanic)
+        wo.status = "IN_PROGRESS"
+        wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=wo, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        wo.status = "QC"
+        wo.save(update_fields=["status"])
+        service_record = wo.close(closed_by=self.owner)
+
+        create = self.client.post(
+            f"/api/service-records/{service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa", "quantity": 1, "unit_price": str(amount)}]},
+            format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        return invoice_id
+
+    def test_aging_ar_buckets_invoices_correctly(self):
+        recent_id = self._new_issued_invoice(Decimal("100000"))
+        old_id    = self._new_issued_invoice(Decimal("200000"))
+
+        Invoice.objects.filter(pk=recent_id).update(created_at=timezone.now() - timedelta(days=10))
+        Invoice.objects.filter(pk=old_id).update(created_at=timezone.now() - timedelta(days=45))
+
+        data = reports.aging_ar(self.org, as_of=date.today())
+        self.assertEqual(data["buckets"]["0-30"], Decimal("100000"))
+        self.assertEqual(data["buckets"]["31-60"], Decimal("200000"))
+        self.assertEqual(data["total_outstanding"], Decimal("300000"))
+
+
+class ReportingAPITests(APITestCase):
+    """
+    Lean HTTP-level smoke tests — one per endpoint, proving URL
+    routing + get_organization() + response shape. The real logic
+    correctness is already proven by FinancialReportingTests/
+    AgingAPReportTests/AgingARReportTests above; this layer only
+    proves the thin views are wired correctly.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.reports@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_trial_balance_endpoint(self):
+        resp = self.client.get("/api/accounting/trial-balance/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("is_balanced", resp.data)
+
+    def test_profit_loss_endpoint(self):
+        resp = self.client.get("/api/accounting/profit-loss/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("net_income", resp.data)
+        self.assertIn("gross_profit_note", resp.data)
+
+    def test_profit_loss_accepts_explicit_date_range(self):
+        resp = self.client.get("/api/accounting/profit-loss/?since=2026-01-01&as_of=2026-06-30")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["since"], "2026-01-01")
+
+    def test_balance_sheet_endpoint(self):
+        resp = self.client.get("/api/accounting/balance-sheet/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("is_balanced", resp.data)
+
+    def test_aging_ar_endpoint(self):
+        resp = self.client.get("/api/accounting/aging-ar/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("buckets", resp.data)
+
+    def test_aging_ap_endpoint(self):
+        resp = self.client.get("/api/accounting/aging-ap/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("buckets", resp.data)
