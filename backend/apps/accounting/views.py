@@ -4,22 +4,23 @@
 """
 Arthasee — Accounting Views
 
-Two genuinely different kinds of endpoint in this file now: the five
-Task 4.1 reporting views (thin — parse params, call reports.py,
-return the result) and Task 4.4's manual journal view (the first real
-WRITE path this app exposes over HTTP, hence real input validation
-via serializers.py and a real authorization check, unlike the
-read-only reports above it).
+Three kinds of endpoint in this file: the five Task 4.1 reporting
+views (thin — parse params, call reports.py, return the result),
+Task 4.4's manual journal view (a real WRITE path, validated input,
+owner-only), and Task 5.2's two read-only audit views (general
+journal-entry listing, and the failed-postings view — the real point
+of Task 5.2).
 """
 from datetime import date
 
+from apps.core.models import Outbox
 from apps.core.views import TenantScopedAPIView
 from rest_framework import status
 from rest_framework.response import Response
 
 from . import reports
 from .models import Account, JournalEntry
-from .serializers import (ManualJournalEntrySerializer,
+from .serializers import (FailedPostingSerializer, JournalEntrySerializer,
                           ManualJournalRecordSerializer)
 
 
@@ -47,12 +48,6 @@ class TrialBalanceView(TenantScopedAPIView):
 class ProfitLossView(TenantScopedAPIView):
     """
     GET /api/accounting/profit-loss/?since=YYYY-MM-DD&as_of=YYYY-MM-DD
-
-    since defaults to the start of the current AccountingPeriod
-    covering as_of (Task 4.3's own concept) — ties this report to the
-    same real period notion rather than requiring every caller to
-    always specify a range by hand. Falls back to Jan 1 of as_of's
-    year if no period is found for that date.
     """
 
     def get(self, request):
@@ -121,13 +116,6 @@ class AgingAPView(TenantScopedAPIView):
         return Response({"success": True, **data})
 
 
-# Manual journals may legitimately touch these — real accounting
-# judgment call, not always wrong (a manual AR write-off is a genuine
-# real-world case) — but their balances are supposed to always match
-# a real sub-ledger total (sum of Invoice.balance_due for 1201, sum
-# of unpaid SupplierInvoice.amount for 2001). Touching them directly
-# can silently break that invariant, so it's flagged, not blocked —
-# Chris's own explicit call.
 _CONTROL_ACCOUNT_CODES = {"1201", "2001"}
 
 
@@ -136,23 +124,9 @@ class ManualJournalListCreateView(TenantScopedAPIView):
     GET  /api/accounting/manual-journals/  — every manual journal for this org
     POST /api/accounting/manual-journals/  — post a new one
 
-    All the real posting logic (balance validation, period-lock
-    enforcement — including Task 4.3's own locked-still-allows-manual
-    rule) already lives in JournalEntry.post(source=MANUAL); this
-    view's only real jobs are resolving account codes safely,
-    checking who's allowed to do this, and surfacing the
-    control-account warning.
-
-    POST restricted to the org's owner — Chris's own explicit call:
-    this is a genuinely powerful, books-altering capability (arbitrary
-    debits/credits by account code), unlike everything else in this
-    codebase, which is triggered by a real business event. Same gate
-    apps.organizations.views.MyOrganizationView.patch() already uses
-    for its own sensitive action — checked the exact same way
-    (membership.role != "owner"), not a new or looser rule.
-    super_admin has no single "their" organization (see
-    TenantScopedAPIView.get_organization()'s own docstring), so it's
-    already rejected upstream, before this check ever runs.
+    POST restricted to the org's owner. Uses the now-shared
+    JournalEntrySerializer (Task 5.2 rename) rather than a
+    manual-only copy.
     """
     model = JournalEntry
 
@@ -163,7 +137,7 @@ class ManualJournalListCreateView(TenantScopedAPIView):
             .prefetch_related("lines__account")
             .select_related("created_by")
         )
-        return Response({"success": True, "manual_journals": ManualJournalEntrySerializer(entries, many=True).data})
+        return Response({"success": True, "manual_journals": JournalEntrySerializer(entries, many=True).data})
 
     def post(self, request):
         organization = self.get_organization()
@@ -207,7 +181,7 @@ class ManualJournalListCreateView(TenantScopedAPIView):
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        response_data = {"success": True, "manual_journal": ManualJournalEntrySerializer(entry).data}
+        response_data = {"success": True, "manual_journal": JournalEntrySerializer(entry).data}
         if control_accounts_touched:
             response_data["warning"] = (
                 f"Jurnal ini menyentuh akun kontrol ({', '.join(sorted(control_accounts_touched))}) "
@@ -215,3 +189,60 @@ class ManualJournalListCreateView(TenantScopedAPIView):
                 f"sama dengan total sub-ledger (Invoice/SupplierInvoice) terkait."
             )
         return Response(response_data, status=status.HTTP_201_CREATED)
+
+
+class JournalEntryListView(TenantScopedAPIView):
+    """
+    GET /api/accounting/journal-entries/?source=&since=&as_of=
+    Task 5.2 — every real posted JournalEntry for this org, both
+    sources, filterable. The general case
+    ManualJournalListCreateView.get() only ever covered the
+    MANUAL-only slice.
+    """
+    model = JournalEntry
+
+    def get(self, request):
+        entries = self.get_queryset().prefetch_related("lines__account").select_related("created_by")
+
+        source = request.query_params.get("source")
+        if source in (JournalEntry.Source.MANUAL, JournalEntry.Source.DOMAIN_EVENT):
+            entries = entries.filter(source=source)
+
+        since = request.query_params.get("since")
+        if since:
+            entries = entries.filter(posting_date__gte=since)
+        as_of = request.query_params.get("as_of")
+        if as_of:
+            entries = entries.filter(posting_date__lte=as_of)
+
+        entries = entries.order_by("-posting_date", "-entry_number")
+        return Response({"success": True, "journal_entries": JournalEntrySerializer(entries, many=True).data})
+
+
+class FailedPostingsView(TenantScopedAPIView):
+    """
+    GET /api/accounting/failed-postings/?since=&as_of=
+    Task 5.2 — the real point of this task. A failed domain-event
+    posting never produces a JournalEntry (that's what "failed"
+    means) — the only trace is an Outbox row with status=FAILED.
+    Gives a shop owner a real way to SEE that, instead of discovering
+    it because a report looks wrong.
+
+    since/as_of filter on occurred_at's own DATE component —
+    occurred_at is a real DateTimeField, not a plain date, so this
+    uses __date__gte/__date__lte rather than a naive comparison.
+    """
+    model = Outbox
+
+    def get(self, request):
+        failures = self.get_queryset().filter(status=Outbox.Status.FAILED)
+
+        since = request.query_params.get("since")
+        if since:
+            failures = failures.filter(occurred_at__date__gte=since)
+        as_of = request.query_params.get("as_of")
+        if as_of:
+            failures = failures.filter(occurred_at__date__lte=as_of)
+
+        failures = failures.order_by("-occurred_at")
+        return Response({"success": True, "failed_postings": FailedPostingSerializer(failures, many=True).data})
