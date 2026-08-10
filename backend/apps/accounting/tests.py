@@ -934,3 +934,109 @@ class ManualJournalAPITests(APITestCase):
 
         resp = self.client.get("/api/accounting/manual-journals/")
         self.assertEqual(resp.data["manual_journals"], [])
+
+class JournalEntryAndFailedPostingsAPITests(APITestCase):
+    """
+    Task 5.2 — proves the general journal-entries list (both sources,
+    filterable, tenant-scoped) and the failed-postings endpoint — the
+    real point of this task, giving a shop owner a way to SEE a dead
+    Outbox row instead of discovering it because a report looked
+    wrong (exactly what happened in real production, Aug 10 2026).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.journal@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+        self.wip       = Account.objects.get(organization=self.org, code="1302")
+        self.inventory = Account.objects.get(organization=self.org, code="1301")
+
+    def _post(self, source):
+        return JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=source,
+            lines=[
+                {"account": self.wip, "debit": Decimal("1000")},
+                {"account": self.inventory, "credit": Decimal("1000")},
+            ],
+        )
+
+    def test_journal_entries_list_returns_both_sources(self):
+        self._post(JournalEntry.Source.DOMAIN_EVENT)
+        self._post(JournalEntry.Source.MANUAL)
+
+        resp = self.client.get("/api/accounting/journal-entries/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["journal_entries"]), 2)
+
+    def test_journal_entries_filter_by_source(self):
+        self._post(JournalEntry.Source.DOMAIN_EVENT)
+        self._post(JournalEntry.Source.MANUAL)
+
+        resp = self.client.get("/api/accounting/journal-entries/?source=MANUAL")
+        entries = resp.data["journal_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["source"], "MANUAL")
+
+    def test_journal_entries_include_their_lines(self):
+        self._post(JournalEntry.Source.MANUAL)
+
+        resp = self.client.get("/api/accounting/journal-entries/")
+        lines = resp.data["journal_entries"][0]["lines"]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual({l["account_code"] for l in lines}, {"1301", "1302"})
+
+    def test_journal_entries_scoped_to_organization(self):
+        self._post(JournalEntry.Source.MANUAL)
+
+        other_org = Organization.objects.create(name="Bengkel Lain Journal")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.journal@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/journal-entries/")
+        self.assertEqual(resp.data["journal_entries"], [])
+
+    def test_failed_postings_returns_only_failed_status(self):
+        Outbox.objects.create(
+            organization=self.org, event_id=uuid.uuid4(), event_type="PartConsumed",
+            payload={"amount": "1000.00"}, occurred_at=timezone.now(),
+            status=Outbox.Status.FAILED, attempts=1,
+            last_error="No Account with code='1302' found for organization 'Arya Motor'.",
+        )
+        Outbox.objects.create(
+            organization=self.org, event_id=uuid.uuid4(), event_type="PaymentReceived",
+            payload={"amount": "500.00"}, occurred_at=timezone.now(),
+            status=Outbox.Status.PROCESSED,
+        )
+
+        resp = self.client.get("/api/accounting/failed-postings/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        failures = resp.data["failed_postings"]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["event_type"], "PartConsumed")
+        self.assertIn("No Account", failures[0]["last_error"])
+
+    def test_failed_postings_scoped_to_organization(self):
+        Outbox.objects.create(
+            organization=self.org, event_id=uuid.uuid4(), event_type="PartConsumed",
+            payload={}, occurred_at=timezone.now(), status=Outbox.Status.FAILED, last_error="x",
+        )
+        other_org = Organization.objects.create(name="Bengkel Lain Failed Postings")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.failed@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/failed-postings/")
+        self.assertEqual(resp.data["failed_postings"], [])
