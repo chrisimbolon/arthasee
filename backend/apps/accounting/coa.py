@@ -53,6 +53,18 @@ STANDARD_COA = [
     ("6003", "Beban Listrik, Air, Telp",               Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
     ("6004", "Beban Penyusutan",                      Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
     ("6005", "Beban Lain-lain",                       Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
+    # PPh Final Pasal 4(2) — CV. Arya Motor's own confirmed real
+    # obligation (2% on gross revenue, self-remitted monthly, paid by
+    # the 8th — per direct discussion with their tax consultant, not
+    # a general assumption for every future organization on this
+    # platform). Deliberately NOT wired to any automatic posting rule
+    # — Made computes and posts this by hand each month via the
+    # Manual Adjusting Journal (Task 4.4/5.3), reviewed and confirmed
+    # before submission, same as a real accountant would. This is
+    # the correct architectural fit for a periodic, human-reviewed
+    # figure — not a gap to be automated away, at least not yet
+    # (revisit after a real first month's workflow is observed).
+    ("6006", "Beban Pajak Penghasilan Final",          Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),    
 ]
 
 
