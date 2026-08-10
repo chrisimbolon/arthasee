@@ -5,13 +5,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-// Deliberately only two entries — /journal doesn't exist yet
-// (Sprint Plan v1.2, Task 5.2). Adding a link to a page that 404s
-// is worse than no link at all; extend this list once that page
-// actually ships.
+// Task 5.2 — /journal now exists, extending the list per the comment
+// this file shipped with in Task 5.1.
 const SUBNAV = [
   { href: "/dashboard/accounting/reports",  label: "Laporan" },
   { href: "/dashboard/accounting/accounts", label: "Daftar Akun" },
+  { href: "/dashboard/accounting/journal",  label: "Jurnal" },
 ];
 
 export default function AccountingSubNav() {
