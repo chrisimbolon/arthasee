@@ -2,12 +2,14 @@
 // =============================================================================
 // === frontend/app/dashboard/accounting/journal/page.tsx ===
 // =============================================================================
+import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   accountingApi, FailedPosting, JournalEntryRow, JournalSource,
 } from "@/lib/api/accounting";
-import AccountingSubNav from "@/components/accounting/AccountingSubNav";
-import { ChevronDown, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Plus, TriangleAlert } from "lucide-react";
+import Link from "next/link";
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
+
 
 function toNumber(value: string | number): number {
   return typeof value === "string" ? parseFloat(value) : value;
@@ -172,9 +174,20 @@ export default function JournalPage() {
 
   return (
     <div>
-      <h1 className="display" style={{ fontSize: 34 }}>Jurnal &amp; Audit Log</h1>
-      <div style={{ color: "var(--steel)", fontSize: 14, marginTop: 4 }}>
-        Setiap entri jurnal yang sudah diposting, dan postingan yang gagal — langsung dari Outbox.
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
+        <div>
+          <h1 className="display" style={{ fontSize: 34 }}>Jurnal &amp; Audit Log</h1>
+          <div style={{ color: "var(--steel)", fontSize: 14, marginTop: 4 }}>
+            Setiap entri jurnal yang sudah diposting, dan postingan yang gagal — langsung dari Outbox.
+          </div>
+        </div>
+        <Link
+          href="/dashboard/accounting/manual-journal"
+          className="btn-rust"
+          style={{ display: "inline-flex", alignItems: "center", gap: 7, textDecoration: "none", flexShrink: 0 }}
+        >
+          <Plus size={15} /> Jurnal Manual
+        </Link>
       </div>
 
       <AccountingSubNav />
