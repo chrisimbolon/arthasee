@@ -87,6 +87,45 @@ export interface AgingReportResponse {
   total_outstanding: string | number;
 }
 
+// Task 5.2 — new types for the journal viewer.
+
+export type JournalSource = "DOMAIN_EVENT" | "MANUAL";
+
+export interface JournalLineRow {
+  id: string;
+  account_code: string;
+  account_name: string;
+  debit_amount: string | number;
+  credit_amount: string | number;
+  description: string;
+}
+
+export interface JournalEntryRow {
+  id: string;
+  entry_number: string;
+  posting_date: string;
+  source: JournalSource;
+  event_type: string;
+  memo: string;
+  status: string;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+  lines: JournalLineRow[];
+}
+
+export interface FailedPosting {
+  id: string;
+  event_id: string;
+  event_type: string;
+  payload: Record<string, unknown>;
+  occurred_at: string;
+  attempts: number;
+  last_error: string;
+  processed_at: string | null;
+  created_at: string;
+}
+
 // Shared between the Reports page (Trial Balance tab) and the Chart
 // of Accounts page — one real mapping, not two copies that could
 // drift. ACCOUNT_TYPE_ORDER matches the real COA blueprint's own
@@ -114,6 +153,15 @@ async function getOrNull<T>(url: string, params: Record<string, string | undefin
   }
 }
 
+async function getListOrNull<T>(url: string, key: string, params: Record<string, string | undefined>): Promise<T[] | null> {
+  try {
+    const { data } = await api.get(url, { params });
+    return data[key] as T[];
+  } catch {
+    return null;
+  }
+}
+
 export const accountingApi = {
   trialBalance: (asOf?: string) =>
     getOrNull<TrialBalanceResponse>("/api/accounting/trial-balance/", { as_of: asOf }),
@@ -129,4 +177,14 @@ export const accountingApi = {
 
   agingAP: (asOf?: string) =>
     getOrNull<AgingReportResponse>("/api/accounting/aging-ap/", { as_of: asOf }),
+
+  journalEntries: (opts?: { source?: JournalSource; since?: string; asOf?: string }) =>
+    getListOrNull<JournalEntryRow>("/api/accounting/journal-entries/", "journal_entries", {
+      source: opts?.source, since: opts?.since, as_of: opts?.asOf,
+    }),
+
+  failedPostings: (opts?: { since?: string; asOf?: string }) =>
+    getListOrNull<FailedPosting>("/api/accounting/failed-postings/", "failed_postings", {
+      since: opts?.since, as_of: opts?.asOf,
+    }),
 };
