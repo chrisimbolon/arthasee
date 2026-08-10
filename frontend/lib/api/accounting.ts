@@ -7,8 +7,9 @@ import api from "@/lib/api";
 // DRF's JSONEncoder handles Decimal specially, and depending on
 // COERCE_DECIMAL_TO_STRING (not confirmed against this project's
 // real settings.py), these could arrive as either "500000.00" or
-// 500000.00. toNumber()/formatRupiah() below are the ONLY places
-// that ever need to know which — every component just uses those.
+// 500000.00. toNumber()/formatRupiah() (defined per-page) are the
+// ONLY places that ever need to know which — every component just
+// uses those.
 
 export interface TrialBalanceAccount {
   code: string;
@@ -85,6 +86,20 @@ export interface AgingReportResponse {
   buckets: Record<AgingBucket, string | number>;
   total_outstanding: string | number;
 }
+
+// Shared between the Reports page (Trial Balance tab) and the Chart
+// of Accounts page — one real mapping, not two copies that could
+// drift. ACCOUNT_TYPE_ORDER matches the real COA blueprint's own
+// section order (Asset -> Liability -> Equity -> Revenue -> COGS ->
+// Expense), not alphabetical or insertion order.
+export const ACCOUNT_TYPE_LABELS: Record<string, string> = {
+  ASSET: "Aset", LIABILITY: "Liabilitas", EQUITY: "Ekuitas",
+  REVENUE: "Pendapatan", COGS: "HPP", EXPENSE: "Beban",
+};
+
+export const ACCOUNT_TYPE_ORDER: string[] = [
+  "ASSET", "LIABILITY", "EQUITY", "REVENUE", "COGS", "EXPENSE",
+];
 
 async function getOrNull<T>(url: string, params: Record<string, string | undefined>): Promise<T | null> {
   try {
