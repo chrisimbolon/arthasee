@@ -4,7 +4,8 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Calculator, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
+// import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -18,6 +19,14 @@ const NAV = [
   { href: "/dashboard/leads",     icon: Phone,            label: "Leads" },
   { href: "/dashboard/contracts", icon: Briefcase,        label: "Kontrak" },
   { href: "/dashboard/mechanics", icon: Wrench,           label: "Mekanik" },
+   // Task 4.2 — points at /reports for now, the only page built so
+  // far; /accounts and /journal are queued as separate, later
+  // deliveries per Chris's own "step by step" call. Placed here,
+  // not grouped with Pengaturan below — financial reporting is a
+  // real operational screen someone checks regularly, not an
+  // occasional admin task.
+  { href: "/dashboard/accounting/reports", icon: Calculator, label: "Akuntansi" },
+
   // D1, 6 Aug — Made's own confirmed answer: a real, day-to-day
   // operational feature (an official letter registry), not an
   // occasional admin task like Pengaturan below — belongs in the
@@ -36,22 +45,6 @@ export default function Sidebar() {
     });
   }, []);
 
-  // Chris's own catches, 5 Aug — two real, separate mistakes:
-  // (1) the page originally lived at frontend/app/settings/organization,
-  // a SIBLING of app/dashboard, not nested inside it — Next.js layouts
-  // nest by folder structure, so it only ever inherited the bare root
-  // layout.tsx, never this Sidebar at all (confirmed live: a real
-  // screenshot showed the settings page with zero nav around it).
-  // Moved under app/dashboard/settings/organization to fix that.
-  // (2) even once that was fixed, nothing in the app pointed to it —
-  // same discoverability gap already caught once before with the
-  // customer portal's own login page. Placed in the account section
-  // below, not the main NAV array above — this isn't a daily
-  // operational screen like the others, it belongs with account-level
-  // actions. Shown to every authenticated user, not just owners: the
-  // page itself already handles the non-owner case gracefully (a
-  // disabled form with a clear explanation), same as showing a locked
-  // door being more honest than hiding it entirely.
   const settingsActive = pathname === "/dashboard/settings/organization";
 
   return (
@@ -70,7 +63,18 @@ export default function Sidebar() {
 
       <nav style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
         {NAV.map((item) => {
-          const active = pathname === item.href;
+          // Every other nav item maps to exactly one page, so exact
+          // match is correct and stays unchanged. Accounting is the
+          // first section with multiple pages under one nav entry
+          // (/reports now, /accounts and /journal later) — without
+          // this, visiting those future pages would show NO nav item
+          // as active at all. Scoped to this one item specifically,
+          // not a blanket startsWith() for everyone, since I can't
+          // verify every other existing page doesn't rely on the
+          // exact-match quirk in some way not visible here.
+          const active = item.href.startsWith("/dashboard/accounting")
+            ? pathname.startsWith("/dashboard/accounting")
+            : pathname === item.href;
           const Icon = item.icon;
           return (
             <Link key={item.href} href={item.href}
