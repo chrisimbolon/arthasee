@@ -59,11 +59,6 @@ function JournalEntriesTable({
               <td>{expanded.has(e.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</td>
               <td className="mono">{e.entry_number}</td>
               <td>{e.posting_date}</td>
-              {/* Plain text, not a status pill — source is a
-                  category (automatic vs manual), not a status like
-                  "safe"/"warning", so reusing .pill.ok/.soon here
-                  would misuse colors this design system reserves for
-                  actual status meaning. */}
               <td style={{ fontSize: 13 }}>{e.source === "MANUAL" ? "Manual" : "Otomatis"}</td>
               <td style={{ fontSize: 13, color: "var(--steel)" }}>{e.event_type || "—"}</td>
               <td style={{ fontSize: 13, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
