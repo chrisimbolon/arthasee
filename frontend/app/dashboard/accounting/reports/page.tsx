@@ -2,13 +2,14 @@
 // =============================================================================
 // === frontend/app/dashboard/accounting/reports/page.tsx ===
 // =============================================================================
+import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
-    accountingApi, AgingBucket, AgingInvoiceRow, AgingReportResponse,
-    BalanceSheetResponse, ProfitLossResponse, ReportLine, TrialBalanceResponse,
+  ACCOUNT_TYPE_LABELS, accountingApi, AgingBucket, AgingInvoiceRow,
+  AgingReportResponse, BalanceSheetResponse, ProfitLossResponse,
+  ReportLine, TrialBalanceResponse,
 } from "@/lib/api/accounting";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { ChangeEvent, useEffect, useState } from "react";
-
 // ── Shared helpers ──────────────────────────────────────────────
 
 // The one place that resolves the string|number Decimal ambiguity —
@@ -24,11 +25,6 @@ function formatRupiah(value: string | number): string {
     style: "currency", currency: "IDR", maximumFractionDigits: 0,
   }).format(toNumber(value));
 }
-
-const ACCOUNT_TYPE_LABELS: Record<string, string> = {
-  ASSET: "Aset", LIABILITY: "Liabilitas", EQUITY: "Ekuitas",
-  REVENUE: "Pendapatan", COGS: "HPP", EXPENSE: "Beban",
-};
 
 const BUCKET_ORDER: AgingBucket[] = ["0-30", "31-60", "61-90", "90+"];
 
@@ -364,6 +360,8 @@ export default function AccountingReportsPage() {
       <div style={{ color: "var(--steel)", fontSize: 14, marginTop: 4, marginBottom: 24 }}>
         Neraca saldo, laba rugi, neraca, dan umur piutang/utang — dibangun langsung dari jurnal yang sudah diposting.
       </div>
+
+      <AccountingSubNav />
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 24 }}>
         {TABS.map((t) => (
