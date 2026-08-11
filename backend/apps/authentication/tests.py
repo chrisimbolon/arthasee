@@ -65,7 +65,7 @@ class RegisterViewTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
         org = Organization.objects.get(name="Arya Motor Test")
-        self.assertEqual(Account.objects.filter(organization=org).count(), 22)
+        self.assertEqual(Account.objects.filter(organization=org).count(), 23)
 
     def test_register_still_creates_nothing_on_duplicate_email_with_seeding_added(self):
         """
