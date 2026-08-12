@@ -32,6 +32,7 @@
 //  Renaming avoids that outright instead of relying on the cascade to sort it out.
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
@@ -316,10 +317,16 @@ export default function RootPage() {
 
       <nav>
         <div className="nav-inner">
-          <div className="brand">
-            <div className="brand-mark">A</div>
-            <div className="brand-name">Arthasee</div>
-          </div>
+        <div className="flex items-center">
+          <Image
+            src="/Logo-teks.png"
+            alt="Arthasee"
+            width={150}
+            height={40}
+            className="h-10 w-auto object-contain"
+            priority
+          />
+        </div>
           <div className="nav-links">
             <a href="#live">Yang Sudah Ada</a>
             <a href="#next">Rencana Berikutnya</a>
