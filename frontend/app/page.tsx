@@ -354,44 +354,77 @@ export default function RootPage() {
   </div>
 </nav>
 
-      <header className="wrap hero">
-        <div>
-          <div className="eyebrow">CRM Bengkel · Fase 1</div>
-          <h1 className="display">
-            Tau persis<br />kapan mereka<br /><em>harus balik.</em>
-          </h1>
-          <p className="hero-sub">
-            Arthasee menyimpan data pelanggan, riwayat kendaraan, dan catatan
-            servis bengkel Anda di satu tempat — lalu memberi tahu unit mana
-            yang sudah waktunya servis lagi. Sesederhana itu, dan sudah bisa
-            dipakai hari ini.
-          </p>
-          <div className="hero-ctas">
-            <Link href="/register" className="btn-hero-rust">Mulai Gratis →</Link>
-            <a href="#live" className="btn-hero-ghost">Lihat Yang Sudah Jalan</a>
-          </div>
-          <div className="hero-note">
-            <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6L9 17l-5-5" /></svg>
-            Dibangun bareng bengkel sungguhan di Batam — bukan mockup.
-          </div>
-        </div>
+<section
+  id="home"
+  className="relative min-h-[calc(100vh-74px)] overflow-hidden bg-[#EDEBE5]"
+>
+  {/* Background image */}
+    <div
+  className="absolute inset-0 bg-cover bg-center"
+  style={{ backgroundImage: "url('/hero-workshop.webp')" }}
+/>
 
-        <div className="sticker-stage">
-          <div className="sticker">
-            <div className="sticker-head">
-              <span className="sticker-shop">CV. Arya Motor</span>
-              <span>Kartu Servis</span>
-            </div>
-            <div className="sticker-plate">BP 1892 KL</div>
-            <div className="sticker-row"><span>Servis terakhir</span><span className="val">12 Jun 2026</span></div>
-            <div className="sticker-row"><span>KM saat itu</span><span className="val">44.500</span></div>
-            <div className="sticker-row"><span>KM sekarang</span><span className="val">49.800</span></div>
-            <div className="sticker-status"><span className="dot"></span>5.300 KM SEJAK SERVIS — SAATNYA KEMBALI</div>
-          </div>
-          <div className="float-tag t1">✓ Riwayat lengkap</div>
-          <div className="float-tag t2">Tiap 5.000 KM</div>
-        </div>
-      </header>
+  {/* Content */}
+  <div className="relative mx-auto flex min-h-[calc(100vh-74px)] w-full max-w-[1440px] items-center px-[120px]">
+    <div className="max-w-[650px]">
+
+      {/* Badge */}
+      <div className="mb-8 inline-flex items-center gap-3 rounded-full border border-black/10 bg-[#F8F7F3]/90 px-4 py-2">
+        <span className="h-2 w-2 rounded-full bg-[#C1401C]" />
+        <span className="font-mono text-[13px] font-medium tracking-[0.08em] text-[#2F4A3C]">
+          CRM BENGKEL
+        </span>
+        <span className="text-black/30">·</span>
+        <span className="font-mono text-[13px] font-medium tracking-[0.08em] text-[#2F4A3C]">
+          FASE 1
+        </span>
+      </div>
+
+      {/* Heading */}
+      <h1 className="text-[clamp(52px,5.5vw,82px)] font-extrabold uppercase leading-[0.92] tracking-[-0.03em] text-[#17181A]">
+        TAU PERSIS
+        <br />
+        KAPAN MEREKA
+        <br />
+        <span className="text-[#C1401C]">HARUS BALIK.</span>
+      </h1>
+
+      {/* Description */}
+      <p className="mt-8 max-w-[610px] text-[18px] leading-[1.65] text-[#3C3C38]">
+        Arthasee menyimpan data pelanggan, riwayat kendaraan,
+        dan catatan servis bengkel Anda di satu tempat — lalu
+        memberi tahu unit mana yang sudah waktunya servis lagi.
+        Sesederhana itu, dan sudah bisa dipakai hari ini.
+      </p>
+
+      {/* Buttons */}
+      <div className="mt-10 flex items-center gap-4">
+        <a
+          href="/register"
+          className="inline-flex h-[54px] items-center justify-center rounded-[5px] bg-[#C1401C] px-7 text-[15px] font-semibold text-white transition-colors hover:bg-[#9A3116]"
+        >
+          Mulai Gratis →
+        </a>
+
+        <a
+          href="#live"
+          className="inline-flex h-[54px] items-center justify-center rounded-[5px] border-[1.5px] border-[#17181A] bg-[#F8F7F3]/80 px-7 text-[15px] font-semibold text-[#17181A] transition-colors hover:bg-[#17181A] hover:text-white"
+        >
+          Lihat Yang Sudah Jalan
+        </a>
+      </div>
+
+      {/* Trust line */}
+      <div className="mt-8 flex items-center gap-3 text-[14px] text-[#5B6670]">
+        <span className="text-[18px]">✓</span>
+        <span>
+          Dibangun bareng bengkel sungguhan di Batam — bukan mockup.
+        </span>
+      </div>
+
+    </div>
+  </div>
+</section>
 
       <section id="live" className="live-band">
         <div className="wrap">
