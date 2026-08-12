@@ -66,18 +66,40 @@ def _normalize_month_key(value):
     return value.date() if hasattr(value, "date") and callable(value.date) else value
 
 
+def _active_months(trend, lookback=3):
+    """
+    Months with genuine posted activity — at least one of
+    revenue/cogs/expenses nonzero. Real, live bug fixed here (Aug 12
+    2026): a month from BEFORE this system existed is zero-filled by
+    _last_n_month_starts the exact same way a genuinely quiet real
+    month would be — there's no way to tell the two apart from the
+    trend data alone. Without this filter, pre-history zero months
+    silently dragged a real, healthy average down by roughly a third
+    the very first time this feature was used against real data.
+
+    The tradeoff, stated honestly: a workshop truly closed for an
+    entire real month (rare once actually operating) would also get
+    excluded here. Accepted deliberately — the alternative (silently
+    including pre-history zeros) is the real, observed problem this
+    exists to fix.
+    """
+    real = [r for r in trend if r["revenue"] != 0 or r["cogs"] != 0 or r["expenses"] != 0]
+    return real[-lookback:] if len(real) >= lookback else real
+
+
 def _simple_projection(trend, field, lookback=3):
     """
-    Plain average of the last `lookback` months for `field`,
-    extrapolated one month forward. See module docstring for why
-    this is deliberately simple rather than a real forecasting model.
+    Plain average of the last `lookback` genuinely active months for
+    `field`, extrapolated one month forward. See module docstring for
+    why this is deliberately simple rather than a real forecasting
+    model, and _active_months's own docstring for why pre-history
+    zero months are excluded rather than averaged in.
     """
-    recent = trend[-lookback:] if len(trend) >= lookback else trend
+    recent = _active_months(trend, lookback)
     if not recent:
         return Decimal("0")
     total = sum((r[field] for r in recent), Decimal("0"))
     return total / len(recent)
-
 
 def revenue_trend(organization, months=12):
     """
@@ -132,6 +154,7 @@ def revenue_trend(organization, months=12):
     return {
         "months": trend,
         "projected_next_net_income": _simple_projection(trend, "net_income"),
+        "projected_months_used": len(_active_months(trend)),
     }
 
 
