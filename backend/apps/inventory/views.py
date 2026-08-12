@@ -3,10 +3,11 @@
 # =============================================================================
 from apps.core.views import TenantScopedAPIView
 from apps.service.models import ServiceRecord
-from django.db.models import ProtectedError, Q
+from django.db.models import F, ProtectedError, Q
 from rest_framework import status
 from rest_framework.response import Response
 
+from . import reports
 from .models import Part, PartUsage, StockAdjustment
 from .serializers import (PartSerializer, PartUsageSerializer,
                           StockAdjustmentSerializer)
@@ -16,10 +17,12 @@ class PartListView(TenantScopedAPIView):
     """
     GET/POST /api/parts/
     ?search= filters by name or SKU.
-    ?low_stock=true — parts at or below 5 units.
+    ?low_stock=true — real per-part threshold, not a hardcoded
+    global rule. See Part.minimum_stock's own docstring for the full
+    reasoning behind this replacing the old flat "<=5 for everyone"
+    behavior.
     """
     model = Part
-    LOW_STOCK_THRESHOLD = 5
 
     def get(self, request):
         parts = self.get_queryset().order_by("name")
@@ -27,7 +30,18 @@ class PartListView(TenantScopedAPIView):
         if search:
             parts = parts.filter(Q(name__icontains=search) | Q(sku__icontains=search))
         if request.query_params.get("low_stock") == "true":
-            parts = parts.filter(current_stock__lte=self.LOW_STOCK_THRESHOLD)
+            # A part flags as low stock either because it's
+            # genuinely below ITS OWN configured threshold, or
+            # because it's completely out (0 or less) — the latter
+            # always surfaces regardless of whether anyone's set a
+            # threshold yet, since "zero" needs no configuration to
+            # be meaningful. minimum_stock=0 (the default for any
+            # part nobody's configured) deliberately never triggers
+            # the threshold half of this on its own.
+            parts = parts.filter(
+                Q(current_stock__lte=0) |
+                Q(minimum_stock__gt=0, current_stock__lte=F("minimum_stock"))
+            )
         serializer = PartSerializer(parts, many=True)
         return Response({"success": True, "count": parts.count(), "results": serializer.data})
 
@@ -192,3 +206,36 @@ class StockAdjustmentListView(TenantScopedAPIView):
                 status=status.HTTP_201_CREATED,
             )
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+class PartStockSummaryView(TenantScopedAPIView):
+    """GET /api/parts/stock-summary/"""
+    model = Part
+
+    def get(self, request):
+        org = self._resolve_org(request)
+        if org is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        data = reports.stock_summary(org)
+        return Response({"success": True, **data})
+
+    def _resolve_org(self, request):
+        membership = request.user.memberships.filter(is_active=True).first()
+        return membership.organization if membership else None
+
+
+class PartMovementHistoryView(TenantScopedAPIView):
+    """
+    GET /api/parts/<part_id>/movements/
+    Same tenant-scoped single-object lookup pattern already used by
+    PartDetailView.get() — self.get_object() handles the 404 case
+    consistently, not reinvented here.
+    """
+    model = Part
+
+    def get(self, request, part_id):
+        part = self.get_object(part_id)
+        rows = reports.movement_history(part)
+        return Response({"success": True, "movements": rows})
