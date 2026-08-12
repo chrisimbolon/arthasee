@@ -161,6 +161,34 @@ class RevenueTrendTests(GrowthAnalyticsTestBase):
         # posted, so net_income equals revenue for each month.
         self.assertEqual(result["projected_next_net_income"], Decimal("200000"))
 
+    def test_projection_excludes_pre_history_zero_months(self):
+        """
+        Real bug, caught live in production (Aug 12 2026) — the
+        projection was including months from BEFORE this system
+        existed (zero-filled the same way a genuinely quiet month
+        would be) in its average, silently dragging a real, healthy
+        average down by roughly a third the very first time this
+        feature was used against real data. This is the permanent
+        regression test for that fix.
+        """
+        revenue = Account.objects.get(organization=self.org, code="4001")
+        ar = Account.objects.get(organization=self.org, code="1201")
+        # Only the last 2 months have real activity — everything
+        # before that is genuinely pre-history, nothing ever posted.
+        for i, amount in enumerate([Decimal("150000"), Decimal("300000")]):
+            JournalEntry.post(
+                organization=self.org, posting_date=_shift_month(date.today(), -(1 - i)),
+                source=JournalEntry.Source.MANUAL,
+                lines=[{"account": ar, "debit": amount}, {"account": revenue, "credit": amount}],
+            )
+        result = growth.revenue_trend(self.org, months=6)
+        # If the old, broken method were still in place, this would
+        # average across 3 months including one pre-history zero:
+        # (0 + 150000 + 300000) / 3 = 150000 — a wrong, skewed number,
+        # exactly what the real screenshot showed. The fix must
+        # average ONLY the 2 real months: (150000 + 300000) / 2 = 225000.
+        self.assertEqual(result["projected_next_net_income"], Decimal("225000"))
+        self.assertEqual(result["projected_months_used"], 2)
 
 class JobVolumeTrendTests(GrowthAnalyticsTestBase):
 
