@@ -14,6 +14,7 @@ export interface RevenueTrendMonth {
 export interface RevenueTrendResponse {
   months: RevenueTrendMonth[];
   projected_next_net_income: string | number;
+  projected_months_used: number;
 }
 
 export interface MechanicUtilizationResponse {
