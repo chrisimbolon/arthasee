@@ -182,10 +182,10 @@ function RevenueTrendSection({ data }: { data: RevenueTrendResponse | null }) {
         ]}
         formatValue={formatRupiah}
       />
-      <div style={{ background: "var(--hazard-light)", color: "var(--hazard-dark)", borderRadius: 6, padding: "10px 14px", fontSize: 12.5, marginTop: 16, display: "flex", gap: 8, alignItems: "flex-start" }}>
+     <div style={{ background: "var(--hazard-light)", color: "var(--hazard-dark)", borderRadius: 6, padding: "10px 14px", fontSize: 12.5, marginTop: 16, display: "flex", gap: 8, alignItems: "flex-start" }}>
         <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
         <span>
-          Proyeksi bulan depan (rata-rata sederhana 3 bulan terakhir, bukan model statistik):{" "}
+          Proyeksi bulan depan (rata-rata sederhana {data.projected_months_used} bulan terakhir yang punya transaksi nyata, bukan model statistik):{" "}
           <strong className="mono">{formatRupiah(data.projected_next_net_income)}</strong>
         </span>
       </div>
