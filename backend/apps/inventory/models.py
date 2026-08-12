@@ -58,6 +58,33 @@ class Part(TenantScopedModel):
         max_digits=12, decimal_places=2, default=0, verbose_name="Harga Satuan",
         help_text="Harga jual per satuan saat ini — perubahan di sini tidak mengubah riwayat pemakaian yang sudah tercatat.",
     )
+    unit_price = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0, verbose_name="Harga Satuan",
+        help_text="Harga jual per satuan saat ini — perubahan di sini tidak mengubah riwayat pemakaian yang sudah tercatat.",
+    )
+    # Real per-part reorder threshold. Replaces what used to be a
+    # single hardcoded global rule (PartListView.LOW_STOCK_THRESHOLD
+    # = 5, applied identically to every part in every organization)
+    # — a part used constantly (oli mesin) and a part rarely touched
+    # (a specific sensor) genuinely need different thresholds, not
+    # one shared magic number.
+    #
+    # default=0 means "no threshold configured — never flag this
+    # part as low stock purely from its own threshold." A part
+    # completely out of stock (current_stock <= 0) still surfaces
+    # regardless of this setting — see PartListView's own low_stock
+    # filter — since "zero" needs no configuration to be meaningful.
+    #
+    # Every part that existed before this field shipped was
+    # backfilled to 5 by this migration's own data step, preserving
+    # today's exact alerting behavior for real, existing parts. Only
+    # NEW parts created after this ships start at the quiet default
+    # of 0 — see migrations/00XX_add_minimum_stock.py for exactly
+    # how that split is achieved.
+    minimum_stock = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0, verbose_name="Stok Minimum",
+        help_text="Ambang batas peringatan stok menipis untuk part ini — 0 berarti tidak ada peringatan dari threshold ini (part yang benar-benar habis tetap muncul).",
+    )    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

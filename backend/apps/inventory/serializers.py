@@ -23,12 +23,14 @@ def _user_org_ids(request):
 class PartSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Part
-        fields = ["id", "name", "sku", "unit", "current_stock", "unit_price", "created_at", "updated_at"]
+        fields = ["id", "name", "sku", "unit", "current_stock", "unit_price", "minimum_stock", "created_at", "updated_at"]
         # current_stock is intentionally NOT writable here — it only
         # ever changes through PartUsage or StockAdjustment, both of
         # which go through the atomic F() update in models.py.
+        # minimum_stock, unlike current_stock, IS writable — same
+        # treatment as unit_price, since both are values a shop owner
+        # sets and adjusts directly, not derived from stock movement.
         read_only_fields = ["id", "current_stock", "created_at", "updated_at"]
-
 
 class PartUsageSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source="part.name", read_only=True)
