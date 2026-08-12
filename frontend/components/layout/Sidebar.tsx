@@ -4,7 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Activity, Briefcase, Calculator, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Calculator, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, TrendingUp, Users, Wrench } from "lucide-react";
 // import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -26,6 +26,7 @@ const NAV = [
   // real operational screen someone checks regularly, not an
   // occasional admin task.
   { href: "/dashboard/accounting/reports", icon: Calculator, label: "Akuntansi" },
+  { href: "/dashboard/analytics",          icon: TrendingUp, label: "Pertumbuhan" },  
 
   // D1, 6 Aug — Made's own confirmed answer: a real, day-to-day
   // operational feature (an official letter registry), not an
