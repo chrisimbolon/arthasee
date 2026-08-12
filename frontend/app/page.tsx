@@ -344,6 +344,13 @@ export default function RootPage() {
       </a>
     </div>
 
+     <Link
+      href="/register"
+      className="ml-[168px] flex h-10 shrink-0 items-center justify-center rounded-[4px] bg-[#096b3b] px-[26px] text-[13px] font-semibold text-white transition-colors hover:bg-[#075c32]"
+    >
+      GET IN TOUCH
+    </Link>
+
   </div>
 </nav>
 
