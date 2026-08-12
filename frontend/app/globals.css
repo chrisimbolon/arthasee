@@ -49,9 +49,9 @@ body {
   font-family: "IBM Plex Mono", monospace;
 }
 
-a {
+/* a {
   color: inherit;
-}
+} */
 
 button {
   font-family: inherit;
