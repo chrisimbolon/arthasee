@@ -103,6 +103,12 @@ export interface Part {
   unit:          string;
   current_stock: string;
   unit_price:    string;
+  // Real per-part reorder threshold — replaces what used to be a
+  // single hardcoded global "<=5" rule shared by every part. "0"
+  // means no threshold configured; a part completely out of stock
+  // still surfaces regardless of this value. See the backend's own
+  // Part.minimum_stock docstring for the full reasoning.
+  minimum_stock: string;
   created_at:    string;
   updated_at:    string;
 }
@@ -130,6 +136,27 @@ export interface StockAdjustment {
   created_by_name:  string | null;
   resulting_stock:  string;
   created_at:       string;
+}
+
+export interface StockSummary {
+  total_parts:              number;
+  total_stock_value:        string;
+  // Deliberately a string, not a boolean flag — states plainly which
+  // valuation basis this figure uses (retail/unit_price), since it's
+  // NOT the same basis as the ledger's own Inventory (1301) balance.
+  total_stock_value_basis:  string;
+  out_of_stock_count:       number;
+  low_stock_count:          number;
+}
+
+export interface StockMovement {
+  type:               "usage" | "adjustment";
+  date:                string;
+  quantity_change:     string;
+  reason:              string;
+  service_record_id:   string | null;
+  notes:               string;
+  created_by_name?:    string | null;
 }
 
 export interface ApiErrorShape {
@@ -213,16 +240,24 @@ export const partsApi = {
     const { data } = await api.get("/api/parts/", { params });
     return data.results;
   },
-  async create(payload: { name: string; sku?: string; unit: string; unit_price: number }): Promise<Part> {
+  async create(payload: { name: string; sku?: string; unit: string; unit_price: number; minimum_stock?: number }): Promise<Part> {
     const { data } = await api.post("/api/parts/", payload);
     return data.part;
   },
-  async update(id: string, payload: Partial<{ name: string; sku: string; unit: string; unit_price: number }>): Promise<Part> {
+  async update(id: string, payload: Partial<{ name: string; sku: string; unit: string; unit_price: number; minimum_stock: number }>): Promise<Part> {
     const { data } = await api.put(`/api/parts/${id}/`, payload);
     return data.part;
   },
   async remove(id: string): Promise<void> {
     await api.delete(`/api/parts/${id}/`);
+  },
+  async stockSummary(): Promise<StockSummary> {
+    const { data } = await api.get("/api/parts/stock-summary/");
+    return data;
+  },
+  async movements(partId: string): Promise<StockMovement[]> {
+    const { data } = await api.get(`/api/parts/${partId}/movements/`);
+    return data.movements;
   },
 };
 
