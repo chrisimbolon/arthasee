@@ -65,31 +65,6 @@ export default function RootPage() {
 
         .wrap { max-width: 1180px; margin: 0 auto; padding: 0 32px; }
 
-        /* ── Nav ─────────────────────────────────────────── */
-        nav {
-          position: sticky; top: 0; z-index: 50;
-          background: rgba(237,235,229,0.92);
-          backdrop-filter: blur(8px);
-          border-bottom: 1px solid var(--line);
-        }
-        .nav-inner {
-          display: flex; align-items: center; justify-content: space-between;
-          padding: 18px 32px;
-          max-width: 1180px; margin: 0 auto;
-        }
-        .brand { display: flex; align-items: center; gap: 10px; }
-        .brand-mark {
-          width: 32px; height: 32px; background: var(--ink);
-          display: flex; align-items: center; justify-content: center;
-          color: var(--paper); font-family: 'Big Shoulders Display', sans-serif;
-          font-weight: 900; font-size: 18px; border-radius: 3px;
-          transform: rotate(-2deg);
-        }
-        .brand-name { font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 21px; letter-spacing: 0.01em; text-transform: uppercase; }
-        .nav-links { display: flex; align-items: center; gap: 36px; font-size: 14.5px; font-weight: 500; color: var(--ink-soft); }
-        .nav-links a:hover { color: var(--ink); }
-        .nav-cta-group { display: flex; align-items: center; gap: 18px; }
-
         /* Deliberately separate from globals.css's .btn-rust/.btn-ghost
            — see file header comment. */
         .btn-hero-rust {
@@ -106,10 +81,6 @@ export default function RootPage() {
           transition: background 0.15s ease;
         }
         .btn-hero-ghost:hover { background: var(--ink); color: var(--paper); }
-
-        @media (max-width: 860px) {
-          .nav-links { display: none; }
-        }
 
         /* ── Hero ────────────────────────────────────────── */
         .hero {
@@ -315,29 +286,76 @@ export default function RootPage() {
         }
       `}</style>
 
-      <nav>
-        <div className="nav-inner">
-        <div className="flex items-center">
-          <Image
-            src="/Logo-teks.png"
-            alt="Arthasee"
-            width={150}
-            height={40}
-            className="h-10 w-auto object-contain"
-            priority
-          />
-        </div>
-          <div className="nav-links">
-            <a href="#live">Yang Sudah Ada</a>
-            <a href="#next">Rencana Berikutnya</a>
-            <a href="#pilot">Cerita Kami</a>
-          </div>
-          <div className="nav-cta-group">
-            <Link href="/login" className="btn-hero-ghost">Masuk</Link>
-            <Link href="/register" className="btn-hero-rust">Coba Gratis →</Link>
-          </div>
-        </div>
-      </nav>
+<nav className="sticky top-0 z-50 h-[74px] w-full bg-[#111111]">
+  <div className="mx-auto flex h-full w-full max-w-[1440px] items-center px-[120px]">
+    
+    {/* Logo */}
+    <Link href="/" className="flex shrink-0 items-center">
+      <Image
+        src="/Logo-teks.png"
+        alt="Arthasee"
+        width={190}
+        height={40}
+        className="block h-10 w-auto object-contain"
+        priority
+      />
+    </Link>
+
+    {/* Navigation */}
+    <div className="ml-auto flex h-full items-center gap-8">
+      <a
+        href="#home"
+        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+      >
+        HOME
+      </a>
+
+      <a
+        href="#services"
+        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+      >
+        SERVICES
+      </a>
+
+      <a
+        href="#about"
+        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+      >
+        ABOUT
+      </a>
+
+      <a
+        href="#pricing"
+        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+      >
+        PRICING
+      </a>
+
+      <a
+        href="#pages"
+        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+      >
+        PAGES
+      </a>
+
+      <a
+        href="#contact"
+        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+      >
+        CONTACT
+      </a>
+    </div>
+
+    {/* CTA */}
+    <Link
+      href="/register"
+      className="ml-[168px] flex h-10 shrink-0 items-center justify-center rounded-[4px] bg-[#096b3b] px-[26px] text-[13px] font-semibold leading-none text-white transition-colors duration-150 hover:bg-[#075c32]"
+    >
+      GET IN TOUCH
+    </Link>
+
+  </div>
+</nav>
 
       <header className="wrap hero">
         <div>
