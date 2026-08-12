@@ -286,10 +286,9 @@ export default function RootPage() {
         }
       `}</style>
 
-<nav className="sticky top-0 z-50 h-[74px] w-full bg-[#111111]">
+<nav className="h-[74px] w-full bg-[#111111]">
   <div className="mx-auto flex h-full w-full max-w-[1440px] items-center px-[120px]">
-    
-    {/* Logo */}
+
     <Link href="/" className="flex shrink-0 items-center">
       <Image
         src="/Logo-teks.png"
@@ -301,58 +300,49 @@ export default function RootPage() {
       />
     </Link>
 
-    {/* Navigation */}
-    <div className="ml-auto flex h-full items-center gap-8">
+    <div className="ml-auto flex items-center gap-8">
       <a
         href="#home"
-        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+        className="text-[13px] font-medium text-white transition-opacity hover:opacity-70"
       >
         HOME
       </a>
 
       <a
         href="#services"
-        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+        className="text-[13px] font-medium text-white transition-opacity hover:opacity-70"
       >
         SERVICES
       </a>
 
       <a
         href="#about"
-        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+        className="text-[13px] font-medium text-white transition-opacity hover:opacity-70"
       >
         ABOUT
       </a>
 
       <a
         href="#pricing"
-        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+        className="text-[13px] font-medium text-white transition-opacity hover:opacity-70"
       >
         PRICING
       </a>
 
       <a
         href="#pages"
-        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+        className="text-[13px] font-medium text-white transition-opacity hover:opacity-70"
       >
         PAGES
       </a>
 
       <a
         href="#contact"
-        className="whitespace-nowrap text-[13px] font-medium leading-none text-white transition-opacity duration-150 hover:opacity-70"
+        className="text-[13px] font-medium text-white transition-opacity hover:opacity-70"
       >
         CONTACT
       </a>
     </div>
-
-    {/* CTA */}
-    <Link
-      href="/register"
-      className="ml-[168px] flex h-10 shrink-0 items-center justify-center rounded-[4px] bg-[#096b3b] px-[26px] text-[13px] font-semibold leading-none text-white transition-colors duration-150 hover:bg-[#075c32]"
-    >
-      GET IN TOUCH
-    </Link>
 
   </div>
 </nav>
