@@ -177,6 +177,7 @@ class StockAdjustment(TenantScopedModel):
         ("damage",     "Rusak / Hilang"),
         ("work_order_cancelled", "Pembatalan Work Order"),
         ("customer_cancelled_part", "Part Dibatalkan Pelanggan"),
+        ("purchase_return", "Retur Pembelian"),
     ]
 
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
