@@ -3,9 +3,11 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (GoodsReceivedNoteDetailView, GoodsReceivedNoteListCreateView,
-                    SupplierDetailView, SupplierInvoiceDetailView,
-                    SupplierInvoiceListCreateView, SupplierListCreateView)
+from .views import (GoodsReceivedNoteDetailView,
+                    GoodsReceivedNoteListCreateView, PurchaseReturnDetailView,
+                    PurchaseReturnListCreateView, SupplierDetailView,
+                    SupplierInvoiceDetailView, SupplierInvoiceListCreateView,
+                    SupplierListCreateView)
 
 urlpatterns = [
     path("suppliers/",                       SupplierListCreateView.as_view(),        name="supplier-list-create"),
@@ -14,4 +16,6 @@ urlpatterns = [
     path("goods-received-notes/<uuid:pk>/",   GoodsReceivedNoteDetailView.as_view(),    name="grn-detail"),
     path("supplier-invoices/",                SupplierInvoiceListCreateView.as_view(), name="supplier-invoice-list-create"),
     path("supplier-invoices/<uuid:pk>/",      SupplierInvoiceDetailView.as_view(),     name="supplier-invoice-detail"),
+    path("purchase-returns/",                 PurchaseReturnListCreateView.as_view(),  name="purchase-return-list-create"),
+    path("purchase-returns/<uuid:pk>/",       PurchaseReturnDetailView.as_view(),      name="purchase-return-detail"),
 ]

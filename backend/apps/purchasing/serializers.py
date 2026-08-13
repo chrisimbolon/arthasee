@@ -5,7 +5,9 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from .models import GoodsReceivedNote, GoodsReceivedNoteLineItem, Supplier, SupplierInvoice
+from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
+                     PurchaseReturn, PurchaseReturnLineItem, Supplier,
+                     SupplierInvoice)
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -107,3 +109,75 @@ class SupplierInvoiceRecordSerializer(serializers.Serializer):
     goods_received_note_ids  = serializers.ListField(
         child=serializers.UUIDField(), required=False, default=list,
     )
+
+class PurchaseReturnLineItemSerializer(serializers.ModelSerializer):
+    """
+    part_name and unit_cost both read through PurchaseReturnLineItem's
+    own @property chain back to the ORIGINAL GoodsReceivedNoteLineItem
+    being returned against — DRF's source traversal calls the model
+    property directly, same as GoodsReceivedNoteLineItemSerializer's
+    own part_name does for a real FK.
+    """
+    part_name = serializers.CharField(source="part.name", read_only=True)
+    unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    subtotal  = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+
+    class Meta:
+        model  = PurchaseReturnLineItem
+        fields = [
+            "id", "goods_received_note_line_item", "part_name",
+            "quantity", "unit_cost", "subtotal", "created_at",
+        ]
+        read_only_fields = fields  # frozen — same discipline as GoodsReceivedNoteLineItemSerializer
+
+
+class PurchaseReturnSerializer(serializers.ModelSerializer):
+    line_items                 = PurchaseReturnLineItemSerializer(many=True, read_only=True)
+    total_value                = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    goods_received_note_number = serializers.CharField(source="goods_received_note.number", read_only=True)
+    created_by_name             = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = PurchaseReturn
+        fields = [
+            "id", "number", "sequence_number", "goods_received_note",
+            "goods_received_note_number", "return_date", "reason",
+            "line_items", "total_value", "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = fields  # frozen document — no PATCH/PUT endpoint exists at all
+
+
+class PurchaseReturnLineItemInputSerializer(serializers.Serializer):
+    """
+    grn_line_item, not part+quantity+unit_cost — unit_cost is always
+    a real snapshot from the ORIGINAL GoodsReceivedNoteLineItem being
+    returned against, never re-entered by the caller. Same "history
+    should not move" reasoning as PartUsage.unit_price_at_time.
+    """
+    grn_line_item = serializers.UUIDField()
+    quantity      = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
+
+
+class PurchaseReturnRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/purchase-returns/. Same
+    UUIDField-not-PrimaryKeyRelatedField reasoning as
+    GoodsReceivedNoteRecordSerializer above — `goods_received_note`
+    and every line's `grn_line_item` get resolved against the
+    requesting user's own organization in the view, never trusted
+    directly.
+    """
+    goods_received_note = serializers.UUIDField()
+    return_date          = serializers.DateTimeField(required=False, allow_null=True)
+    reason                = serializers.CharField()
+    lines                 = PurchaseReturnLineItemInputSerializer(many=True)
+
+    def validate_lines(self, value):
+        if not value:
+            raise serializers.ValidationError("Minimal harus ada satu item.")
+        return value
+
+    def validate_reason(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Alasan retur wajib diisi.")
+        return value
