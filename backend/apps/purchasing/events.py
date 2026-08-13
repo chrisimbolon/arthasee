@@ -51,3 +51,24 @@ class SupplierInvoiceReceived(DomainEvent):
     supplier_id: uuid.UUID
     amount: Decimal
     event_type: str = field(init=False, default="SupplierInvoiceReceived", kw_only=True)
+
+@dataclass(frozen=True)
+class PurchaseReturned(DomainEvent):
+    """
+    Fired once per PurchaseReturn — aggregated total across every
+    line item, same "one document, one accounting fact" shape as
+    GoodsReceived, which this event is the deliberate mirror of.
+
+    Posting rule (v1, Case A only — see
+    PurchaseReturn.create_return()'s own docstring for the full
+    reasoning): Dr Accrued Inventory - Unbilled AP (2010) / Cr
+    Inventory (1301), both for `amount` — the exact reverse of
+    GoodsReceived's own posting, undoing a receipt that's being
+    returned before any supplier invoice ever cleared Accrued
+    Inventory into a real payable.
+    """
+    purchase_return_id: uuid.UUID
+    goods_received_note_id: uuid.UUID
+    amount: Decimal
+    line_item_count: int
+    event_type: str = field(init=False, default="PurchaseReturned", kw_only=True)
