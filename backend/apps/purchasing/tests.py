@@ -17,7 +17,8 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import GoodsReceivedNote, Supplier, SupplierInvoice
+from .models import (GoodsReceivedNote, PurchaseReturn, Supplier,
+                     SupplierInvoice)
 
 
 class PurchasingModelTestBase(TestCase):
@@ -191,6 +192,121 @@ class SupplierInvoiceTests(PurchasingModelTestBase):
         )
         self.assertEqual(other_invoice.number, "SINV/00001")
 
+
+class PurchaseReturnTests(PurchasingModelTestBase):
+
+    def _receive(self, quantity=Decimal("10.00"), unit_cost=Decimal("45000.00")):
+        return GoodsReceivedNote.receive(
+            organization=self.org, supplier=self.supplier,
+            lines=[{"part": self.part_a, "quantity": quantity, "unit_cost": unit_cost}],
+        )
+
+    def test_create_return_creates_sequential_number(self):
+        grn = self._receive()
+        ret = PurchaseReturn.create_return(
+            organization=self.org, goods_received_note=grn,
+            lines=[{"grn_line_item": grn.line_items.first(), "quantity": Decimal("2.00")}],
+            reason="Barang rusak",
+        )
+        self.assertEqual(ret.number, "RTR/00001")
+
+    def test_return_decreases_part_stock_via_real_stock_adjustment(self):
+        grn = self._receive(quantity=Decimal("10.00"))
+        self.part_a.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("10.00"))
+
+        PurchaseReturn.create_return(
+            organization=self.org, goods_received_note=grn,
+            lines=[{"grn_line_item": grn.line_items.first(), "quantity": Decimal("3.00")}],
+            reason="Salah kirim",
+        )
+        self.part_a.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("7.00"))
+
+        adjustment = StockAdjustment.objects.get(part=self.part_a, reason="purchase_return")
+        self.assertEqual(adjustment.quantity_change, Decimal("-3.00"))
+
+    def test_return_blocked_if_grn_already_has_supplier_invoice(self):
+        """
+        The real Case-A guard — the whole reason v1 is scoped the way
+        it is. Once an invoice exists, Accrued Inventory is already
+        cleared and this reversal would be silently wrong.
+        """
+        grn = self._receive()
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier,
+            amount=Decimal("450000.00"), invoice_date="2026-08-09",
+            goods_received_notes=[grn],
+        )
+        with self.assertRaises(ValueError):
+            PurchaseReturn.create_return(
+                organization=self.org, goods_received_note=grn,
+                lines=[{"grn_line_item": grn.line_items.first(), "quantity": Decimal("1.00")}],
+                reason="Terlambat",
+            )
+
+    def test_partial_returns_accumulate_and_cap_at_original_quantity(self):
+        """
+        Real proof of the cumulative cap — verified by hand before
+        being written into this codebase. First return of 6 succeeds;
+        a second return of 5 more (totalling 11 against 10 received)
+        is blocked; a second return of 4 more (totalling exactly 10)
+        succeeds.
+        """
+        grn = self._receive(quantity=Decimal("10.00"))
+        grn_line = grn.line_items.first()
+
+        PurchaseReturn.create_return(
+            organization=self.org, goods_received_note=grn,
+            lines=[{"grn_line_item": grn_line, "quantity": Decimal("6.00")}],
+            reason="Retur pertama",
+        )
+
+        with self.assertRaises(ValueError):
+            PurchaseReturn.create_return(
+                organization=self.org, goods_received_note=grn,
+                lines=[{"grn_line_item": grn_line, "quantity": Decimal("5.00")}],
+                reason="Melebihi kuota",
+            )
+
+        PurchaseReturn.create_return(
+            organization=self.org, goods_received_note=grn,
+            lines=[{"grn_line_item": grn_line, "quantity": Decimal("4.00")}],
+            reason="Retur kedua, pas batas",
+        )
+        self.part_a.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("0.00"))  # 10 received - 6 - 4
+
+    def test_unit_cost_snapshot_from_original_grn_line_not_live_part_price(self):
+        grn = self._receive(unit_cost=Decimal("45000.00"))
+        ret = PurchaseReturn.create_return(
+            organization=self.org, goods_received_note=grn,
+            lines=[{"grn_line_item": grn.line_items.first(), "quantity": Decimal("2.00")}],
+            reason="Test",
+        )
+        self.part_a.unit_price = Decimal("99999.00")
+        self.part_a.save(update_fields=["unit_price"])
+
+        line = ret.line_items.first()
+        self.assertEqual(line.unit_cost, Decimal("45000.00"))  # untouched by the price change
+        self.assertEqual(line.subtotal, Decimal("90000.00"))   # 2 * 45000
+
+    def test_return_requires_at_least_one_line(self):
+        grn = self._receive()
+        with self.assertRaises(ValueError):
+            PurchaseReturn.create_return(
+                organization=self.org, goods_received_note=grn, lines=[], reason="Kosong",
+            )
+
+    def test_cannot_return_a_line_item_from_a_different_grn(self):
+        grn1 = self._receive()
+        grn2 = self._receive()
+        with self.assertRaises(ValueError):
+            PurchaseReturn.create_return(
+                organization=self.org, goods_received_note=grn1,
+                lines=[{"grn_line_item": grn2.line_items.first(), "quantity": Decimal("1.00")}],
+                reason="Salah GRN",
+            )
 
 class SupplierPaymentTests(PurchasingModelTestBase):
 
@@ -469,3 +585,101 @@ class SupplierInvoiceAPITests(PurchasingAPITestBase):
 
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertFalse(SupplierInvoice.objects.exists())
+
+class PurchaseReturnAPITests(PurchasingAPITestBase):
+
+    def test_create_purchase_return_via_api_posts_real_journal_entry(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            grn_resp = self.client.post("/api/goods-received-notes/", {
+                "supplier": str(self.supplier.id),
+                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+            }, format="json")
+        grn_data = grn_resp.data["goods_received_note"]
+        grn_line_id = grn_data["line_items"][0]["id"]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            return_resp = self.client.post("/api/purchase-returns/", {
+                "goods_received_note": grn_data["id"],
+                "reason": "Barang rusak saat diterima",
+                "lines": [{"grn_line_item": grn_line_id, "quantity": "3.00"}],
+            }, format="json")
+        self.assertEqual(return_resp.status_code, status.HTTP_201_CREATED)
+
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("7.00"))  # 10 received - 3 returned
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        accrued   = Account.objects.get(organization=self.org, code="2010")
+        # 450000 received - 135000 returned (3 * 45000) = 315000
+        self.assertEqual(inventory.balance(), Decimal("315000.00"))
+        self.assertEqual(accrued.balance(), Decimal("315000.00"))
+
+    def test_return_rejects_grn_already_invoiced(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            grn_resp = self.client.post("/api/goods-received-notes/", {
+                "supplier": str(self.supplier.id),
+                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+            }, format="json")
+        grn_data = grn_resp.data["goods_received_note"]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post("/api/supplier-invoices/", {
+                "supplier": str(self.supplier.id),
+                "amount": "450000.00",
+                "invoice_date": "2026-08-09",
+                "goods_received_note_ids": [grn_data["id"]],
+            }, format="json")
+
+        resp = self.client.post("/api/purchase-returns/", {
+            "goods_received_note": grn_data["id"],
+            "reason": "Terlambat",
+            "lines": [{"grn_line_item": grn_data["line_items"][0]["id"], "quantity": "1.00"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_return_rejects_cross_tenant_grn(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Return")
+        other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Lain")
+        other_part = Part.objects.create(
+            organization=other_org, name="Part Lain", unit="pcs",
+            unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
+        )
+        other_grn = GoodsReceivedNote.receive(
+            organization=other_org, supplier=other_supplier,
+            lines=[{"part": other_part, "quantity": Decimal("5.00"), "unit_cost": Decimal("1000.00")}],
+        )
+
+        resp = self.client.post("/api/purchase-returns/", {
+            "goods_received_note": str(other_grn.id),
+            "reason": "Tidak sah",
+            "lines": [{"grn_line_item": str(other_grn.line_items.first().id), "quantity": "1.00"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(PurchaseReturn.objects.exists())
+
+    def test_org_b_cannot_see_org_a_purchase_returns(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            grn_resp = self.client.post("/api/goods-received-notes/", {
+                "supplier": str(self.supplier.id),
+                "lines": [{"part": str(self.part.id), "quantity": "5.00", "unit_cost": "1000.00"}],
+            }, format="json")
+        grn_data = grn_resp.data["goods_received_note"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post("/api/purchase-returns/", {
+                "goods_received_note": grn_data["id"],
+                "reason": "Test",
+                "lines": [{"grn_line_item": grn_data["line_items"][0]["id"], "quantity": "1.00"}],
+            }, format="json")
+
+        other_org = Organization.objects.create(name="Bengkel Lain Return List")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.return@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=other_org, user=other_owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/purchase-returns/")
+        self.assertEqual(resp.data["purchase_returns"], [])
