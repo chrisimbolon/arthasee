@@ -9,18 +9,26 @@ Two handlers, two bounded concerns — matching EventHandler's own
 
   - AccountingEventHandler posts NEW economic facts (PartConsumed,
     WorkOrderCompleted, InvoiceIssued, PaymentReceived, and — Sprint
-    3 — GoodsReceived, SupplierInvoiceReceived, SupplierPaymentMade)
-    via posting_engine.py/journal_generator.py.
+    3 — GoodsReceived, SupplierInvoiceReceived, SupplierPaymentMade,
+    and — Retur Pembelian v1 — PurchaseReturned) via
+    posting_engine.py/journal_generator.py.
   - CancellationEventHandler reverses PREVIOUSLY posted facts
     (InvoiceCancelled, InvoiceRefunded) via cancellations.py — routed
     by event_type, since the two reversal shapes are genuinely
     different (see cancellations.py's own module docstring).
 
-No purchasing-domain reversal events exist yet — "un-receive goods"
-or "cancel a supplier invoice" were never scoped for Sprint 3; add
-them to CancellationEventHandler if that's ever needed later, same
-as InvoiceCancelled/InvoiceRefunded were added when Task 2.3 needed
-them.
+PurchaseReturned is registered here, not in
+CancellationEventHandler, even though it undoes GoodsReceived's own
+posting at the account level — architecturally it's a genuinely NEW
+posting rule living in posting_engine.py (same as GoodsReceived
+itself), not a reversal-of-a-specific-prior-entry the way
+InvoiceCancelled/InvoiceRefunded are. Same category, same handler.
+
+No purchasing-domain CANCELLATION events exist yet — "un-receive
+goods entirely" or "cancel a supplier invoice" were never scoped;
+add them to CancellationEventHandler if that's ever needed later,
+same as InvoiceCancelled/InvoiceRefunded were added when Task 2.3
+needed them.
 """
 from apps.core.events.handlers import EventHandler
 from apps.core.events.interfaces import DomainEvent
@@ -32,6 +40,7 @@ class AccountingEventHandler(EventHandler):
     handles = (
         "PartConsumed", "WorkOrderCompleted", "InvoiceIssued", "PaymentReceived",
         "GoodsReceived", "SupplierInvoiceReceived", "SupplierPaymentMade",
+        "PurchaseReturned",
     )
 
     def handle(self, event: DomainEvent) -> None:

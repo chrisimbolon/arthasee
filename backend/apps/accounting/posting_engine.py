@@ -24,7 +24,8 @@ from decimal import Decimal
 from apps.inventory.events import PartConsumed
 from apps.invoicing.events import InvoiceIssued
 from apps.payments.events import PaymentReceived, SupplierPaymentMade
-from apps.purchasing.events import GoodsReceived, SupplierInvoiceReceived
+from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
+                                    SupplierInvoiceReceived)
 from apps.workorders.events import WorkOrderCompleted
 
 
@@ -109,6 +110,24 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": "1301", "side": "debit",  "amount": event.amount},
                 {"account_code": "2010", "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, PurchaseReturned):
+        # The exact reverse of GoodsReceived's own posting — see
+        # PurchaseReturned's own docstring for why this is only ever
+        # correct for a GRN that has NOT yet been linked to a
+        # SupplierInvoice (Case A). The model layer's own guard
+        # (PurchaseReturn.create_return()) is what actually enforces
+        # that precondition — this posting rule trusts it's already
+        # been checked by the time an event reaches here, same as
+        # every other posting rule in this file trusts its own
+        # caller's preconditions.
+        return {
+            "memo": f"Purchase return — {event.purchase_return_id}",
+            "lines": _lines(
+                {"account_code": "2010", "side": "debit",  "amount": event.amount},
+                {"account_code": "1301", "side": "credit", "amount": event.amount},
             ),
         }
 
