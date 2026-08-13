@@ -371,3 +371,226 @@ class SupplierInvoice(TenantScopedModel):
             ))
 
         return invoice
+
+class PurchaseReturnSequence(TenantScopedModel):
+    """Mirrors GoodsReceivedNoteSequence / SupplierInvoiceSequence exactly."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    last_sequence = models.PositiveIntegerField(default=0, verbose_name="Nomor Urut Terakhir")
+
+    class Meta:
+        verbose_name        = "Purchase Return Sequence"
+        verbose_name_plural  = "Purchase Return Sequences"
+        unique_together      = [("organization",)]
+
+    def __str__(self):
+        return f"{self.organization}: {self.last_sequence}"
+
+    @classmethod
+    def next_number(cls, organization):
+        seq, _ = cls.objects.select_for_update().get_or_create(
+            organization=organization, defaults={"last_sequence": 0},
+        )
+        seq.last_sequence += 1
+        seq.save(update_fields=["last_sequence"])
+        return seq.last_sequence
+
+
+class PurchaseReturn(TenantScopedModel):
+    """
+    Retur Pembelian — Case A only, a deliberate v1 scope call: returning
+    goods received via a GRN that has NOT yet been linked to a
+    SupplierInvoice. The moment goods_received_note.supplier_invoice_id
+    is set, Accrued Inventory (2010) has already been cleared by that
+    invoice and Accounts Payable (2001) holds the real balance
+    instead — a genuinely different reversal (a real debit memo
+    against AP), deliberately deferred rather than guessed at. See
+    Roadmap's own Open Decisions for the full reasoning behind this
+    split.
+
+    Frozen once created — same "never delete, always audit" discipline
+    as GoodsReceivedNote itself. A wrong return needs its own
+    correcting StockAdjustment, not an edit to history.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor Retur")
+    sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
+    goods_received_note = models.ForeignKey(
+        GoodsReceivedNote, on_delete=models.PROTECT, related_name="purchase_returns",
+        verbose_name="GRN Asal",
+    )
+    return_date = models.DateTimeField(verbose_name="Tanggal Retur")
+    reason      = models.TextField(verbose_name="Alasan Retur")
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Purchase Return"
+        verbose_name_plural  = "Purchase Returns"
+        ordering             = ["-return_date"]
+        unique_together      = [("organization", "number")]
+
+    def __str__(self):
+        return self.number
+
+    @property
+    def total_value(self):
+        # Computed on read from line items, never stored — same
+        # discipline as GoodsReceivedNote.total_cost.
+        return sum((li.subtotal for li in self.line_items.all()), Decimal("0"))
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        if creating and not self.number:
+            self.sequence_number = PurchaseReturnSequence.next_number(self.organization)
+            self.number = f"RTR/{self.sequence_number:05d}"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def create_return(
+        cls, *, organization, goods_received_note, lines,
+        return_date=None, reason="", created_by=None,
+    ):
+        """
+        The one real entry point — mirrors GoodsReceivedNote.receive()
+        exactly: validates the Case-A precondition BEFORE creating
+        anything, owns its own transaction.atomic(), creates the
+        document and every line item together, and publishes exactly
+        ONE PurchaseReturned event for the whole document — aggregating
+        every line's value into one total, same "one document, one
+        accounting fact" pattern as GoodsReceived.
+
+        `lines` is a plain list of dicts:
+            [{"grn_line_item": <GoodsReceivedNoteLineItem>, "quantity": Decimal}, ...]
+
+        Each line's quantity is validated against how much of that
+        SPECIFIC GRN line has already been returned across any prior
+        PurchaseReturn — supports multiple partial returns against the
+        same line over time, capped honestly at what was actually
+        received. Verified by hand before being written here.
+        """
+        if goods_received_note.supplier_invoice_id is not None:
+            raise ValueError(
+                f"GRN {goods_received_note.number} sudah memiliki invoice supplier — "
+                f"retur untuk GRN yang sudah ditagih belum didukung di versi ini."
+            )
+        if not lines:
+            raise ValueError("Retur Pembelian harus memiliki minimal satu item.")
+
+        with transaction.atomic():
+            ret = cls.objects.create(
+                organization=organization, goods_received_note=goods_received_note,
+                return_date=return_date or timezone.now(), reason=reason, created_by=created_by,
+            )
+            line_items = []
+            for line in lines:
+                grn_line = line["grn_line_item"]
+                quantity = line["quantity"]
+
+                if grn_line.goods_received_note_id != goods_received_note.id:
+                    raise ValueError(
+                        f"Line item ini bukan bagian dari GRN {goods_received_note.number}."
+                    )
+
+                already_returned = PurchaseReturnLineItem.objects.filter(
+                    goods_received_note_line_item=grn_line,
+                ).aggregate(total=models.Sum("quantity"))["total"] or Decimal("0")
+
+                if already_returned + quantity > grn_line.quantity:
+                    raise ValueError(
+                        f"Jumlah retur untuk '{grn_line.part.name}' melebihi jumlah yang "
+                        f"diterima (diterima: {grn_line.quantity}, sudah diretur sebelumnya: "
+                        f"{already_returned}, diminta sekarang: {quantity})."
+                    )
+
+                line_items.append(PurchaseReturnLineItem.objects.create(
+                    organization=organization, purchase_return=ret,
+                    goods_received_note_line_item=grn_line, quantity=quantity,
+                ))
+                # Each PurchaseReturnLineItem.save() above already
+                # created its own StockAdjustment(reason="purchase_return")
+                # — no separate stock-update step needed here, same
+                # discipline as GoodsReceivedNote.receive().
+
+            total_value = sum((li.subtotal for li in line_items), Decimal("0"))
+
+            from apps.core.events.bus import default_bus
+            from apps.purchasing.events import PurchaseReturned
+            default_bus.publish(PurchaseReturned(
+                organization_id=organization.id,
+                purchase_return_id=ret.id,
+                goods_received_note_id=goods_received_note.id,
+                amount=total_value,
+                line_item_count=len(line_items),
+            ))
+
+        return ret
+
+
+class PurchaseReturnLineItem(TenantScopedModel):
+    """
+    One part being returned, in one quantity, valued at the ORIGINAL
+    GRN line's own unit_cost via a real FK snapshot — never a live
+    reference to Part.unit_price (the SELLING price, a completely
+    different number) and never the part's CURRENT cost either, which
+    may have changed since the original receipt. Same "history should
+    not move once written" instinct as PartUsage.unit_price_at_time.
+
+    Creating one atomically DECREASES Part.current_stock via a real
+    StockAdjustment(reason="purchase_return") — reusing the exact
+    stock-math mechanism already proven for GoodsReceivedNoteLineItem,
+    just moving stock the other direction. Needs a new REASON_CHOICES
+    entry on StockAdjustment — see the companion patch for
+    apps/inventory/models.py.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purchase_return = models.ForeignKey(
+        PurchaseReturn, on_delete=models.CASCADE, related_name="line_items",
+        verbose_name="Retur Pembelian",
+    )
+    goods_received_note_line_item = models.ForeignKey(
+        GoodsReceivedNoteLineItem, on_delete=models.PROTECT, related_name="purchase_return_line_items",
+        verbose_name="Item GRN Asal",
+    )
+    quantity   = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Jumlah Diretur")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Purchase Return Line Item"
+        verbose_name_plural  = "Purchase Return Line Items"
+        ordering             = ["created_at"]
+
+    def __str__(self):
+        return f"{self.goods_received_note_line_item.part.name} × {self.quantity}"
+
+    def _resolve_organization(self):
+        return self.purchase_return.organization
+
+    @property
+    def part(self):
+        return self.goods_received_note_line_item.part
+
+    @property
+    def unit_cost(self):
+        return self.goods_received_note_line_item.unit_cost
+
+    @property
+    def subtotal(self):
+        return self.quantity * self.unit_cost
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        super().save(*args, **kwargs)
+        if creating:
+            from apps.inventory.models import StockAdjustment
+            StockAdjustment.objects.create(
+                organization=self.organization,
+                part=self.part,
+                quantity_change=-self.quantity,
+                reason="purchase_return",
+                notes=(
+                    f"Retur {self.purchase_return.number} — "
+                    f"GRN {self.goods_received_note_line_item.goods_received_note.number}"
+                ),
+            )
