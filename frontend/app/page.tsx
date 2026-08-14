@@ -381,11 +381,14 @@ export default function RootPage() {
       </div>
 
       {/* Heading */}
-      <h1 className="font-['Montserrat'] text-[clamp(40px,4vw,56px)] font-bold italic uppercase leading-none tracking-[0] text-white">
-        SISTEM MANAJEMEN
-        <br />
-        BENGKEL TERINTEGRASI
-      </h1>
+<h1 className="w-[635px] max-w-full font-['Montserrat'] text-[56px] font-bold italic uppercase leading-none tracking-[0] text-white">
+  <span className="block whitespace-nowrap">
+    SISTEM MANAJEMEN
+  </span>
+  <span className="block whitespace-nowrap">
+    BENGKEL TERINTEGRASI
+  </span>
+</h1>        
 
       {/* Description */}
       <p className="mt-8 max-w-[610px] text-[18px] leading-[1.65] text-[#3C3C38]">
