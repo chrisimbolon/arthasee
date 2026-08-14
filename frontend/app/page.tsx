@@ -399,21 +399,22 @@ export default function RootPage() {
 </p>
 
       {/* Buttons */}
-      <div className="mt-10 flex items-center gap-4">
-        <a
-          href="/register"
-          className="inline-flex h-[54px] items-center justify-center rounded-[5px] bg-[#C1401C] px-7 text-[15px] font-semibold text-white transition-colors hover:bg-[#9A3116]"
-        >
-          Mulai Gratis →
-        </a>
+{/* CTA Buttons */}
+<div className="mt-8 flex items-center gap-4">
+  <a
+    href="#contact"
+    className="inline-flex h-[48px] items-center justify-center rounded-[4px] bg-[#D9471F] px-7 text-[16px] font-semibold text-white transition-colors hover:bg-[#C43D1B]"
+  >
+    Mulai Gratis →
+  </a>
 
-        <a
-          href="#live"
-          className="inline-flex h-[54px] items-center justify-center rounded-[5px] border-[1.5px] border-[#17181A] bg-[#F8F7F3]/80 px-7 text-[15px] font-semibold text-[#17181A] transition-colors hover:bg-[#17181A] hover:text-white"
-        >
-          Lihat Yang Sudah Jalan
-        </a>
-      </div>
+  <a
+    href="#about"
+    className="inline-flex h-[48px] items-center justify-center rounded-[4px] border-2 border-white px-7 text-[16px] font-semibold text-white transition-colors hover:bg-white hover:text-[#17181A]"
+  >
+    Lihat Yang Sudah Jalan
+  </a>
+</div>
 
       {/* Trust line */}
       <div className="mt-8 flex items-center gap-3 text-[14px] text-[#5B6670]">
