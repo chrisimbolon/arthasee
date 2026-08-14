@@ -4,7 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Activity, Briefcase, Calculator, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, TrendingUp, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Calculator, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, ShoppingCart, TrendingUp, Users, Wrench } from "lucide-react";
 // import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -16,6 +16,7 @@ const NAV = [
   { href: "/dashboard/customers", icon: Users,            label: "Pelanggan" },
   { href: "/dashboard/vehicles",  icon: Car,              label: "Kendaraan" },
   { href: "/dashboard/inventory", icon: Package,          label: "Inventaris" },
+  { href: "/dashboard/purchasing/suppliers", icon: ShoppingCart, label: "Pembelian" },  
   { href: "/dashboard/leads",     icon: Phone,            label: "Leads" },
   { href: "/dashboard/contracts", icon: Briefcase,        label: "Kontrak" },
   { href: "/dashboard/mechanics", icon: Wrench,           label: "Mekanik" },
@@ -73,8 +74,8 @@ export default function Sidebar() {
           // not a blanket startsWith() for everyone, since I can't
           // verify every other existing page doesn't rely on the
           // exact-match quirk in some way not visible here.
-          const active = item.href.startsWith("/dashboard/accounting")
-            ? pathname.startsWith("/dashboard/accounting")
+          const active = (item.href.startsWith("/dashboard/accounting") || item.href.startsWith("/dashboard/purchasing"))
+            ? pathname.startsWith(item.href.startsWith("/dashboard/accounting") ? "/dashboard/accounting" : "/dashboard/purchasing")
             : pathname === item.href;
           const Icon = item.icon;
           return (
