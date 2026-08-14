@@ -17,8 +17,8 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import (GoodsReceivedNote, PurchaseReturn, Supplier,
-                     SupplierInvoice)
+from .models import (GoodsReceivedNote, PurchaseOrder, PurchaseReturn,
+                     Supplier, SupplierInvoice)
 
 
 class PurchasingModelTestBase(TestCase):
@@ -44,12 +44,46 @@ class PurchasingModelTestBase(TestCase):
             unit_price=Decimal("60000.00"), current_stock=Decimal("5.00"),
         )
 
+    def _create_po_and_lines(self, lines, supplier=None, organization=None):
+        """
+        lines: [{"part": <Part>, "quantity": Decimal, "unit_cost": Decimal}, ...]
+        Real, shared prerequisite every receive() call now needs —
+        creates one real PO with matching line items, returns
+        (purchase_order, {part_id: po_line_item}) so callers can build
+        the GRN's own lines referencing the right po_line_item per
+        part. Every subclass's own _receive()-style helper builds on
+        this rather than duplicating PO-creation boilerplate.
+        """
+        po = PurchaseOrder.create_order(
+            organization=organization or self.org, supplier=supplier or self.supplier,
+            order_date="2026-08-14",
+            lines=[
+                {"part": l["part"], "quantity_ordered": l["quantity"], "unit_cost": l["unit_cost"]}
+                for l in lines
+            ],
+        )
+        po_lines_by_part = {li.part_id: li for li in po.line_items.all()}
+        return po, po_lines_by_part
+
 
 class GoodsReceivedNoteTests(PurchasingModelTestBase):
 
+    def _receive(self, lines, received_by=None):
+        po, po_lines_by_part = self._create_po_and_lines(lines)
+        return GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[
+                {
+                    "purchase_order_line_item": po_lines_by_part[l["part"].id],
+                    "quantity": l["quantity"], "unit_cost": l["unit_cost"],
+                }
+                for l in lines
+            ],
+            received_by=received_by,
+        )
+
     def test_receive_creates_grn_with_sequential_number(self):
-        grn = GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
+        grn = self._receive(
             lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
             received_by=self.owner,
         )
@@ -59,10 +93,7 @@ class GoodsReceivedNoteTests(PurchasingModelTestBase):
     def test_receive_increments_part_stock_via_real_stock_adjustment(self):
         self.assertEqual(self.part_a.current_stock, Decimal("0"))
 
-        GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
-        )
+        self._receive(lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}])
 
         self.part_a.refresh_from_db()
         self.assertEqual(self.part_a.current_stock, Decimal("10.00"))
@@ -72,40 +103,34 @@ class GoodsReceivedNoteTests(PurchasingModelTestBase):
         self.assertEqual(adjustment.quantity_change, Decimal("10.00"))
 
     def test_receive_with_multiple_lines_updates_each_part_independently(self):
-        GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[
-                {"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")},
-                {"part": self.part_b, "quantity": Decimal("4.00"), "unit_cost": Decimal("40000.00")},
-            ],
-        )
+        self._receive(lines=[
+            {"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")},
+            {"part": self.part_b, "quantity": Decimal("4.00"), "unit_cost": Decimal("40000.00")},
+        ])
         self.part_a.refresh_from_db()
         self.part_b.refresh_from_db()
         self.assertEqual(self.part_a.current_stock, Decimal("10.00"))
         self.assertEqual(self.part_b.current_stock, Decimal("9.00"))  # 5 existing + 4 received
 
     def test_total_cost_aggregates_correctly_across_lines(self):
-        grn = GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[
-                {"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")},
-                {"part": self.part_b, "quantity": Decimal("4.00"), "unit_cost": Decimal("40000.00")},
-            ],
-        )
+        grn = self._receive(lines=[
+            {"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")},
+            {"part": self.part_b, "quantity": Decimal("4.00"), "unit_cost": Decimal("40000.00")},
+        ])
         self.assertEqual(grn.total_cost, Decimal("610000.00"))
 
     def test_unit_cost_is_independent_of_part_unit_price(self):
-        grn = GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("50000.00")}],
-        )
+        grn = self._receive(lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("50000.00")}])
         self.part_a.refresh_from_db()
         self.assertEqual(grn.line_items.first().unit_cost, Decimal("50000.00"))
         self.assertEqual(self.part_a.unit_price, Decimal("75000.00"))  # untouched
 
     def test_receive_requires_at_least_one_line(self):
+        po, _ = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}]
+        )
         with self.assertRaises(ValueError):
-            GoodsReceivedNote.receive(organization=self.org, supplier=self.supplier, lines=[])
+            GoodsReceivedNote.receive(organization=self.org, purchase_order=po, lines=[])
 
     def test_grn_numbers_are_scoped_per_organization(self):
         other_org = Organization.objects.create(name="Bengkel Lain Purchasing")
@@ -114,23 +139,190 @@ class GoodsReceivedNoteTests(PurchasingModelTestBase):
             organization=other_org, name="Part Lain", unit="pcs",
             unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
         )
-        GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        self._receive(lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}])
+
+        other_po = PurchaseOrder.create_order(
+            organization=other_org, supplier=other_supplier, order_date="2026-08-14",
+            lines=[{"part": other_part, "quantity_ordered": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
         )
         other_grn = GoodsReceivedNote.receive(
-            organization=other_org, supplier=other_supplier,
-            lines=[{"part": other_part, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+            organization=other_org, purchase_order=other_po,
+            lines=[{
+                "purchase_order_line_item": other_po.line_items.first(),
+                "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00"),
+            }],
         )
         self.assertEqual(other_grn.number, "GRN/00001")  # not 00002 — separate sequence
 
+    def test_receiving_more_than_po_quantity_is_hard_blocked(self):
+        """
+        The real, confirmed guardrail: a PO is a spend ceiling, not a
+        suggestion. Over-receiving must be blocked outright, not
+        silently allowed or merely warned about.
+        """
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}]
+        )
+        with self.assertRaises(ValueError):
+            GoodsReceivedNote.receive(
+                organization=self.org, purchase_order=po,
+                lines=[{
+                    "purchase_order_line_item": po_lines[self.part_a.id],
+                    "quantity": Decimal("11.00"), "unit_cost": Decimal("45000.00"),
+                }],
+            )
+
+    def test_receiving_a_part_not_on_the_po_is_hard_blocked(self):
+        """
+        The real, confirmed second guardrail: every GRN line must
+        trace back to an authorized PO line. A part from a DIFFERENT
+        real PO must not be quietly foldable into this delivery.
+        """
+        po1, _ = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}]
+        )
+        po2, po2_lines = self._create_po_and_lines(
+            [{"part": self.part_b, "quantity": Decimal("5.00"), "unit_cost": Decimal("40000.00")}]
+        )
+        with self.assertRaises(ValueError):
+            GoodsReceivedNote.receive(
+                organization=self.org, purchase_order=po1,
+                lines=[{
+                    "purchase_order_line_item": po2_lines[self.part_b.id],
+                    "quantity": Decimal("1.00"), "unit_cost": Decimal("40000.00"),
+                }],
+            )
+
+    def test_partial_receipt_sets_po_status_partially_received(self):
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}]
+        )
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po_lines[self.part_a.id],
+                "quantity": Decimal("6.00"), "unit_cost": Decimal("45000.00"),
+            }],
+        )
+        po.refresh_from_db()
+        self.assertEqual(po.status, "PARTIALLY_RECEIVED")
+
+    def test_completing_all_lines_across_two_deliveries_sets_po_fully_received(self):
+        """
+        Real proof of the exact scenario verified by hand before the
+        status-recompute logic was written: a partial delivery, then
+        a second delivery completing it, correctly landing on
+        FULLY_RECEIVED — not just "the last delivery's own lines are
+        complete," but every line on the PO, across BOTH deliveries.
+        """
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}]
+        )
+        po_line = po_lines[self.part_a.id]
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{"purchase_order_line_item": po_line, "quantity": Decimal("6.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{"purchase_order_line_item": po_line, "quantity": Decimal("4.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        po.refresh_from_db()
+        self.assertEqual(po.status, "FULLY_RECEIVED")
+
+    def test_cannot_receive_against_a_cancelled_po(self):
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}]
+        )
+        po.cancel()
+        with self.assertRaises(ValueError):
+            GoodsReceivedNote.receive(
+                organization=self.org, purchase_order=po,
+                lines=[{
+                    "purchase_order_line_item": po_lines[self.part_a.id],
+                    "quantity": Decimal("1.00"), "unit_cost": Decimal("45000.00"),
+                }],
+            )
+
+class PurchaseOrderTests(PurchasingModelTestBase):
+    """New — real coverage for PurchaseOrder's own lifecycle, not
+    just its effect on GoodsReceivedNote.receive()."""
+
+    def test_create_order_defaults_to_ordered_status(self):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        self.assertEqual(po.status, "ORDERED")
+        self.assertEqual(po.number, "PO/00001")
+
+    def test_create_order_can_start_as_draft_when_explicitly_requested(self):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+            status=PurchaseOrder.Status.DRAFT,
+        )
+        self.assertEqual(po.status, "DRAFT")
+
+    def test_cancel_succeeds_when_nothing_received_yet(self):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        po.cancel()
+        self.assertEqual(po.status, "CANCELLED")
+
+    def test_cancel_blocked_once_anything_has_been_received(self):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": Decimal("1.00"), "unit_cost": Decimal("45000.00"),
+            }],
+        )
+        po.refresh_from_db()
+        with self.assertRaises(ValueError):
+            po.cancel()
+
+    def test_amend_quantity_cannot_drop_below_already_received(self):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        po_line = po.line_items.first()
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{"purchase_order_line_item": po_line, "quantity": Decimal("6.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        po_line.refresh_from_db()
+        with self.assertRaises(ValueError):
+            po_line.amend_quantity(Decimal("5.00"))  # below the 6 already received
+
+    def test_amend_quantity_allows_raising_the_ceiling(self):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        po_line = po.line_items.first()
+        po_line.amend_quantity(Decimal("15.00"))
+        self.assertEqual(po_line.quantity_outstanding, Decimal("15.00"))
 
 class SupplierInvoiceTests(PurchasingModelTestBase):
 
     def _receive(self, cost=Decimal("450000.00")):
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": cost / Decimal("10.00")}]
+        )
         return GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": cost / Decimal("10.00")}],
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po_lines[self.part_a.id],
+                "quantity": Decimal("10.00"), "unit_cost": cost / Decimal("10.00"),
+            }],
         )
 
     def test_invoice_can_link_multiple_grns(self):
@@ -196,9 +388,15 @@ class SupplierInvoiceTests(PurchasingModelTestBase):
 class PurchaseReturnTests(PurchasingModelTestBase):
 
     def _receive(self, quantity=Decimal("10.00"), unit_cost=Decimal("45000.00")):
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": quantity, "unit_cost": unit_cost}]
+        )
         return GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[{"part": self.part_a, "quantity": quantity, "unit_cost": unit_cost}],
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po_lines[self.part_a.id],
+                "quantity": quantity, "unit_cost": unit_cost,
+            }],
         )
 
     def test_create_return_creates_sequential_number(self):
@@ -344,10 +542,16 @@ class GoodsReceivedEventTests(PurchasingModelTestBase):
     """
 
     def test_receive_posts_inventory_and_accrued_inventory(self):
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}]
+        )
         with self.captureOnCommitCallbacks(execute=True):
             GoodsReceivedNote.receive(
-                organization=self.org, supplier=self.supplier,
-                lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+                organization=self.org, purchase_order=po,
+                lines=[{
+                    "purchase_order_line_item": po_lines[self.part_a.id],
+                    "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00"),
+                }],
             )
 
         inventory = Account.objects.get(organization=self.org, code="1301")
@@ -367,10 +571,16 @@ class SupplierInvoiceReceivedEventTests(PurchasingModelTestBase):
     """
 
     def _received_grn(self, cost=Decimal("450000.00")):
+        po, po_lines = self._create_po_and_lines(
+            [{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": cost / Decimal("10.00")}]
+        )
         with self.captureOnCommitCallbacks(execute=True):
             return GoodsReceivedNote.receive(
-                organization=self.org, supplier=self.supplier,
-                lines=[{"part": self.part_a, "quantity": Decimal("10.00"), "unit_cost": cost / Decimal("10.00")}],
+                organization=self.org, purchase_order=po,
+                lines=[{
+                    "purchase_order_line_item": po_lines[self.part_a.id],
+                    "quantity": Decimal("10.00"), "unit_cost": cost / Decimal("10.00"),
+                }],
             )
 
     def test_invoice_clears_accrued_inventory_into_accounts_payable(self):
