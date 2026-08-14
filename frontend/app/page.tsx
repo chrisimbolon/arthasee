@@ -539,7 +539,7 @@ export default function RootPage() {
       <article className="group relative h-[360px] overflow-hidden rounded-[6px]">
         <div
           className="absolute inset-0 bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
-          style={{ backgroundImage: "url('/service-customers.webp')" }}
+          style={{ backgroundImage: "url('/services/service-customer.webp')" }}
         />
 
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
