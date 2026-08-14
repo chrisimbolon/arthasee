@@ -428,89 +428,190 @@ export default function RootPage() {
   </div>
 </section>
 
-      <section id="live" className="live-band">
-        <div className="wrap">
-          <div className="section-head">
-            <div className="section-kicker">Aktif Hari Ini</div>
-            <h2 className="display" style={{ textTransform: "none", fontSize: 38 }}>Yang benar-benar sudah bisa dipakai.</h2>
-            <p>Tidak ada yang dijanjikan di sini yang belum jadi. Semua bagian di bawah ini sudah berjalan, sudah diuji, dan sudah dipakai langsung oleh bengkel sungguhan — bukan demo.</p>
-          </div>
+        <section
+  id="services"
+  className="relative bg-white px-[120px] py-[72px]"
+>
+  <div className="mx-auto w-full max-w-[1180px]">
 
-          <div className="card-grid">
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" /></svg>
-              </div>
-              <h3>Leads</h3>
-              <p>Catat calon pelanggan yang belum jadi servis — harga kemahalan, pikir-pikir dulu, dll. Jadi daftar follow-up, bukan hilang begitu saja.</p>
-            </div>
-
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a8 8 0 0116 0v1" /></svg>
-              </div>
-              <h3>Data Pelanggan &amp; Kendaraan</h3>
-              <p>Simpan nama pelanggan, nomor STNK — bisa beda dari nama pelanggan — dan semua kendaraan yang pernah mereka bawa. Satu pelanggan, banyak kendaraan, tidak masalah.</p>
-            </div>
-
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6M9 15l2 2 4-4" /></svg>
-              </div>
-              <h3>Estimasi</h3>
-              <p>Buat perkiraan harga sebelum kerja dimulai — belum menyentuh stok sama sekali sampai pelanggan benar-benar setuju.</p>
-            </div>
-
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /><path d="M9 12l2 2 4-4" /></svg>
-              </div>
-              <h3>Work Order</h3>
-              <p>Setelah disetujui, jadi pekerjaan nyata — daftar tugas, sparepart yang dipakai, semua tercatat berjalannya waktu, sesuai proses bengkel yang sebenarnya.</p>
-            </div>
-
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /></svg>
-              </div>
-              <h3>Riwayat Servis</h3>
-              <p>Setiap kendaraan masuk, catat kerusakan dan sparepart yang diganti. Riwayat tersimpan permanen — tinggal buka, langsung kelihatan pernah diapain saja mobilnya.</p>
-            </div>
-
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 2h13l3 3v17H4z" /><path d="M8 7h8M8 11h8M8 15h5" /></svg>
-              </div>
-              <h3>Invoice</h3>
-              <p>Nomor otomatis, rincian sparepart dan jasa, siap cetak untuk pelanggan. Sekali terbit, tidak bisa diubah-ubah lagi — angka yang tercetak aman.</p>
-            </div>
-
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 8l-9-5-9 5v8l9 5 9-5z" /><path d="M3 8l9 5 9-5M12 13v8" /></svg>
-              </div>
-              <h3>Stok Sparepart</h3>
-              <p>Stok gudang otomatis berkurang persis saat sparepart benar-benar dipakai untuk servis — bukan belakangan, bukan tebak-tebakan.</p>
-            </div>
-
-            <div className="live-card">
-              <span className="tag">Live</span>
-              <div className="live-icon">
-                <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 8v4l3 3" /><circle cx="12" cy="12" r="9" /></svg>
-              </div>
-              <h3>Pengingat 5.000 KM</h3>
-              <p>Sistem otomatis menandai kendaraan mana yang sudah lewat 5.000 KM sejak servis terakhir — Anda tinggal lihat daftarnya dan hubungi pelanggan sendiri.</p>
-            </div>
-          </div>
+    {/* Stats */}
+    <div className="grid grid-cols-3 gap-8 pb-[72px]">
+      <div>
+        <div className="font-['Montserrat'] text-[42px] font-bold italic leading-none text-[#17181A]">
+          10<span className="text-[#096B3B]">+</span>
         </div>
-      </section>
+        <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.04em] text-[#17181A]">
+          YEARS OF SERVICE
+        </div>
+      </div>
+
+      <div>
+        <div className="font-['Montserrat'] text-[42px] font-bold italic leading-none text-[#17181A]">
+          50K<span className="text-[#096B3B]">+</span>
+        </div>
+        <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.04em] text-[#17181A]">
+          HAPPY CUSTOMERS
+        </div>
+      </div>
+
+      <div>
+        <div className="font-['Montserrat'] text-[42px] font-bold italic leading-none text-[#17181A]">
+          99<span className="text-[#096B3B]">%</span>
+        </div>
+        <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.04em] text-[#17181A]">
+          CLIENT SATISFACTION
+        </div>
+      </div>
+    </div>
+
+    {/* Services header */}
+    <div className="relative mb-10 flex items-start justify-between">
+
+      <div>
+        <div className="mb-2 font-mono text-[12px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
+          OUR SERVICES
+        </div>
+
+        <h2 className="font-['Montserrat'] text-[40px] font-bold uppercase leading-none tracking-[-0.02em] text-[#17181A]">
+          SOLUSI LENGKAP
+          <br />
+          UNTUK BENGKEL ANDA
+        </h2>
+      </div>
+
+      {/* Decorative heading */}
+      <div className="hidden select-none font-['Montserrat'] text-[52px] font-bold italic uppercase leading-none tracking-[-0.03em] text-transparent [-webkit-text-stroke:1px_#E5E5E5] lg:block">
+        OUR SERVICES
+      </div>
+
+      {/* Arrows */}
+      <div className="absolute right-0 top-[72px] flex items-center gap-3 text-[25px] text-[#17181A]">
+        <button
+          type="button"
+          aria-label="Previous services"
+          className="leading-none"
+        >
+          ←
+        </button>
+
+        <button
+          type="button"
+          aria-label="Next services"
+          className="leading-none"
+        >
+          →
+        </button>
+      </div>
+    </div>
+
+    {/* Service cards */}
+    <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+
+      {/* Leads */}
+      <article className="group relative h-[360px] overflow-hidden rounded-[6px]">
+        <div
+          className="absolute inset-0 bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
+          style={{ backgroundImage: "url('/service-leads.webp')" }}
+        />
+
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+
+        <div className="relative flex h-full flex-col justify-end p-5 text-white">
+          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase">
+            LEADS
+          </h3>
+
+          <p className="mt-2 max-w-[310px] text-[13px] leading-[1.45] text-white/90">
+            Catat calon pelanggan yang belum jadi servis — harga kemahalan,
+            pikir-pikir dulu, dll. Jadi daftar follow-up, bukan hilang begitu saja.
+          </p>
+
+          <a
+            href="#contact"
+            className="mt-4 text-[12px] font-semibold uppercase text-white"
+          >
+            READ MORE →
+          </a>
+        </div>
+      </article>
+
+      {/* Customer & vehicle data */}
+      <article className="group relative h-[360px] overflow-hidden rounded-[6px]">
+        <div
+          className="absolute inset-0 bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
+          style={{ backgroundImage: "url('/service-customers.webp')" }}
+        />
+
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+
+        <div className="relative flex h-full flex-col justify-end p-5 text-white">
+          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase">
+            DATA PELANGGAN &amp; KENDARAAN
+          </h3>
+
+          <p className="mt-2 max-w-[310px] text-[13px] leading-[1.45] text-white/90">
+            Simpan nama pelanggan, nomor STNK, dan semua kendaraan
+            yang pernah mereka bawa.
+          </p>
+
+          <a
+            href="#contact"
+            className="mt-4 text-[12px] font-semibold uppercase text-white"
+          >
+            READ MORE →
+          </a>
+        </div>
+      </article>
+
+      {/* Estimasi */}
+      <article className="group relative h-[360px] overflow-hidden rounded-[6px]">
+        <div
+          className="absolute inset-0 bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
+          style={{ backgroundImage: "url('/service-estimasi.webp')" }}
+        />
+
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+
+        <div className="relative flex h-full flex-col justify-end p-5 text-white">
+          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase">
+            ESTIMASI
+          </h3>
+
+          <p className="mt-2 max-w-[310px] text-[13px] leading-[1.45] text-white/90">
+            Buat perkiraan harga sebelum kerja dimulai — belum menyentuh
+            stok sampai pelanggan benar-benar setuju.
+          </p>
+
+          <a
+            href="#contact"
+            className="mt-4 text-[12px] font-semibold uppercase text-white"
+          >
+            READ MORE →
+          </a>
+        </div>
+      </article>
+
+    </div>
+
+    {/* Service buttons */}
+    <div className="mt-6 flex justify-center gap-3">
+      <a
+        href="#services"
+        className="inline-flex h-[38px] items-center justify-center rounded-[4px] bg-[#096B3B] px-5 text-[11px] font-semibold uppercase text-white transition-colors hover:bg-[#075C32]"
+      >
+        BROWSE ALL SERVICES
+      </a>
+
+      <a
+        href="#services"
+        className="inline-flex h-[38px] items-center justify-center rounded-[4px] bg-[#17181A] px-5 text-[11px] font-semibold uppercase text-white transition-colors hover:bg-black"
+      >
+        BROWSE SERVICES
+      </a>
+    </div>
+
+  </div>
+</section>
 
       <section>
         <div className="wrap">
