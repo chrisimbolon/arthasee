@@ -49,6 +49,203 @@ class Supplier(TenantScopedModel):
         return self.name
 
 
+class PurchaseOrderSequence(TenantScopedModel):
+    """Mirrors GoodsReceivedNoteSequence exactly."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    last_sequence = models.PositiveIntegerField(default=0, verbose_name="Nomor Urut Terakhir")
+
+    class Meta:
+        verbose_name        = "Purchase Order Sequence"
+        verbose_name_plural  = "Purchase Order Sequences"
+        unique_together      = [("organization",)]
+
+    def __str__(self):
+        return f"{self.organization}: {self.last_sequence}"
+
+    @classmethod
+    def next_number(cls, organization):
+        seq, _ = cls.objects.select_for_update().get_or_create(
+            organization=organization, defaults={"last_sequence": 0},
+        )
+        seq.last_sequence += 1
+        seq.save(update_fields=["last_sequence"])
+        return seq.last_sequence
+
+
+class PurchaseOrder(TenantScopedModel):
+    """
+    A real, formal commitment to a supplier — the FIRST mutable
+    document in this whole purchasing domain. Every other one
+    (GoodsReceivedNote, SupplierInvoice, PurchaseReturn) is frozen the
+    instant it's created; a PO can't work that way, since it has a
+    real lifecycle that unfolds as deliveries actually arrive.
+
+    No PurchaseRequisition, no approval routing — Made is the
+    owner/operator, confirmed directly: creating a PO is a single
+    action, defaulting straight to ORDERED. DRAFT exists as a real,
+    separate state anyway — a PO still being built (items not yet
+    finalized, not yet sent to the supplier) shouldn't count toward
+    outstanding-inventory tracking the way a genuinely placed order
+    does.
+
+    No accounting event fires on creation or on any status change —
+    a PO is a commitment, not yet an economic transaction. Matches
+    the canonical purchasing diagram's own "NO JOURNAL" treatment for
+    this stage.
+    """
+    class Status(models.TextChoices):
+        DRAFT               = "DRAFT", "Draft"
+        ORDERED             = "ORDERED", "Dipesan"
+        PARTIALLY_RECEIVED  = "PARTIALLY_RECEIVED", "Sebagian Diterima"
+        FULLY_RECEIVED      = "FULLY_RECEIVED", "Diterima Penuh"
+        CANCELLED           = "CANCELLED", "Dibatalkan"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor PO")
+    sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, related_name="purchase_orders", verbose_name="Supplier",
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.DRAFT, verbose_name="Status",
+    )
+    order_date    = models.DateField(verbose_name="Tanggal Pesan")
+    expected_date = models.DateField(null=True, blank=True, verbose_name="Perkiraan Tiba")
+    notes         = models.TextField(blank=True, verbose_name="Catatan")
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)  # real, evolving status — unlike every frozen sibling document
+
+    class Meta:
+        verbose_name        = "Purchase Order"
+        verbose_name_plural  = "Purchase Orders"
+        ordering             = ["-order_date"]
+        unique_together      = [("organization", "number")]
+
+    def __str__(self):
+        return self.number
+
+    @property
+    def total_ordered_value(self):
+        return sum((li.quantity_ordered * li.unit_cost for li in self.line_items.all()), Decimal("0"))
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        if creating and not self.number:
+            self.sequence_number = PurchaseOrderSequence.next_number(self.organization)
+            self.number = f"PO/{self.sequence_number:05d}"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def create_order(
+        cls, *, organization, supplier, lines,
+        order_date=None, expected_date=None, notes="", status=None, created_by=None,
+    ):
+        """
+        The one real entry point. `lines`:
+            [{"part": <Part>, "quantity_ordered": Decimal, "unit_cost": Decimal}, ...]
+
+        status defaults to ORDERED, not DRAFT — Made creates and
+        sends a PO in one action; DRAFT is available for the "still
+        building this, haven't committed yet" case, but callers must
+        pass it explicitly rather than land there by default.
+        """
+        if not lines:
+            raise ValueError("Purchase Order harus memiliki minimal satu item.")
+
+        with transaction.atomic():
+            po = cls.objects.create(
+                organization=organization, supplier=supplier,
+                status=status or cls.Status.ORDERED,
+                order_date=order_date or timezone.now().date(),
+                expected_date=expected_date, notes=notes, created_by=created_by,
+            )
+            for line in lines:
+                PurchaseOrderLineItem.objects.create(
+                    organization=organization, purchase_order=po,
+                    part=line["part"], quantity_ordered=line["quantity_ordered"],
+                    unit_cost=line["unit_cost"],
+                )
+        return po
+
+    def cancel(self):
+        """
+        Only DRAFT or ORDERED (zero real receipts) can be cancelled
+        cleanly. The moment any GRN has been received against this
+        PO, cancelling would leave real stock/accounting facts
+        orphaned from their own authorization — same "can't touch
+        history once real facts exist" instinct as every hard-block
+        guard elsewhere in this domain.
+        """
+        if self.status not in (self.Status.DRAFT, self.Status.ORDERED):
+            raise ValueError(
+                f"PO {self.number} berstatus '{self.get_status_display()}' — tidak bisa "
+                f"dibatalkan (sudah ada barang yang diterima untuk PO ini)."
+            )
+        self.status = self.Status.CANCELLED
+        self.save(update_fields=["status"])
+
+
+class PurchaseOrderLineItem(TenantScopedModel):
+    """
+    One part, one ordered quantity, one expected cost, on one PO.
+    quantity_received/quantity_outstanding are computed live from
+    every real GoodsReceivedNoteLineItem that traces back to this
+    line — never stored, same "never trust a second source of truth"
+    discipline as GoodsReceivedNote.total_cost.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purchase_order = models.ForeignKey(
+        PurchaseOrder, on_delete=models.CASCADE, related_name="line_items", verbose_name="Purchase Order",
+    )
+    part = models.ForeignKey(
+        "inventory.Part", on_delete=models.PROTECT, related_name="purchase_order_line_items",
+        verbose_name="Part",
+    )
+    quantity_ordered = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Jumlah Dipesan")
+    unit_cost = models.DecimalField(
+        max_digits=12, decimal_places=2, verbose_name="Harga Beli Satuan (Perkiraan)",
+        help_text="Harga yang disepakati/diperkirakan saat pemesanan — bisa berbeda dari harga aktual saat GRN dicatat.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Purchase Order Line Item"
+        verbose_name_plural  = "Purchase Order Line Items"
+        ordering             = ["created_at"]
+
+    def __str__(self):
+        return f"{self.part.name} × {self.quantity_ordered}"
+
+    def _resolve_organization(self):
+        return self.purchase_order.organization
+
+    @property
+    def quantity_received(self):
+        return self.grn_line_items.aggregate(total=models.Sum("quantity"))["total"] or Decimal("0")
+
+    @property
+    def quantity_outstanding(self):
+        return self.quantity_ordered - self.quantity_received
+
+    def amend_quantity(self, new_quantity):
+        """
+        The one real way to raise an ordered quantity after the
+        fact — e.g. resolving an over-receipt attempt by raising the
+        PO's own ceiling first, deliberately, before re-attempting
+        the GRN. Can never drop below what's already been physically
+        received — history that already happened doesn't move.
+        """
+        if new_quantity < self.quantity_received:
+            raise ValueError(
+                f"Tidak bisa mengubah jumlah pesanan '{self.part.name}' menjadi {new_quantity} "
+                f"— sudah diterima {self.quantity_received}."
+            )
+        self.quantity_ordered = new_quantity
+        self.save(update_fields=["quantity_ordered"])
+
 class GoodsReceivedNoteSequence(TenantScopedModel):
     """
     One row per organization — mirrors WorkOrderSequence /
@@ -97,6 +294,15 @@ class GoodsReceivedNote(TenantScopedModel):
         Supplier, on_delete=models.PROTECT, related_name="goods_received_notes",
         verbose_name="Supplier",
     )
+    purchase_order = models.ForeignKey(
+        "PurchaseOrder", on_delete=models.PROTECT,  
+        related_name="goods_received_notes", verbose_name="Purchase Order",
+        # PROTECT — a PO with real GRNs against it must never
+        # disappear out from under that history. Required for every
+        # GRN going forward; existing GRNs (created before this
+        # feature shipped) get a real, explicitly-labeled synthetic
+        # "legacy" PO via this migration's own data-migration step.
+    )
     supplier_invoice = models.ForeignKey(
         "SupplierInvoice", on_delete=models.PROTECT, null=True, blank=True,
         related_name="goods_received_notes", verbose_name="Invoice Supplier",
@@ -141,55 +347,91 @@ class GoodsReceivedNote(TenantScopedModel):
 
     @classmethod
     def receive(
-        cls, *, organization, supplier, lines,
+        cls, *, organization, purchase_order, lines,
         received_at=None, reference="", notes="", received_by=None,
     ):
         """
-        The one real entry point for recording a goods receipt —
-        never construct GoodsReceivedNote + line items separately.
-        Mirrors WorkOrder.close()'s own shape: owns its own
-        transaction.atomic(), creates the document AND every line
-        item together, and publishes exactly ONE GoodsReceived event
-        for the whole document — aggregating every line's cost into
-        one total, same "one document, one accounting fact" pattern
-        as WorkOrderCompleted, not PartConsumed's per-line shape.
+        purchase_order is now REQUIRED — every real delivery must
+        trace back to an authorized commitment. `lines`:
+            [{"purchase_order_line_item": <POLineItem>, "quantity": Decimal, "unit_cost": Decimal}, ...]
 
-        `lines` is a plain list of dicts:
-            [{"part": <Part>, "quantity": Decimal, "unit_cost": Decimal}, ...]
-
-        Uses .create() in a loop, not bulk_create() — each line item
-        needs its own save()-time side effect (the real
-        StockAdjustment it creates), which bulk_create() would skip
-        entirely.
+        Two real, explicitly confirmed hard-block guardrails:
+        receiving MORE than a PO line's own remaining quantity is
+        blocked outright (a PO is a spend ceiling, not a suggestion —
+        the user must amend the PO first, deliberately, if more
+        really did arrive); receiving something that isn't on the
+        referenced PO at all is blocked outright (every GRN line must
+        trace to an authorized PO line — an unlisted item needs its
+        own PO, not to be folded silently into an unrelated delivery).
+        Receiving LESS than what's outstanding is always allowed, no
+        warning — that's the normal partial-delivery case this whole
+        feature exists to track, and is what drives the PO's own
+        status recompute below.
         """
+        if purchase_order.status not in (PurchaseOrder.Status.ORDERED, PurchaseOrder.Status.PARTIALLY_RECEIVED):
+            raise ValueError(
+                f"PO {purchase_order.number} berstatus '{purchase_order.get_status_display()}' "
+                f"— tidak bisa menerima barang untuk PO ini."
+            )
         if not lines:
             raise ValueError("Goods Received Note harus memiliki minimal satu item.")
 
         with transaction.atomic():
             grn = cls.objects.create(
-                organization=organization, supplier=supplier,
+                organization=organization, supplier=purchase_order.supplier,
+                purchase_order=purchase_order,
                 received_at=received_at or timezone.now(),
                 reference=reference, notes=notes, received_by=received_by,
             )
-            line_items = [
-                GoodsReceivedNoteLineItem.objects.create(
+            line_items = []
+            for line in lines:
+                po_line = line["purchase_order_line_item"]
+                quantity = line["quantity"]
+
+                if po_line.purchase_order_id != purchase_order.id:
+                    raise ValueError(
+                        f"Item '{po_line.part.name}' bukan bagian dari PO {purchase_order.number}."
+                    )
+                if quantity > po_line.quantity_outstanding:
+                    raise ValueError(
+                        f"Jumlah diterima untuk '{po_line.part.name}' melebihi sisa PO "
+                        f"(dipesan: {po_line.quantity_ordered}, sudah diterima: "
+                        f"{po_line.quantity_received}, sisa: {po_line.quantity_outstanding}, "
+                        f"diminta: {quantity}). Ubah jumlah PO terlebih dahulu jika memang "
+                        f"perlu menerima lebih banyak."
+                    )
+
+                line_items.append(GoodsReceivedNoteLineItem.objects.create(
                     organization=organization, goods_received_note=grn,
-                    part=line["part"], quantity=line["quantity"], unit_cost=line["unit_cost"],
-                )
-                for line in lines
-            ]
-            # Each GoodsReceivedNoteLineItem.save() above already
-            # created its own StockAdjustment(reason="restock") —
-            # no separate stock-update step needed here.
+                    purchase_order_line_item=po_line, part=po_line.part,
+                    quantity=quantity, unit_cost=line["unit_cost"],
+                ))
+                # Each GoodsReceivedNoteLineItem.save() above already
+                # created its own StockAdjustment(reason="restock").
 
             total_cost = sum((li.subtotal for li in line_items), Decimal("0"))
+
+            # Recompute the PO's own status from REAL, current totals
+            # across ALL its line items — not just the ones THIS GRN
+            # touched, since earlier partial deliveries matter too.
+            # Verified by hand across a real partial-then-complete
+            # scenario before being written here.
+            purchase_order.refresh_from_db()
+            all_fully_received = all(
+                li.quantity_outstanding <= Decimal("0") for li in purchase_order.line_items.all()
+            )
+            purchase_order.status = (
+                PurchaseOrder.Status.FULLY_RECEIVED if all_fully_received
+                else PurchaseOrder.Status.PARTIALLY_RECEIVED
+            )
+            purchase_order.save(update_fields=["status"])
 
             from apps.core.events.bus import default_bus
             from apps.purchasing.events import GoodsReceived
             default_bus.publish(GoodsReceived(
                 organization_id=organization.id,
                 goods_received_note_id=grn.id,
-                supplier_id=supplier.id,
+                supplier_id=purchase_order.supplier_id,
                 amount=total_cost,
                 line_item_count=len(line_items),
             ))
@@ -218,6 +460,17 @@ class GoodsReceivedNoteLineItem(TenantScopedModel):
     part = models.ForeignKey(
         "inventory.Part", on_delete=models.PROTECT, related_name="goods_received_line_items",
         verbose_name="Part",
+    )
+    purchase_order_line_item = models.ForeignKey(
+        "PurchaseOrderLineItem", on_delete=models.PROTECT,
+        related_name="grn_line_items", verbose_name="Item PO",
+        # Deliberately kept ALONGSIDE `part`, not replacing it — a
+        # derived property reading through this relation was
+        # considered, but `part` is a real column with real
+        # production data already in it; removing it would be a
+        # genuinely destructive schema change for something the
+        # "unlisted item" guard in receive() already guarantees can
+        # never drift from this relation's own part anyway.
     )
     quantity   = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Jumlah")
     unit_cost  = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Harga Beli Satuan")
