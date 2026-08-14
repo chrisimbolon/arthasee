@@ -390,13 +390,13 @@ export default function RootPage() {
   </span>
 </h1>        
 
-      {/* Description */}
-      <p className="mt-8 max-w-[610px] text-[18px] leading-[1.65] text-[#3C3C38]">
-        Arthasee menyimpan data pelanggan, riwayat kendaraan,
-        dan catatan servis bengkel Anda di satu tempat — lalu
-        memberi tahu unit mana yang sudah waktunya servis lagi.
-        Sesederhana itu, dan sudah bisa dipakai hari ini.
-      </p>
+{/* Description */}
+<p className="mt-8 max-w-[610px] text-[18px] leading-[1.65] text-white/80">
+  Arthasee menyimpan data pelanggan, riwayat kendaraan,
+  dan catatan servis bengkel Anda di satu tempat — lalu
+  memberi tahu unit mana yang sudah waktunya servis lagi.
+  Sesederhana itu, dan sudah bisa dipakai hari ini.
+</p>
 
       {/* Buttons */}
       <div className="mt-10 flex items-center gap-4">
