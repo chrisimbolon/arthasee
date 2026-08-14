@@ -381,12 +381,10 @@ export default function RootPage() {
       </div>
 
       {/* Heading */}
-      <h1 className="text-[clamp(52px,5.5vw,82px)] font-extrabold uppercase leading-[0.92] tracking-[-0.03em] text-[#17181A]">
-        TAU PERSIS
+      <h1 className="font-['Montserrat'] text-[clamp(40px,4vw,56px)] font-bold italic uppercase leading-none tracking-[0] text-white">
+        SISTEM MANAJEMEN
         <br />
-        KAPAN MEREKA
-        <br />
-        <span className="text-[#C1401C]">HARUS BALIK.</span>
+        BENGKEL TERINTEGRASI
       </h1>
 
       {/* Description */}
