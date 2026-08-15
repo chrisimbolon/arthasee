@@ -16,10 +16,46 @@ export interface Supplier {
   updated_at: string;
 }
 
+export interface PurchaseOrderLineItem {
+  id: string;
+  part: string;
+  part_name: string;
+  quantity_ordered: string;
+  unit_cost: string;
+  // Both computed live on the backend from real GRN lines tracing
+  // back to this one — never stored, never trust a second source of
+  // truth.
+  quantity_received: string;
+  quantity_outstanding: string;
+  created_at: string;
+}
+
+export interface PurchaseOrder {
+  id: string;
+  number: string;
+  sequence_number: number;
+  supplier: string;
+  supplier_name: string;
+  status: "DRAFT" | "ORDERED" | "PARTIALLY_RECEIVED" | "FULLY_RECEIVED" | "CANCELLED";
+  status_display: string;
+  order_date: string;
+  expected_date: string | null;
+  notes: string;
+  line_items: PurchaseOrderLineItem[];
+  total_ordered_value: string;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface GoodsReceivedNoteLineItem {
   id: string;
   part: string;
   part_name: string;
+  // Real traceability — every GRN line must trace back to an
+  // authorized PO line now.
+  purchase_order_line_item: string;
   quantity: string;
   unit_cost: string;
   subtotal: string;
@@ -32,6 +68,8 @@ export interface GoodsReceivedNote {
   sequence_number: number;
   supplier: string;
   supplier_name: string;
+  purchase_order: string;
+  purchase_order_number: string;
   // null until a SupplierInvoice links to this GRN — THE field the
   // whole Retur Pembelian Case-A guard hinges on. See
   // PurchaseReturn.create_return()'s own real backend docstring.
@@ -106,6 +144,41 @@ export const suppliersApi = {
   },
 };
 
+export const purchaseOrdersApi = {
+  async list(): Promise<PurchaseOrder[]> {
+    const { data } = await api.get("/api/purchase-orders/");
+    return data.purchase_orders;
+  },
+  async get(id: string): Promise<PurchaseOrder> {
+    const { data } = await api.get(`/api/purchase-orders/${id}/`);
+    return data.purchase_order;
+  },
+  async create(payload: {
+    supplier: string;
+    order_date: string;
+    expected_date?: string;
+    notes?: string;
+    status?: "DRAFT" | "ORDERED";
+    lines: { part: string; quantity_ordered: number; unit_cost: number }[];
+  }): Promise<PurchaseOrder> {
+    const { data } = await api.post("/api/purchase-orders/", payload);
+    return data.purchase_order;
+  },
+  async cancel(id: string): Promise<PurchaseOrder> {
+    const { data } = await api.post(`/api/purchase-orders/${id}/cancel/`);
+    return data.purchase_order;
+  },
+  // The real, deliberate resolution path for the over-receiving hard
+  // block on GRN creation — raises a PO line's own ceiling, on
+  // purpose, before a GRN is re-attempted.
+  async amendLineItem(lineItemId: string, quantityOrdered: number): Promise<PurchaseOrderLineItem> {
+    const { data } = await api.post(`/api/purchase-order-line-items/${lineItemId}/amend/`, {
+      quantity_ordered: quantityOrdered,
+    });
+    return data.purchase_order_line_item;
+  },
+};
+
 export const goodsReceivedNotesApi = {
   async list(): Promise<GoodsReceivedNote[]> {
     const { data } = await api.get("/api/goods-received-notes/");
@@ -116,11 +189,11 @@ export const goodsReceivedNotesApi = {
     return data.goods_received_note;
   },
   async create(payload: {
-    supplier: string;
+    purchase_order: string;
     received_at?: string;
     reference?: string;
     notes?: string;
-    lines: { part: string; quantity: number; unit_cost: number }[];
+    lines: { purchase_order_line_item: string; quantity: number; unit_cost: number }[];
   }): Promise<GoodsReceivedNote> {
     const { data } = await api.post("/api/goods-received-notes/", payload);
     return data.goods_received_note;
