@@ -1,11 +1,14 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/purchasing/goods-received/page.tsx ===
+// Full rewrite — GRN creation is now driven by an existing,
+// receivable PurchaseOrder's own line items, not a free-form
+// supplier+part picker. That whole design assumption is gone: every
+// GRN must trace back to an authorized PO.
 // =============================================================================
 import PurchasingSubNav from "@/components/purchasing/PurchasingSubNav";
-import { GoodsReceivedNote, goodsReceivedNotesApi, Supplier, suppliersApi } from "@/lib/api/purchasing";
-import { Part, partsApi } from "@/lib/api/service";
-import { Loader2, Plus, Trash2, X } from "lucide-react";
+import { GoodsReceivedNote, goodsReceivedNotesApi, PurchaseOrder, purchaseOrdersApi } from "@/lib/api/purchasing";
+import { Loader2, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -18,53 +21,74 @@ function formatRupiah(value: string): string {
   return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(toNumber(value));
 }
 
-interface LineInput {
-  part_id: string;
+interface LineState {
   quantity: string;
   unit_cost: string;
 }
 
-function emptyLine(): LineInput {
-  return { part_id: "", quantity: "", unit_cost: "" };
-}
-
 function CreateGrnModal({
-  suppliers, parts, onClose, onCreated,
+  purchaseOrders, onClose, onCreated,
 }: {
-  suppliers: Supplier[]; parts: Part[]; onClose: () => void; onCreated: (g: GoodsReceivedNote) => void;
+  purchaseOrders: PurchaseOrder[]; onClose: () => void; onCreated: (g: GoodsReceivedNote) => void;
 }) {
-  const [supplierId, setSupplierId] = useState("");
+  const [poId, setPoId] = useState("");
   const [reference, setReference] = useState("");
   const [notes, setNotes] = useState("");
-  const [lines, setLines] = useState<LineInput[]>([emptyLine()]);
+  const [lineInputs, setLineInputs] = useState<Record<string, LineState>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function updateLine(i: number, patch: Partial<LineInput>) {
-    setLines((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
-  }
-  function addLine() { setLines((prev) => [...prev, emptyLine()]); }
-  function removeLine(i: number) { setLines((prev) => prev.filter((_, idx) => idx !== i)); }
+  const selectedPo = purchaseOrders.find((p) => p.id === poId) ?? null;
 
-  const filledLines = lines.filter((l) => l.part_id && toNumber(l.quantity) > 0 && toNumber(l.unit_cost) > 0);
-  const canSubmit = !!supplierId && filledLines.length > 0 && !saving;
+  // Re-seed line inputs whenever the selected PO changes — quantity
+  // starts empty (the user must deliberately say how much arrived),
+  // unit_cost is pre-filled from the PO's own expected cost as a
+  // sensible starting point, still fully editable since the real
+  // invoiced price can differ.
+  useEffect(() => {
+    if (!selectedPo) { setLineInputs({}); return; }
+    const seeded: Record<string, LineState> = {};
+    for (const li of selectedPo.line_items) {
+      seeded[li.id] = { quantity: "", unit_cost: li.unit_cost };
+    }
+    setLineInputs(seeded);
+  }, [poId]);
+
+  function updateLine(lineId: string, patch: Partial<LineState>) {
+    setLineInputs((prev) => ({ ...prev, [lineId]: { ...prev[lineId], ...patch } }));
+  }
+
+  const filledLines = selectedPo
+    ? selectedPo.line_items
+        .map((li) => ({ li, input: lineInputs[li.id] }))
+        .filter((entry): entry is { li: typeof entry.li; input: LineState } =>
+          !!entry.input && toNumber(entry.input.quantity) > 0 && toNumber(entry.input.unit_cost) > 0)
+    : [];
+
+  const canSubmit = !!selectedPo && filledLines.length > 0 && !saving;
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!selectedPo) return;
     setSaving(true); setError(null);
     try {
       const grn = await goodsReceivedNotesApi.create({
-        supplier: supplierId,
+        purchase_order: selectedPo.id,
         reference: reference || undefined,
         notes: notes || undefined,
-        lines: filledLines.map((l) => ({
-          part: l.part_id, quantity: toNumber(l.quantity), unit_cost: toNumber(l.unit_cost),
+        lines: filledLines.map(({ li, input }) => ({
+          purchase_order_line_item: li.id,
+          quantity: toNumber(input.quantity), unit_cost: toNumber(input.unit_cost),
         })),
       });
       onCreated(grn);
       onClose();
-    } catch {
-      setError("Gagal mencatat penerimaan barang.");
+    } catch (err) {
+      // The backend's own error messages for both hard blocks
+      // (over-receiving, unlisted item) are already precise —
+      // surface them directly rather than a generic fallback.
+      const data = (err as { response?: { data?: { message?: string } } })?.response?.data;
+      setError(data?.message || "Gagal mencatat penerimaan barang.");
     } finally {
       setSaving(false);
     }
@@ -80,49 +104,67 @@ function CreateGrnModal({
         {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: 14 }}>
-            <label className="label">Supplier</label>
-            <select className="input" required value={supplierId} onChange={(e) => setSupplierId(e.target.value)}>
-              <option value="">Pilih supplier…</option>
-              {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            <label className="label">Purchase Order</label>
+            <select className="input" required value={poId} onChange={(e) => setPoId(e.target.value)}>
+              <option value="">Pilih PO…</option>
+              {purchaseOrders.map((p) => (
+                <option key={p.id} value={p.id}>{p.number} — {p.supplier_name}</option>
+              ))}
             </select>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
-            <div>
-              <label className="label">Referensi <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
-              <input className="input" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="No. surat jalan" />
-            </div>
-            <div>
-              <label className="label">Catatan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
-              <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} />
-            </div>
+            {purchaseOrders.length === 0 && (
+              <div style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 6 }}>
+                Tidak ada PO yang masih bisa menerima barang. Buat PO terlebih dahulu di halaman Purchase Order.
+              </div>
+            )}
           </div>
 
-          <div className="label" style={{ marginBottom: 10 }}>Item Diterima</div>
-          {lines.map((line, i) => (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10 }}>
-              <div style={{ flex: 2 }}>
-                {i === 0 && <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Part</div>}
-                <select className="input" value={line.part_id} onChange={(e) => updateLine(i, { part_id: e.target.value })}>
-                  <option value="">Pilih part…</option>
-                  {parts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
+          {selectedPo && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+                <div>
+                  <label className="label">Referensi <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
+                  <input className="input" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="No. surat jalan" />
+                </div>
+                <div>
+                  <label className="label">Catatan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
+                  <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} />
+                </div>
               </div>
-              <div style={{ width: 90 }}>
-                {i === 0 && <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Jumlah</div>}
-                <input className="input" type="number" min={0} value={line.quantity} onChange={(e) => updateLine(i, { quantity: e.target.value })} placeholder="0" />
+
+              <div className="label" style={{ marginBottom: 10 }}>Item — Jumlah Diterima</div>
+              {selectedPo.line_items.map((li) => {
+                const input = lineInputs[li.id] ?? { quantity: "", unit_cost: li.unit_cost };
+                return (
+                  <div key={li.id} style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10 }}>
+                    <div style={{ flex: 2 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{li.part_name}</div>
+                      <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Sisa PO: {li.quantity_outstanding}</div>
+                    </div>
+                    <div style={{ width: 100 }}>
+                      <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Jumlah</div>
+                      <input
+                        className="input" type="number" min={0}
+                        value={input.quantity}
+                        onChange={(e) => updateLine(li.id, { quantity: e.target.value })}
+                        placeholder="0"
+                      />
+                    </div>
+                    <div style={{ width: 130 }}>
+                      <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Harga Beli</div>
+                      <input
+                        className="input" type="number" min={0}
+                        value={input.unit_cost}
+                        onChange={(e) => updateLine(li.id, { unit_cost: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ fontSize: 12, color: "var(--steel)", marginBottom: 20 }}>
+                Jumlah tidak boleh melebihi sisa PO — sistem akan menolak dengan pesan yang jelas jika melebihi.
               </div>
-              <div style={{ width: 130 }}>
-                {i === 0 && <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Harga Beli</div>}
-                <input className="input" type="number" min={0} value={line.unit_cost} onChange={(e) => updateLine(i, { unit_cost: e.target.value })} placeholder="0" />
-              </div>
-              <button type="button" onClick={() => removeLine(i)} disabled={lines.length <= 1} className="btn-ghost" style={{ padding: "9px 10px" }}>
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
-          <button type="button" onClick={addLine} className="btn-ghost" style={{ fontSize: 13, display: "inline-flex", alignItems: "center", gap: 6, marginTop: 4, marginBottom: 20 }}>
-            <Plus size={14} /> Tambah Item
-          </button>
+            </>
+          )}
 
           <button className="btn-rust" type="submit" disabled={!canSubmit} style={{ width: "100%", justifyContent: "center" }}>
             {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
@@ -135,16 +177,22 @@ function CreateGrnModal({
 
 export default function GoodsReceivedNotesPage() {
   const [grns, setGrns] = useState<GoodsReceivedNote[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [parts, setParts] = useState<Part[]>([]);
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
 
+  const loadPurchaseOrders = () => purchaseOrdersApi.list().then(setPurchaseOrders);
+
   useEffect(() => {
-    Promise.all([goodsReceivedNotesApi.list(), suppliersApi.list(), partsApi.list()])
-      .then(([g, s, p]) => { setGrns(g); setSuppliers(s); setParts(p); })
+    Promise.all([goodsReceivedNotesApi.list(), purchaseOrdersApi.list()])
+      .then(([g, po]) => { setGrns(g); setPurchaseOrders(po); })
       .finally(() => setLoading(false));
   }, []);
+
+  // Only POs that can still genuinely receive something — a
+  // FULLY_RECEIVED, CANCELLED, or still-DRAFT (never sent) PO has no
+  // business showing up as a receivable option.
+  const receivablePOs = purchaseOrders.filter((p) => p.status === "ORDERED" || p.status === "PARTIALLY_RECEIVED");
 
   return (
     <div>
@@ -164,7 +212,7 @@ export default function GoodsReceivedNotesPage() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Nomor</th><th>Supplier</th><th>Diterima</th><th>Total Biaya</th><th>Status</th></tr>
+              <tr><th>Nomor</th><th>PO</th><th>Supplier</th><th>Diterima</th><th>Total Biaya</th><th>Status</th></tr>
             </thead>
             <tbody>
               {grns.map((g) => (
@@ -172,6 +220,11 @@ export default function GoodsReceivedNotesPage() {
                   <td>
                     <Link href={`/dashboard/goods-received-detail?id=${g.id}`} className="mono" style={{ color: "var(--rust)", textDecoration: "none", fontWeight: 600 }}>
                       {g.number}
+                    </Link>
+                  </td>
+                  <td>
+                    <Link href={`/dashboard/purchase-order-detail?id=${g.purchase_order}`} className="mono" style={{ color: "var(--steel)", textDecoration: "none" }}>
+                      {g.purchase_order_number}
                     </Link>
                   </td>
                   <td>{g.supplier_name}</td>
@@ -185,7 +238,7 @@ export default function GoodsReceivedNotesPage() {
                 </tr>
               ))}
               {grns.length === 0 && (
-                <tr><td colSpan={5} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>Belum ada penerimaan barang tercatat</td></tr>
+                <tr><td colSpan={6} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>Belum ada penerimaan barang tercatat</td></tr>
               )}
             </tbody>
           </table>
@@ -194,9 +247,15 @@ export default function GoodsReceivedNotesPage() {
 
       {showCreate && (
         <CreateGrnModal
-          suppliers={suppliers} parts={parts}
+          purchaseOrders={receivablePOs}
           onClose={() => setShowCreate(false)}
-          onCreated={(g) => setGrns((prev) => [g, ...prev])}
+          onCreated={(g) => {
+            setGrns((prev) => [g, ...prev]);
+            // The PO just used may now be PARTIALLY_RECEIVED or
+            // FULLY_RECEIVED — refresh so the next time this modal
+            // opens, its receivable-PO list is honest.
+            loadPurchaseOrders();
+          }}
         />
       )}
     </div>
