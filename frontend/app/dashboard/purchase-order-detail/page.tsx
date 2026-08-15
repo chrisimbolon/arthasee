@@ -105,6 +105,13 @@ export default function PurchaseOrderDetailPage() {
       load();
     } catch (err) {
       setError(extractErrorMessage(err, "Gagal membatalkan Purchase Order."));
+    } finally {
+      // Real bug, caught live: this only reset in the catch branch
+      // before — on a SUCCESSFUL cancel, `cancelling` stayed true
+      // forever, permanently stuck showing just the spinner even
+      // though the cancel itself genuinely worked. finally covers
+      // both paths, matching every other submit handler in this
+      // whole codebase.
       setCancelling(false);
     }
   };
@@ -130,6 +137,11 @@ export default function PurchaseOrderDetailPage() {
   // explanation once anything's been received, matching the exact
   // same honesty pattern as the Retur Pembelian button on GRN detail.
   const canCancel = po.status === "DRAFT" || po.status === "ORDERED";
+  const cancelBlockedReason =
+    po.status === "CANCELLED" ? "PO ini sudah dibatalkan."
+    : po.status === "FULLY_RECEIVED" ? "Semua barang untuk PO ini sudah diterima — tidak bisa dibatalkan."
+    : po.status === "PARTIALLY_RECEIVED" ? "Sudah ada barang yang diterima untuk PO ini — tidak bisa dibatalkan."
+    : null;
 
   return (
     <div>
@@ -153,9 +165,9 @@ export default function PurchaseOrderDetailPage() {
             >
               {cancelling ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <><XCircle size={14} /> Batalkan PO</>}
             </button>
-            {!canCancel && (
+            {!canCancel && cancelBlockedReason && (
               <div style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 6, maxWidth: 220 }}>
-                Sudah ada barang yang diterima untuk PO ini — tidak bisa dibatalkan.
+                {cancelBlockedReason}
               </div>
             )}
           </div>
