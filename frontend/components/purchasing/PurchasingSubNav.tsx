@@ -6,8 +6,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const SUBNAV = [
-  { href: "/dashboard/purchasing/suppliers",        label: "Supplier" },
-  { href: "/dashboard/purchasing/goods-received",   label: "Penerimaan Barang" },
+  { href: "/dashboard/purchasing/suppliers",         label: "Supplier" },
+  { href: "/dashboard/purchasing/purchase-orders",   label: "Purchase Order" },
+  { href: "/dashboard/purchasing/goods-received",    label: "Penerimaan Barang" },
   { href: "/dashboard/purchasing/supplier-invoices", label: "Invoice Supplier" },
 ];
 
