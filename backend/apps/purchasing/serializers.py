@@ -204,21 +204,22 @@ class PurchaseReturnLineItemSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields  # frozen — same discipline as GoodsReceivedNoteLineItemSerializer
 
-
 class PurchaseReturnSerializer(serializers.ModelSerializer):
-    line_items                 = PurchaseReturnLineItemSerializer(many=True, read_only=True)
-    total_value                = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    line_items         = PurchaseReturnLineItemSerializer(many=True, read_only=True)
+    total_value        = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     goods_received_note_number = serializers.CharField(source="goods_received_note.number", read_only=True)
-    created_by_name             = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+    created_by_name    = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+    classification_display = serializers.CharField(source="get_return_classification_display", read_only=True)
 
     class Meta:
         model  = PurchaseReturn
         fields = [
             "id", "number", "sequence_number", "goods_received_note",
             "goods_received_note_number", "return_date", "reason",
+            "return_classification", "classification_display",
             "line_items", "total_value", "created_by", "created_by_name", "created_at",
         ]
-        read_only_fields = fields  # frozen document — no PATCH/PUT endpoint exists at all
+        read_only_fields = fields  # system-determined at creation, never user-editable — see the model field's own docstring
 
 
 class PurchaseReturnLineItemInputSerializer(serializers.Serializer):

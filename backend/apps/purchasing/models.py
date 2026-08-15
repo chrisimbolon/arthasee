@@ -664,12 +664,31 @@ class PurchaseReturn(TenantScopedModel):
     as GoodsReceivedNote itself. A wrong return needs its own
     correcting StockAdjustment, not an edit to history.
     """
+    class ReturnClassification(models.TextChoices):
+        BEFORE_INVOICE        = "BEFORE_INVOICE", "Sebelum Invoice (Retur ke Accrued Inventory)"
+        AFTER_INVOICE_UNPAID  = "AFTER_INVOICE_UNPAID", "Setelah Invoice, Belum Dibayar (Retur ke Utang)"
+        # AFTER_INVOICE_PAID (Case C) deliberately does not exist yet
+        # — real refund mechanics (cash vs. vendor credit) vary by
+        # supplier and need Made's own direct input before this can
+        # be scoped safely. See create_return()'s own guard below.
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor Retur")
     sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
     goods_received_note = models.ForeignKey(
         GoodsReceivedNote, on_delete=models.PROTECT, related_name="purchase_returns",
         verbose_name="GRN Asal",
+    )
+    # System-determined at creation, never user-editable — same
+    # treatment as `number`/`sequence_number` above. Real audit
+    # visibility: a shop owner reviewing this return months later can
+    # see immediately whether it reduced Accrued Inventory (GR/IR) or
+    # reduced a real vendor bill (AP), without inferring it from the
+    # linked GRN's own current state (which may have moved on since).
+    return_classification = models.CharField(
+        max_length=30, choices=ReturnClassification.choices, editable=False,
+        default=ReturnClassification.BEFORE_INVOICE,
+        verbose_name="Klasifikasi Retur",
     )
     return_date = models.DateTimeField(verbose_name="Tanggal Retur")
     reason      = models.TextField(verbose_name="Alasan Retur")
@@ -701,39 +720,53 @@ class PurchaseReturn(TenantScopedModel):
         super().save(*args, **kwargs)
 
     @classmethod
+    @classmethod
     def create_return(
         cls, *, organization, goods_received_note, lines,
         return_date=None, reason="", created_by=None,
     ):
         """
-        The one real entry point — mirrors GoodsReceivedNote.receive()
-        exactly: validates the Case-A precondition BEFORE creating
-        anything, owns its own transaction.atomic(), creates the
-        document and every line item together, and publishes exactly
-        ONE PurchaseReturned event for the whole document — aggregating
-        every line's value into one total, same "one document, one
-        accounting fact" pattern as GoodsReceived.
+        Determines WHICH real classification applies — before any
+        supplier invoice exists (Case A), or an invoice exists but is
+        still unpaid (Case B) — once, here, inside this same
+        transaction, and freezes it BOTH on the record itself
+        (return_classification, real audit visibility — see the
+        field's own docstring) AND inside the PurchaseReturned
+        event's own payload (debit_account_code).
 
-        `lines` is a plain list of dicts:
-            [{"grn_line_item": <GoodsReceivedNoteLineItem>, "quantity": Decimal}, ...]
+        posting_engine.py never re-derives this from live GRN/
+        SupplierInvoice state later — by the time an event is
+        actually processed (after commit, asynchronously via the
+        real event bus), that state could theoretically have moved
+        on. Same "capture once, don't recompute from a shifting
+        database" discipline already used for GoodsReceived's own
+        amount — verified by hand before being written here.
 
-        Each line's quantity is validated against how much of that
-        SPECIFIC GRN line has already been returned across any prior
-        PurchaseReturn — supports multiple partial returns against the
-        same line over time, capped honestly at what was actually
-        received. Verified by hand before being written here.
+        Case C (return after the supplier invoice has been PAID)
+        remains explicitly deferred — real refund mechanics (cash vs.
+        vendor credit) vary by supplier and need Made's own direct
+        input before this can be scoped safely, not guessed at.
         """
-        if goods_received_note.supplier_invoice_id is not None:
+        invoice = goods_received_note.supplier_invoice
+        if invoice is None:
+            classification = cls.ReturnClassification.BEFORE_INVOICE
+            debit_account_code = "2010"
+        elif invoice.status == "UNPAID":
+            classification = cls.ReturnClassification.AFTER_INVOICE_UNPAID
+            debit_account_code = "2001"
+        else:
             raise ValueError(
-                f"GRN {goods_received_note.number} sudah memiliki invoice supplier — "
-                f"retur untuk GRN yang sudah ditagih belum didukung di versi ini."
+                f"Invoice untuk GRN {goods_received_note.number} sudah dibayar ke supplier — "
+                f"retur untuk invoice yang sudah lunas belum didukung di versi ini."
             )
+
         if not lines:
             raise ValueError("Retur Pembelian harus memiliki minimal satu item.")
 
         with transaction.atomic():
             ret = cls.objects.create(
                 organization=organization, goods_received_note=goods_received_note,
+                return_classification=classification,
                 return_date=return_date or timezone.now(), reason=reason, created_by=created_by,
             )
             line_items = []
@@ -776,6 +809,7 @@ class PurchaseReturn(TenantScopedModel):
                 goods_received_note_id=goods_received_note.id,
                 amount=total_value,
                 line_item_count=len(line_items),
+                debit_account_code=debit_account_code,
             ))
 
         return ret
