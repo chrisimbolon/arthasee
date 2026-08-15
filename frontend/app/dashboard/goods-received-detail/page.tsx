@@ -180,7 +180,17 @@ export default function GoodsReceivedNoteDetailPage() {
       </div>
 
       <div className="card" style={{ marginBottom: 20 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Purchase Order</div>
+            <Link
+              href={`/dashboard/purchase-order-detail?id=${grn.purchase_order}`}
+              className="mono"
+              style={{ fontSize: 13, color: "var(--rust)", textDecoration: "none", fontWeight: 600 }}
+            >
+              {grn.purchase_order_number}
+            </Link>
+          </div>
           <div>
             <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Status</div>
             <span className={`pill ${alreadyInvoiced ? "ok" : "soon"}`}>{alreadyInvoiced ? "Sudah Ditagih" : "Belum Ditagih"}</span>
