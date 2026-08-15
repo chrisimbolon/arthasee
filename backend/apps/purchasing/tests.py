@@ -644,6 +644,23 @@ class PurchasingAPITestBase(APITestCase):
         )
         self.client.force_authenticate(user=self.owner)
 
+    def _create_po_via_api(self, part=None, quantity="10.00", unit_cost="45000.00"):
+        """
+        Real shared prerequisite every GRN test now needs — creates a
+        PO through the actual HTTP endpoint (not the model layer
+        directly), matching what a real user does. No
+        captureOnCommitCallbacks wrapper here — PurchaseOrder.create_order()
+        deliberately publishes no domain event (a PO is a commitment,
+        not yet an economic transaction), so there's nothing for
+        on_commit to fire.
+        """
+        part = part or self.part
+        resp = self.client.post("/api/purchase-orders/", {
+            "supplier": str(self.supplier.id), "order_date": "2026-08-14",
+            "lines": [{"part": str(part.id), "quantity_ordered": quantity, "unit_cost": unit_cost}],
+        }, format="json")
+        return resp.data["purchase_order"]
+
 
 class SupplierAPITests(PurchasingAPITestBase):
 
@@ -661,14 +678,71 @@ class SupplierAPITests(PurchasingAPITestBase):
         self.assertIn("PT Sparepart Jaya", names)
         self.assertNotIn("Supplier Org Lain", names)
 
+class PurchaseOrderAPITests(PurchasingAPITestBase):
+
+    def test_create_purchase_order_defaults_to_ordered(self):
+        po = self._create_po_via_api()
+        self.assertEqual(po["status"], "ORDERED")
+        self.assertEqual(po["number"], "PO/00001")
+
+    def test_create_purchase_order_rejects_cross_tenant_part(self):
+        other_org = Organization.objects.create(name="Bengkel Lain PO Part")
+        other_part = Part.objects.create(
+            organization=other_org, name="Part Org Lain", unit="pcs",
+            unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
+        )
+        resp = self.client.post("/api/purchase-orders/", {
+            "supplier": str(self.supplier.id), "order_date": "2026-08-14",
+            "lines": [{"part": str(other_part.id), "quantity_ordered": "1.00", "unit_cost": "1000.00"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(PurchaseOrder.objects.exists())
+
+    def test_cancel_purchase_order_via_api(self):
+        po = self._create_po_via_api()
+        resp = self.client.post(f"/api/purchase-orders/{po['id']}/cancel/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["purchase_order"]["status"], "CANCELLED")
+
+    def test_cancel_blocked_via_api_once_received(self):
+        po = self._create_po_via_api()
+        po_line_id = po["line_items"][0]["id"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post("/api/goods-received-notes/", {
+                "purchase_order": po["id"],
+                "lines": [{"purchase_order_line_item": po_line_id, "quantity": "1.00", "unit_cost": "45000.00"}],
+            }, format="json")
+        resp = self.client.post(f"/api/purchase-orders/{po['id']}/cancel/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_amend_quantity_via_api(self):
+        po = self._create_po_via_api()
+        po_line_id = po["line_items"][0]["id"]
+        resp = self.client.post(f"/api/purchase-order-line-items/{po_line_id}/amend/", {
+            "quantity_ordered": "20.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["purchase_order_line_item"]["quantity_ordered"], "20.00")
+
+    def test_receiving_more_than_po_via_api_is_blocked(self):
+        po = self._create_po_via_api(quantity="10.00")
+        po_line_id = po["line_items"][0]["id"]
+        resp = self.client.post("/api/goods-received-notes/", {
+            "purchase_order": po["id"],
+            "lines": [{"purchase_order_line_item": po_line_id, "quantity": "11.00", "unit_cost": "45000.00"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 class GoodsReceivedNoteAPITests(PurchasingAPITestBase):
 
     def test_create_grn_via_api_posts_real_journal_entry(self):
+        po = self._create_po_via_api()
+        po_line_id = po["line_items"][0]["id"]
+
         with self.captureOnCommitCallbacks(execute=True):
             resp = self.client.post("/api/goods-received-notes/", {
-                "supplier": str(self.supplier.id),
-                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+                "purchase_order": po["id"],
+                "lines": [{"purchase_order_line_item": po_line_id, "quantity": "10.00", "unit_cost": "45000.00"}],
             }, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
@@ -680,42 +754,81 @@ class GoodsReceivedNoteAPITests(PurchasingAPITestBase):
         self.assertEqual(inventory.balance(), Decimal("450000.00"))
         self.assertEqual(accrued.balance(), Decimal("450000.00"))
 
-    def test_create_grn_rejects_cross_tenant_part(self):
+    def test_create_grn_rejects_cross_tenant_purchase_order_line_item(self):
         """
         The real proof the UUIDField-not-PrimaryKeyRelatedField
-        design decision actually holds — referencing another shop's
-        Part must be structurally impossible, not just discouraged.
-        This is the single most important test in this whole batch.
+        design decision still holds at this layer — real equivalent
+        of the original "cross-tenant part" concern. `part` is no
+        longer a direct GRN input at all (it's derived through
+        purchase_order_line_item) — the real boundary to prove now is
+        that referencing another shop's PurchaseOrderLineItem, even
+        against an otherwise valid OWN PurchaseOrder, is structurally
+        impossible, not just discouraged.
         """
         other_org = Organization.objects.create(name="Bengkel Lain GRN Part")
+        other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Org Lain")
         other_part = Part.objects.create(
             organization=other_org, name="Part Org Lain", unit="pcs",
             unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
         )
+        other_po = PurchaseOrder.create_order(
+            organization=other_org, supplier=other_supplier, order_date="2026-08-14",
+            lines=[{"part": other_part, "quantity_ordered": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
+
+        my_po = self._create_po_via_api()
 
         resp = self.client.post("/api/goods-received-notes/", {
-            "supplier": str(self.supplier.id),
-            "lines": [{"part": str(other_part.id), "quantity": "1.00", "unit_cost": "1000.00"}],
+            "purchase_order": my_po["id"],
+            "lines": [{
+                "purchase_order_line_item": str(other_po.line_items.first().id),
+                "quantity": "1.00", "unit_cost": "1000.00",
+            }],
         }, format="json")
 
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertFalse(GoodsReceivedNote.objects.exists())  # nothing partial got created
 
-    def test_create_grn_rejects_cross_tenant_supplier(self):
+    def test_create_grn_rejects_cross_tenant_purchase_order(self):
+        """
+        Real equivalent of the original "cross-tenant supplier"
+        concern. `supplier` is no longer a direct GRN input at all
+        (it's derived from purchase_order.supplier inside receive())
+        — the real cross-tenant boundary to prove now is the PO
+        reference itself.
+        """
         other_org = Organization.objects.create(name="Bengkel Lain GRN Supplier")
         other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Org Lain")
+        other_part = Part.objects.create(
+            organization=other_org, name="Part Org Lain 2", unit="pcs",
+            unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
+        )
+        other_po = PurchaseOrder.create_order(
+            organization=other_org, supplier=other_supplier, order_date="2026-08-14",
+            lines=[{"part": other_part, "quantity_ordered": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
 
         resp = self.client.post("/api/goods-received-notes/", {
-            "supplier": str(other_supplier.id),
-            "lines": [{"part": str(self.part.id), "quantity": "1.00", "unit_cost": "1000.00"}],
+            "purchase_order": str(other_po.id),
+            "lines": [{
+                "purchase_order_line_item": str(other_po.line_items.first().id),
+                "quantity": "1.00", "unit_cost": "1000.00",
+            }],
         }, format="json")
 
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_org_b_cannot_see_org_a_goods_received_notes(self):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part, "quantity_ordered": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
         GoodsReceivedNote.receive(
-            organization=self.org, supplier=self.supplier,
-            lines=[{"part": self.part, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00"),
+            }],
         )
         other_org = Organization.objects.create(name="Bengkel Lain GRN List")
         other_owner = CustomUser.objects.create_user(
@@ -735,15 +848,18 @@ class SupplierInvoiceAPITests(PurchasingAPITestBase):
 
     def test_full_round_trip_receive_invoice_and_pay(self):
         """
-        The real end-to-end proof — receive goods, bill it, pay it,
-        all through the actual HTTP endpoints, confirming the ledger
-        is correct at every step, not just that each call returns
-        the right status code.
+        The real end-to-end proof — order, receive goods, bill it,
+        pay it, all through the actual HTTP endpoints, confirming the
+        ledger is correct at every step, not just that each call
+        returns the right status code.
         """
+        po = self._create_po_via_api()
+        po_line_id = po["line_items"][0]["id"]
+
         with self.captureOnCommitCallbacks(execute=True):
             grn_resp = self.client.post("/api/goods-received-notes/", {
-                "supplier": str(self.supplier.id),
-                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+                "purchase_order": po["id"],
+                "lines": [{"purchase_order_line_item": po_line_id, "quantity": "10.00", "unit_cost": "45000.00"}],
             }, format="json")
         grn_id = grn_resp.data["goods_received_note"]["id"]
 
@@ -781,9 +897,16 @@ class SupplierInvoiceAPITests(PurchasingAPITestBase):
             organization=other_org, name="Part Org Lain", unit="pcs",
             unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
         )
+        other_po = PurchaseOrder.create_order(
+            organization=other_org, supplier=other_supplier, order_date="2026-08-14",
+            lines=[{"part": other_part, "quantity_ordered": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
         other_grn = GoodsReceivedNote.receive(
-            organization=other_org, supplier=other_supplier,
-            lines=[{"part": other_part, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+            organization=other_org, purchase_order=other_po,
+            lines=[{
+                "purchase_order_line_item": other_po.line_items.first(),
+                "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00"),
+            }],
         )
 
         resp = self.client.post("/api/supplier-invoices/", {
@@ -799,10 +922,13 @@ class SupplierInvoiceAPITests(PurchasingAPITestBase):
 class PurchaseReturnAPITests(PurchasingAPITestBase):
 
     def test_create_purchase_return_via_api_posts_real_journal_entry(self):
+        po = self._create_po_via_api()
+        po_line_id = po["line_items"][0]["id"]
+
         with self.captureOnCommitCallbacks(execute=True):
             grn_resp = self.client.post("/api/goods-received-notes/", {
-                "supplier": str(self.supplier.id),
-                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+                "purchase_order": po["id"],
+                "lines": [{"purchase_order_line_item": po_line_id, "quantity": "10.00", "unit_cost": "45000.00"}],
             }, format="json")
         grn_data = grn_resp.data["goods_received_note"]
         grn_line_id = grn_data["line_items"][0]["id"]
@@ -825,10 +951,13 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
         self.assertEqual(accrued.balance(), Decimal("315000.00"))
 
     def test_return_rejects_grn_already_invoiced(self):
+        po = self._create_po_via_api()
+        po_line_id = po["line_items"][0]["id"]
+
         with self.captureOnCommitCallbacks(execute=True):
             grn_resp = self.client.post("/api/goods-received-notes/", {
-                "supplier": str(self.supplier.id),
-                "lines": [{"part": str(self.part.id), "quantity": "10.00", "unit_cost": "45000.00"}],
+                "purchase_order": po["id"],
+                "lines": [{"purchase_order_line_item": po_line_id, "quantity": "10.00", "unit_cost": "45000.00"}],
             }, format="json")
         grn_data = grn_resp.data["goods_received_note"]
 
@@ -854,9 +983,16 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
             organization=other_org, name="Part Lain", unit="pcs",
             unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
         )
+        other_po = PurchaseOrder.create_order(
+            organization=other_org, supplier=other_supplier, order_date="2026-08-14",
+            lines=[{"part": other_part, "quantity_ordered": Decimal("5.00"), "unit_cost": Decimal("1000.00")}],
+        )
         other_grn = GoodsReceivedNote.receive(
-            organization=other_org, supplier=other_supplier,
-            lines=[{"part": other_part, "quantity": Decimal("5.00"), "unit_cost": Decimal("1000.00")}],
+            organization=other_org, purchase_order=other_po,
+            lines=[{
+                "purchase_order_line_item": other_po.line_items.first(),
+                "quantity": Decimal("5.00"), "unit_cost": Decimal("1000.00"),
+            }],
         )
 
         resp = self.client.post("/api/purchase-returns/", {
@@ -868,10 +1004,13 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
         self.assertFalse(PurchaseReturn.objects.exists())
 
     def test_org_b_cannot_see_org_a_purchase_returns(self):
+        po = self._create_po_via_api()
+        po_line_id = po["line_items"][0]["id"]
+
         with self.captureOnCommitCallbacks(execute=True):
             grn_resp = self.client.post("/api/goods-received-notes/", {
-                "supplier": str(self.supplier.id),
-                "lines": [{"part": str(self.part.id), "quantity": "5.00", "unit_cost": "1000.00"}],
+                "purchase_order": po["id"],
+                "lines": [{"purchase_order_line_item": po_line_id, "quantity": "5.00", "unit_cost": "1000.00"}],
             }, format="json")
         grn_data = grn_resp.data["goods_received_note"]
         with self.captureOnCommitCallbacks(execute=True):
