@@ -12,9 +12,14 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
-                     PurchaseReturn, Supplier, SupplierInvoice)
+                     PurchaseOrder, PurchaseOrderLineItem, PurchaseReturn,
+                     Supplier, SupplierInvoice)
 from .serializers import (GoodsReceivedNoteRecordSerializer,
                           GoodsReceivedNoteSerializer,
+                          PurchaseOrderAmendQuantitySerializer,
+                          PurchaseOrderLineItemSerializer,
+                          PurchaseOrderRecordSerializer,
+                          PurchaseOrderSerializer,
                           PurchaseReturnRecordSerializer,
                           PurchaseReturnSerializer,
                           SupplierInvoiceRecordSerializer,
@@ -61,28 +66,25 @@ class SupplierDetailView(TenantScopedAPIView):
         supplier = self.get_object(pk)
         return Response({"success": True, "supplier": SupplierSerializer(supplier).data})
 
-
-class GoodsReceivedNoteListCreateView(TenantScopedAPIView):
+class PurchaseOrderListCreateView(TenantScopedAPIView):
     """
-    GET  /api/goods-received-notes/  — list
-    POST /api/goods-received-notes/  — record a delivery
+    GET  /api/purchase-orders/  — list
+    POST /api/purchase-orders/  — create (single action — no PR, no
+    approval routing; Made is the owner/operator, confirmed directly)
 
-    All real logic (sequence numbering, the real StockAdjustment side
-    effect per line, the GoodsReceived event) lives in
-    GoodsReceivedNote.receive() — this view is thin, and its only
-    real job beyond calling that method is resolving `supplier` and
-    every line's `part` against the ACTING organization specifically,
-    never trusting the raw UUIDs a request supplies.
+    Mirrors GoodsReceivedNoteListCreateView's exact tenant-resolution
+    discipline — `supplier` and every line's `part` are resolved
+    against the ACTING organization, never trusted directly.
     """
-    model = GoodsReceivedNote
+    model = PurchaseOrder
 
     def get(self, request):
-        grns = (
+        orders = (
             self.get_queryset()
-            .select_related("supplier", "received_by")
+            .select_related("supplier", "created_by")
             .prefetch_related("line_items__part")
         )
-        return Response({"success": True, "goods_received_notes": GoodsReceivedNoteSerializer(grns, many=True).data})
+        return Response({"success": True, "purchase_orders": PurchaseOrderSerializer(orders, many=True).data})
 
     def post(self, request):
         organization = self.get_organization()
@@ -92,7 +94,7 @@ class GoodsReceivedNoteListCreateView(TenantScopedAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        input_serializer = GoodsReceivedNoteRecordSerializer(data=request.data)
+        input_serializer = PurchaseOrderRecordSerializer(data=request.data)
         input_serializer.is_valid(raise_exception=True)
         data = input_serializer.validated_data
 
@@ -111,11 +113,135 @@ class GoodsReceivedNoteListCreateView(TenantScopedAPIView):
                     {"success": False, "message": f"Part dengan id {line['part']} tidak ditemukan."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
-            lines.append({"part": part, "quantity": line["quantity"], "unit_cost": line["unit_cost"]})
+            lines.append({"part": part, "quantity_ordered": line["quantity_ordered"], "unit_cost": line["unit_cost"]})
+
+        try:
+            po = PurchaseOrder.create_order(
+                organization=organization, supplier=supplier, lines=lines,
+                order_date=data["order_date"], expected_date=data.get("expected_date"),
+                notes=data.get("notes", ""), status=data.get("status", "ORDERED"),
+                created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "purchase_order": PurchaseOrderSerializer(po).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PurchaseOrderDetailView(TenantScopedAPIView):
+    """GET /api/purchase-orders/<id>/"""
+    model = PurchaseOrder
+
+    def get(self, request, pk):
+        po = self.get_object(pk)
+        return Response({"success": True, "purchase_order": PurchaseOrderSerializer(po).data})
+
+
+class PurchaseOrderCancelView(TenantScopedAPIView):
+    """
+    POST /api/purchase-orders/<id>/cancel/
+    Real guard lives entirely in PurchaseOrder.cancel() itself — only
+    DRAFT/ORDERED (zero real receipts) can be cancelled cleanly.
+    """
+    model = PurchaseOrder
+
+    def post(self, request, pk):
+        po = self.get_object(pk)
+        try:
+            po.cancel()
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"success": True, "purchase_order": PurchaseOrderSerializer(po).data})
+
+
+class PurchaseOrderLineItemAmendView(TenantScopedAPIView):
+    """
+    POST /api/purchase-order-line-items/<id>/amend/
+    The real, deliberate resolution path for the over-receiving hard
+    block in GoodsReceivedNote.receive() — raises a PO line's own
+    ceiling, on purpose, before a GRN is re-attempted. Real guard
+    (can't drop below what's already been received) lives entirely
+    in PurchaseOrderLineItem.amend_quantity() itself.
+    """
+    model = PurchaseOrderLineItem
+
+    def post(self, request, pk):
+        po_line = self.get_object(pk)
+        input_serializer = PurchaseOrderAmendQuantitySerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        try:
+            po_line.amend_quantity(input_serializer.validated_data["quantity_ordered"])
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"success": True, "purchase_order_line_item": PurchaseOrderLineItemSerializer(po_line).data})
+
+class GoodsReceivedNoteListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/goods-received-notes/  — list
+    POST /api/goods-received-notes/  — record a delivery against an
+    existing Purchase Order
+
+    All real logic (the two hard-block guardrails, the PO status
+    recompute, the real StockAdjustment side effect per line, the
+    GoodsReceived event) lives in GoodsReceivedNote.receive() — this
+    view is thin, and its only real job beyond calling that method is
+    resolving `purchase_order` and every line's
+    `purchase_order_line_item` against the ACTING organization
+    specifically, never trusting the raw UUIDs a request supplies.
+    """
+    model = GoodsReceivedNote
+
+    def get(self, request):
+        grns = (
+            self.get_queryset()
+            .select_related("supplier", "purchase_order", "received_by")
+            .prefetch_related("line_items__part")
+        )
+        return Response({"success": True, "goods_received_notes": GoodsReceivedNoteSerializer(grns, many=True).data})
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = GoodsReceivedNoteRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        purchase_order = PurchaseOrder.objects.filter(organization=organization, pk=data["purchase_order"]).first()
+        if purchase_order is None:
+            return Response(
+                {"success": False, "message": "Purchase Order tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        lines = []
+        for line in data["lines"]:
+            po_line = PurchaseOrderLineItem.objects.filter(
+                organization=organization, pk=line["purchase_order_line_item"],
+            ).first()
+            if po_line is None:
+                return Response(
+                    {
+                        "success": False,
+                        "message": f"Item PO dengan id {line['purchase_order_line_item']} tidak ditemukan.",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            lines.append({
+                "purchase_order_line_item": po_line,
+                "quantity": line["quantity"], "unit_cost": line["unit_cost"],
+            })
 
         try:
             grn = GoodsReceivedNote.receive(
-                organization=organization, supplier=supplier, lines=lines,
+                organization=organization, purchase_order=purchase_order, lines=lines,
                 received_at=data.get("received_at"),
                 reference=data.get("reference", ""), notes=data.get("notes", ""),
                 received_by=request.user,

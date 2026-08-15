@@ -6,8 +6,8 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
-                     PurchaseReturn, PurchaseReturnLineItem, Supplier,
-                     SupplierInvoice)
+                     PurchaseOrder, PurchaseOrderLineItem, PurchaseReturn,
+                     PurchaseReturnLineItem, Supplier, SupplierInvoice)
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -19,6 +19,74 @@ class SupplierSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
+class PurchaseOrderLineItemSerializer(serializers.ModelSerializer):
+    part_name            = serializers.CharField(source="part.name", read_only=True)
+    quantity_received     = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    quantity_outstanding  = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+
+    class Meta:
+        model  = PurchaseOrderLineItem
+        fields = [
+            "id", "part", "part_name", "quantity_ordered", "unit_cost",
+            "quantity_received", "quantity_outstanding", "created_at",
+        ]
+        read_only_fields = fields  # output-only — writes go through PurchaseOrderRecordSerializer / the amend action
+
+
+class PurchaseOrderSerializer(serializers.ModelSerializer):
+    line_items           = PurchaseOrderLineItemSerializer(many=True, read_only=True)
+    total_ordered_value  = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    supplier_name         = serializers.CharField(source="supplier.name", read_only=True)
+    status_display         = serializers.CharField(source="get_status_display", read_only=True)
+    created_by_name         = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = PurchaseOrder
+        fields = [
+            "id", "number", "sequence_number", "supplier", "supplier_name",
+            "status", "status_display", "order_date", "expected_date", "notes",
+            "line_items", "total_ordered_value",
+            "created_by", "created_by_name", "created_at", "updated_at",
+        ]
+        read_only_fields = fields  # output-only — writes go through PurchaseOrderRecordSerializer / the cancel action
+
+
+class PurchaseOrderLineItemInputSerializer(serializers.Serializer):
+    part             = serializers.UUIDField()
+    quantity_ordered = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
+    unit_cost        = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0"))
+
+
+class PurchaseOrderRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/purchase-orders/. Same
+    UUIDField-not-PrimaryKeyRelatedField reasoning as every other
+    Record serializer in this file — `supplier` and every line's
+    `part` get resolved against the requesting user's own
+    organization in the view.
+
+    `status` only meaningfully accepts "DRAFT" as an override —
+    anything else falls through to the real default, "ORDERED". Made
+    creates and sends a PO in one action, confirmed directly; DRAFT
+    is available for "still building this, haven't committed yet" but
+    is never the silent default.
+    """
+    supplier      = serializers.UUIDField()
+    order_date    = serializers.DateField()
+    expected_date = serializers.DateField(required=False, allow_null=True)
+    notes         = serializers.CharField(required=False, allow_blank=True, default="")
+    status        = serializers.ChoiceField(choices=["DRAFT", "ORDERED"], required=False, default="ORDERED")
+    lines         = PurchaseOrderLineItemInputSerializer(many=True)
+
+    def validate_lines(self, value):
+        if not value:
+            raise serializers.ValidationError("Purchase Order harus memiliki minimal satu item.")
+        return value
+
+
+class PurchaseOrderAmendQuantitySerializer(serializers.Serializer):
+    """Write-only input for POST /api/purchase-order-line-items/<id>/amend/."""
+    quantity_ordered = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
 
 class GoodsReceivedNoteLineItemSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source="part.name", read_only=True)
@@ -26,51 +94,57 @@ class GoodsReceivedNoteLineItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = GoodsReceivedNoteLineItem
-        fields = ["id", "part", "part_name", "quantity", "unit_cost", "subtotal", "created_at"]
+        fields = [
+            "id", "part", "part_name", "purchase_order_line_item",
+            "quantity", "unit_cost", "subtotal", "created_at",
+        ]
         read_only_fields = fields  # frozen — GRN and its lines are never edited, same as Invoice
 
 
 class GoodsReceivedNoteSerializer(serializers.ModelSerializer):
-    line_items        = GoodsReceivedNoteLineItemSerializer(many=True, read_only=True)
-    total_cost        = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
-    supplier_name     = serializers.CharField(source="supplier.name", read_only=True)
-    received_by_name  = serializers.CharField(source="received_by.full_name", read_only=True, default=None)
+    line_items            = GoodsReceivedNoteLineItemSerializer(many=True, read_only=True)
+    total_cost            = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    supplier_name          = serializers.CharField(source="supplier.name", read_only=True)
+    purchase_order_number  = serializers.CharField(source="purchase_order.number", read_only=True)
+    received_by_name       = serializers.CharField(source="received_by.full_name", read_only=True, default=None)
 
     class Meta:
         model  = GoodsReceivedNote
         fields = [
             "id", "number", "sequence_number", "supplier", "supplier_name",
-            "supplier_invoice", "received_at", "reference", "notes",
+            "purchase_order", "purchase_order_number", "supplier_invoice",
+            "received_at", "reference", "notes",
             "received_by", "received_by_name", "line_items", "total_cost", "created_at",
         ]
         read_only_fields = fields  # frozen document — no PATCH/PUT endpoint exists at all
 
 
 class GoodsReceivedNoteLineItemInputSerializer(serializers.Serializer):
-    part      = serializers.UUIDField()
-    quantity  = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
-    unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0"))
+    """
+    purchase_order_line_item, not part — every GRN line must trace
+    back to an authorized PO line now (see GoodsReceivedNote.receive()'s
+    own docstring for the real, confirmed hard-block reasoning); part
+    is derived from that relation inside receive() itself, never
+    re-entered here.
+    """
+    purchase_order_line_item = serializers.UUIDField()
+    quantity                 = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
+    unit_cost                = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0"))
 
 
 class GoodsReceivedNoteRecordSerializer(serializers.Serializer):
     """
-    Write-only input for POST /api/goods-received-notes/. `supplier`
-    and each line's `part` are plain UUIDFields, not
-    PrimaryKeyRelatedField — deliberately: PrimaryKeyRelatedField's
-    default queryset has no organization filter, which would let a
-    request reference another shop's Supplier/Part and have DRF
-    accept it at the serializer layer, before any real tenant check
-    ever runs. The view resolves both against the requesting user's
-    own organization explicitly (Supplier.objects.filter(organization=...,
-    pk=...) / Part.objects.filter(organization=..., pk=...)) — same
-    hand-rolled tenant-scoped lookup pattern
-    InvoiceCreateView._get_service_record() already established.
+    Write-only input for POST /api/goods-received-notes/.
+    `purchase_order` is now REQUIRED — every real delivery must trace
+    back to an authorized commitment. Same UUIDField-not-
+    PrimaryKeyRelatedField reasoning as every other Record serializer
+    in this file.
     """
-    supplier    = serializers.UUIDField()
-    received_at = serializers.DateTimeField(required=False, allow_null=True)
-    reference   = serializers.CharField(required=False, allow_blank=True, default="")
-    notes       = serializers.CharField(required=False, allow_blank=True, default="")
-    lines       = GoodsReceivedNoteLineItemInputSerializer(many=True)
+    purchase_order = serializers.UUIDField()
+    received_at    = serializers.DateTimeField(required=False, allow_null=True)
+    reference      = serializers.CharField(required=False, allow_blank=True, default="")
+    notes          = serializers.CharField(required=False, allow_blank=True, default="")
+    lines          = GoodsReceivedNoteLineItemInputSerializer(many=True)
 
     def validate_lines(self, value):
         if not value:
