@@ -59,16 +59,27 @@ class PurchaseReturned(DomainEvent):
     line item, same "one document, one accounting fact" shape as
     GoodsReceived, which this event is the deliberate mirror of.
 
-    Posting rule (v1, Case A only — see
-    PurchaseReturn.create_return()'s own docstring for the full
-    reasoning): Dr Accrued Inventory - Unbilled AP (2010) / Cr
-    Inventory (1301), both for `amount` — the exact reverse of
-    GoodsReceived's own posting, undoing a receipt that's being
-    returned before any supplier invoice ever cleared Accrued
-    Inventory into a real payable.
+    Now covers Case A AND Case B — see PurchaseReturn.create_return()'s
+    own docstring for the real classification logic. In BOTH cases the
+    credit side is always Inventory (1301), since goods physically
+    leaving is goods physically leaving regardless of billing status
+    — only the debit side changes depending on which liability is
+    being reduced. debit_account_code is frozen at creation time
+    inside create_return()'s own transaction — "2010" (Case A,
+    reversing an un-invoiced receipt) or "2001" (Case B, reducing a
+    real unpaid payable) — and posting_engine.py trusts this value
+    directly rather than re-deriving it from current GRN/
+    SupplierInvoice state, which could theoretically have moved on by
+    the time this event is actually processed (asynchronously, after
+    commit, via the real event bus).
+
+    Case C (return after the supplier invoice has been PAID) still
+    has no posting rule at all — deliberately deferred, blocked
+    outright at the model layer before this event would ever fire.
     """
     purchase_return_id: uuid.UUID
     goods_received_note_id: uuid.UUID
     amount: Decimal
     line_item_count: int
+    debit_account_code: str
     event_type: str = field(init=False, default="PurchaseReturned", kw_only=True)
