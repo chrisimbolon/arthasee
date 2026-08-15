@@ -428,11 +428,12 @@ export default function RootPage() {
   </div>
 </section>
 
-        <section
+        {/* Services Section */}
+<section
   id="services"
-  className="relative bg-white px-[120px] py-[72px]"
+  className="relative bg-white px-6 py-[72px] md:px-[60px] lg:px-[120px]"
 >
-  <div className="mx-auto w-full max-w-[1180px]">
+  <div className="mx-auto w-full max-w-[1200px]">
 
     {/* Stats */}
     <div className="grid grid-cols-3 gap-8 pb-[72px]">
@@ -440,6 +441,7 @@ export default function RootPage() {
         <div className="font-['Montserrat'] text-[42px] font-bold italic leading-none text-[#17181A]">
           10<span className="text-[#096B3B]">+</span>
         </div>
+
         <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.04em] text-[#17181A]">
           YEARS OF SERVICE
         </div>
@@ -449,6 +451,7 @@ export default function RootPage() {
         <div className="font-['Montserrat'] text-[42px] font-bold italic leading-none text-[#17181A]">
           50K<span className="text-[#096B3B]">+</span>
         </div>
+
         <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.04em] text-[#17181A]">
           HAPPY CUSTOMERS
         </div>
@@ -458,14 +461,15 @@ export default function RootPage() {
         <div className="font-['Montserrat'] text-[42px] font-bold italic leading-none text-[#17181A]">
           99<span className="text-[#096B3B]">%</span>
         </div>
+
         <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.04em] text-[#17181A]">
           CLIENT SATISFACTION
         </div>
       </div>
     </div>
 
-    {/* Services header */}
-    <div className="relative mb-10 flex items-start justify-between">
+    {/* Services Header */}
+    <div className="relative mb-10">
 
       <div>
         <div className="mb-2 font-mono text-[12px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
@@ -479,17 +483,17 @@ export default function RootPage() {
         </h2>
       </div>
 
-      {/* Decorative heading */}
-      <div className="hidden select-none font-['Montserrat'] text-[52px] font-bold italic uppercase leading-none tracking-[-0.03em] text-transparent [-webkit-text-stroke:1px_#E5E5E5] lg:block">
+      {/* Decorative Heading */}
+      <div className="pointer-events-none absolute right-0 top-0 hidden select-none font-['Montserrat'] text-[52px] font-bold italic uppercase leading-none tracking-[-0.03em] text-transparent [-webkit-text-stroke:1px_#E5E5E5] lg:block">
         OUR SERVICES
       </div>
 
       {/* Arrows */}
-      <div className="absolute right-0 top-[72px] flex items-center gap-3 text-[25px] text-[#17181A]">
+      <div className="absolute right-0 bottom-0 flex items-center gap-3 text-[25px] leading-none text-[#17181A]">
         <button
           type="button"
           aria-label="Previous services"
-          className="leading-none"
+          className="leading-none transition-opacity hover:opacity-50"
         >
           ←
         </button>
@@ -497,14 +501,14 @@ export default function RootPage() {
         <button
           type="button"
           aria-label="Next services"
-          className="leading-none"
+          className="leading-none transition-opacity hover:opacity-50"
         >
           →
         </button>
       </div>
     </div>
 
-    {/* Service cards */}
+    {/* Service Cards */}
     <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
 
       {/* Leads */}
@@ -514,49 +518,50 @@ export default function RootPage() {
           style={{ backgroundImage: "url('/services/Service-lead.webp')" }}
         />
 
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-transparent" />
 
         <div className="relative flex h-full flex-col justify-end p-5 text-white">
-          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase">
+          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase leading-tight">
             LEADS
           </h3>
 
           <p className="mt-2 max-w-[310px] text-[13px] leading-[1.45] text-white/90">
-            Catat calon pelanggan yang belum jadi servis — harga kemahalan,
-            pikir-pikir dulu, dll. Jadi daftar follow-up, bukan hilang begitu saja.
+            Catat calon pelanggan yang belum jadi servis —
+            harga kemahalan, pikir-pikir dulu, dll. Jadi daftar
+            follow-up, bukan hilang begitu saja.
           </p>
 
           <a
             href="#contact"
-            className="mt-4 text-[12px] font-semibold uppercase text-white"
+            className="mt-4 inline-flex w-fit text-[12px] font-semibold uppercase text-white transition-opacity hover:opacity-70"
           >
             READ MORE →
           </a>
         </div>
       </article>
 
-      {/* Customer & vehicle data */}
+      {/* Customer & Vehicle Data */}
       <article className="group relative h-[360px] overflow-hidden rounded-[6px]">
         <div
           className="absolute inset-0 bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
           style={{ backgroundImage: "url('/services/service-customer.webp')" }}
         />
 
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-transparent" />
 
         <div className="relative flex h-full flex-col justify-end p-5 text-white">
-          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase">
+          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase leading-tight">
             DATA PELANGGAN &amp; KENDARAAN
           </h3>
 
           <p className="mt-2 max-w-[310px] text-[13px] leading-[1.45] text-white/90">
-            Simpan nama pelanggan, nomor STNK, dan semua kendaraan
-            yang pernah mereka bawa.
+            Simpan nama pelanggan, nomor STNK, dan semua
+            kendaraan yang pernah mereka bawa.
           </p>
 
           <a
             href="#contact"
-            className="mt-4 text-[12px] font-semibold uppercase text-white"
+            className="mt-4 inline-flex w-fit text-[12px] font-semibold uppercase text-white transition-opacity hover:opacity-70"
           >
             READ MORE →
           </a>
@@ -570,21 +575,21 @@ export default function RootPage() {
           style={{ backgroundImage: "url('/services/service-estimasi.webp')" }}
         />
 
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-transparent" />
 
         <div className="relative flex h-full flex-col justify-end p-5 text-white">
-          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase">
+          <h3 className="font-['Montserrat'] text-[18px] font-bold uppercase leading-tight">
             ESTIMASI
           </h3>
 
           <p className="mt-2 max-w-[310px] text-[13px] leading-[1.45] text-white/90">
-            Buat perkiraan harga sebelum kerja dimulai — belum menyentuh
-            stok sampai pelanggan benar-benar setuju.
+            Buat perkiraan harga sebelum kerja dimulai —
+            belum menyentuh stok sampai pelanggan benar-benar setuju.
           </p>
 
           <a
             href="#contact"
-            className="mt-4 text-[12px] font-semibold uppercase text-white"
+            className="mt-4 inline-flex w-fit text-[12px] font-semibold uppercase text-white transition-opacity hover:opacity-70"
           >
             READ MORE →
           </a>
@@ -593,7 +598,7 @@ export default function RootPage() {
 
     </div>
 
-    {/* Service buttons */}
+    {/* Service Buttons */}
     <div className="mt-6 flex justify-center gap-3">
       <a
         href="#services"
