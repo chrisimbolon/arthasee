@@ -1032,3 +1032,112 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
 
         resp = self.client.get("/api/purchase-returns/")
         self.assertEqual(resp.data["purchase_returns"], [])
+
+class PurchaseReturnClassificationTests(PurchasingModelTestBase):
+    """
+    Real coverage for Case B (return after an unpaid invoice) and the
+    Case C block (return after a paid invoice), plus proof that
+    Case A's own classification and posting are unaffected by this
+    change. Self-contained _receive() helper — deliberately not
+    reused from PurchaseReturnTests, to avoid drifting out of sync
+    with that class's own exact current shape.
+    """
+
+    def _receive(self, quantity=Decimal("10.00"), unit_cost=Decimal("45000.00")):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": quantity, "unit_cost": unit_cost}],
+        )
+        return GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": quantity, "unit_cost": unit_cost,
+            }],
+        )
+
+    def test_case_a_return_before_invoice_is_classified_and_posts_to_accrued_inventory(self):
+        """
+        Regression proof — Case A's real classification and posting
+        are unchanged by this whole addition. Same math already
+        proven for Case A when it first shipped.
+        """
+        grn = self._receive(quantity=Decimal("10.00"), unit_cost=Decimal("45000.00"))
+        grn_line = grn.line_items.first()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            ret = PurchaseReturn.create_return(
+                organization=self.org, goods_received_note=grn,
+                lines=[{"grn_line_item": grn_line, "quantity": Decimal("3.00")}],
+                reason="Rusak",
+            )
+
+        self.assertEqual(ret.return_classification, "BEFORE_INVOICE")
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        accrued   = Account.objects.get(organization=self.org, code="2010")
+        self.assertEqual(inventory.balance(), Decimal("315000.00"))
+        self.assertEqual(accrued.balance(), Decimal("315000.00"))
+
+    def test_case_b_return_after_unpaid_invoice_is_classified_and_posts_to_accounts_payable(self):
+        """
+        The real, new behavior — traced by hand across all three
+        chained events (receive -> invoice -> return) before this
+        assertion was written: 1301=315000, 2010=0, 2001=315000.
+        """
+        grn = self._receive(quantity=Decimal("10.00"), unit_cost=Decimal("45000.00"))
+        grn_line = grn.line_items.first()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            SupplierInvoice.record(
+                organization=self.org, supplier=self.supplier,
+                amount=Decimal("450000.00"), invoice_date="2026-08-14",
+                goods_received_notes=[grn],
+            )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            ret = PurchaseReturn.create_return(
+                organization=self.org, goods_received_note=grn,
+                lines=[{"grn_line_item": grn_line, "quantity": Decimal("3.00")}],
+                reason="Rusak, sudah ditagih tapi belum dibayar",
+            )
+
+        self.assertEqual(ret.return_classification, "AFTER_INVOICE_UNPAID")
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        accrued   = Account.objects.get(organization=self.org, code="2010")
+        ap        = Account.objects.get(organization=self.org, code="2001")
+
+        self.assertEqual(accrued.balance(), Decimal("0.00"))    # fully cleared by the invoice
+        self.assertEqual(inventory.balance(), Decimal("315000.00"))  # 450000 - 135000
+        self.assertEqual(ap.balance(), Decimal("315000.00"))          # 450000 - 135000
+
+    def test_case_c_return_after_paid_invoice_is_blocked(self):
+        """
+        The real, deliberate boundary — a return against a PAID
+        invoice must be blocked outright, not silently misclassified
+        or allowed under either existing case. Directly sets
+        invoice.status="PAID" rather than exercising the full real
+        /pay/ endpoint — this test is about PurchaseReturn's own
+        guard reading that status, not about proving the payment flow
+        itself (already covered elsewhere).
+        """
+        grn = self._receive(quantity=Decimal("10.00"), unit_cost=Decimal("45000.00"))
+        grn_line = grn.line_items.first()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            invoice = SupplierInvoice.record(
+                organization=self.org, supplier=self.supplier,
+                amount=Decimal("450000.00"), invoice_date="2026-08-14",
+                goods_received_notes=[grn],
+            )
+        invoice.status = "PAID"
+        invoice.save(update_fields=["status"])
+
+        with self.assertRaises(ValueError):
+            PurchaseReturn.create_return(
+                organization=self.org, goods_received_note=grn,
+                lines=[{"grn_line_item": grn_line, "quantity": Decimal("1.00")}],
+                reason="Terlambat, sudah dibayar",
+            )
+        self.assertFalse(PurchaseReturn.objects.exists())
