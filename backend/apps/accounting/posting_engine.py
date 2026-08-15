@@ -114,20 +114,22 @@ def resolve(event) -> dict:
         }
 
     if isinstance(event, PurchaseReturned):
-        # The exact reverse of GoodsReceived's own posting — see
-        # PurchaseReturned's own docstring for why this is only ever
-        # correct for a GRN that has NOT yet been linked to a
-        # SupplierInvoice (Case A). The model layer's own guard
-        # (PurchaseReturn.create_return()) is what actually enforces
-        # that precondition — this posting rule trusts it's already
-        # been checked by the time an event reaches here, same as
-        # every other posting rule in this file trusts its own
-        # caller's preconditions.
+        # debit_account_code was determined and frozen ONCE, inside
+        # PurchaseReturn.create_return()'s own transaction — "2010"
+        # for a return before any supplier invoice existed (Case A),
+        # "2001" for a return after an unpaid invoice existed
+        # (Case B). Deliberately NOT re-derived here from current
+        # GRN/SupplierInvoice state — that state could theoretically
+        # have moved on by the time this event is actually processed
+        # (asynchronously, after commit). The credit side is always
+        # Inventory (1301) in both cases — goods physically leaving
+        # is goods physically leaving, regardless of billing status;
+        # only the liability being reduced ever changes.
         return {
             "memo": f"Purchase return — {event.purchase_return_id}",
             "lines": _lines(
-                {"account_code": "2010", "side": "debit",  "amount": event.amount},
-                {"account_code": "1301", "side": "credit", "amount": event.amount},
+                {"account_code": event.debit_account_code, "side": "debit",  "amount": event.amount},
+                {"account_code": "1301",                    "side": "credit", "amount": event.amount},
             ),
         }
 
