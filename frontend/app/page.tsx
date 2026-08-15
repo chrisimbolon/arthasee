@@ -726,24 +726,66 @@ export default function RootPage() {
         </div>
       </section>
 
-      <section id="next" className="live-band">
-        <div className="wrap">
-          <div className="section-head">
-            <div className="section-kicker">Rencana Berikutnya</div>
-            <h2 className="display" style={{ textTransform: "none", fontSize: 38 }}>Sedang dibangun — belum live.</h2>
-            <p>Kami lebih pilih jujur soal apa yang belum ada daripada menjanjikan sesuatu yang belum bisa dipakai. Ini nyata, tapi belum jadi.</p>
-          </div>
-          <div className="next-grid">
-            <div className="next-card">
-              <span className="badge">Segera</span>
-              <h4>Pengingat Otomatis</h4>
-              <p>Kirim WhatsApp otomatis ke pelanggan saat kendaraan mereka sudah waktunya servis — bukan cuma ditandai di daftar.</p>
+      {/* About Us Section */}
+      <section
+        id="about"
+        className="relative bg-white px-[120px] py-[80px]"
+      >
+        <div className="mx-auto flex min-h-[454px] w-full max-w-[1200px] items-center">
+          <div className="grid w-full items-center gap-[72px] md:grid-cols-[1fr_1fr]">
+
+            {/* About Content */}
+            <div className="relative pl-[140px]">
+
+              {/* Decorative "ABOUT US" */}
+              <div className="pointer-events-none absolute -left-[2px] top-[-58px] select-none font-['Montserrat'] text-[78px] font-bold italic uppercase leading-none tracking-[-0.04em] text-transparent [-webkit-text-stroke:1px_#E5E5E5]">
+                ABOUT US
+              </div>
+
+              {/* Green decorative block */}
+              <div className="absolute left-[51px] top-[24px] h-[73px] w-[170px] bg-[#096B3B]" />
+
+              {/* Kicker */}
+              <div className="relative mb-2 font-mono text-[12px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
+                ABOUT US
+              </div>
+
+              {/* Heading */}
+              <h2 className="relative max-w-[430px] font-['Montserrat'] text-[40px] font-bold uppercase leading-[0.95] tracking-[-0.02em] text-[#17181A]">
+                THE STORY BEHIND
+                <br />
+                OUR SYSTEM WORKSHOP
+              </h2>
+
+              {/* Quote */}
+              <p className="relative mt-4 max-w-[410px] text-[13px] font-semibold leading-[1.45] text-[#5B5B5B]">
+                "Pelanggan adalah aset kami. Tanpa pelanggan dan sistem
+                yang mengurus mereka, gudang dan montir sebanyak apa pun
+                tidak ada gunanya."
+              </p>
+
+              {/* Description */}
+              <p className="relative mt-5 max-w-[410px] text-[13px] leading-[1.6] text-[#6B6B6B]">
+                Pelanggan itu aset kami. Tanpa pelanggan dan sistem yang
+                mengurus mereka, gudang dan montir sebanyak apa pun tidak
+                ada gunanya.
+              </p>
             </div>
-            <div className="next-card">
-              <span className="badge">Suatu Hari</span>
-              <h4>Multi-Cabang</h4>
-              <p>Untuk bengkel dengan lebih dari satu lokasi. Belum jadi prioritas saat ini — dipikirkan lagi kalau memang dibutuhkan.</p>
+
+            {/* About Image */}
+            <div className="relative h-[360px] w-full overflow-hidden">
+              <Image
+                src="/about/about-workshop.webp"
+                alt="Mechanic working on a vehicle at an Arthasee workshop"
+                fill
+                className="object-cover"
+                sizes="(max-width: 768px) 100vw, 446px"
+              />
+
+              {/* Green decorative shape */}
+              <div className="absolute right-[-1px] top-[72px] h-[170px] w-[72px] bg-[#096B3B]" />
             </div>
+
           </div>
         </div>
       </section>
