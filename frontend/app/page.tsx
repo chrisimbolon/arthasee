@@ -619,16 +619,16 @@ export default function RootPage() {
 </section>
 
       {/* Feature / Why Choose Us Section */}
-      <section className="bg-[#17181A] px-6 py-[72px] md:px-[60px] lg:px-[120px]">
-        <div className="mx-auto flex min-h-[591px] w-full max-w-[1200px] items-center">
-          <div className="grid w-full items-center gap-12 md:grid-cols-[1fr_1fr] lg:gap-[72px]">
+      <section className="bg-[#111111]">
+        <div className="mx-auto flex min-h-[591px] w-full max-w-[1200px] items-center px-6 md:px-10 lg:px-0">
+          <div className="grid w-full items-center gap-12 md:grid-cols-2 lg:gap-[72px]">
 
             {/* Feature Image */}
             <div className="relative flex justify-center md:justify-start">
               {/* Green decorative shape */}
-              <div className="absolute bottom-[18px] left-[20px] h-[112px] w-[190px] bg-[#096B3B] md:left-[20px]" />
+              <div className="absolute bottom-[18px] left-[20px] z-0 h-[112px] w-[190px] bg-[#096B3B]" />
 
-              <div className="relative z-10 h-[360px] w-full max-w-[430px] overflow-hidden">
+              <div className="relative z-10 h-[407px] w-full max-w-[430px] overflow-hidden">
                 <Image
                   src="/features/why-choose-us.webp"
                   alt="Mechanic using Arthasee workshop system"
@@ -648,7 +648,7 @@ export default function RootPage() {
               </div>
 
               {/* Heading */}
-              <h2 className="max-w-[430px] font-['Montserrat'] text-[40px] font-bold uppercase leading-[0.95] tracking-[-0.02em]">
+              <h2 className="font-['Montserrat'] text-[40px] font-bold uppercase leading-[0.95] tracking-[-0.02em] text-white">
                 WHAT MAKES US
                 <br />
                 DIFFERENT
@@ -659,34 +659,34 @@ export default function RootPage() {
 
                 {/* Quality Parts */}
                 <div className="flex items-start gap-4">
-                  <div className="mt-[2px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-[#096B3B] text-[11px] font-bold text-white">
+                  <div className="mt-[2px] flex h-[20px] w-[20px] shrink-0 items-center justify-center rounded-full bg-[#096B3B] text-[12px] font-bold leading-none text-white">
                     ✓
                   </div>
 
                   <div>
-                    <h3 className="font-['Montserrat'] text-[12px] font-bold uppercase leading-none">
+                    <h3 className="font-['Montserrat'] text-[12px] font-bold uppercase leading-none text-white">
                       100% QUALITY PARTS
                     </h3>
 
-                    <p className="mt-2 max-w-[390px] text-[11px] leading-[1.45] text-white/65">
-                      We use only the highest quality parts for all repairs
-                      to ensure durability.
+                    <p className="mt-2 max-w-[430px] text-[11px] leading-[1.45] text-white/65">
+                      We use only the highest quality parts for all repairs to
+                      ensure durability.
                     </p>
                   </div>
                 </div>
 
                 {/* Certified Mechanics */}
                 <div className="flex items-start gap-4">
-                  <div className="mt-[2px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-[#096B3B] text-[11px] font-bold text-white">
+                  <div className="mt-[2px] flex h-[20px] w-[20px] shrink-0 items-center justify-center rounded-full bg-[#096B3B] text-[12px] font-bold leading-none text-white">
                     ✓
                   </div>
 
                   <div>
-                    <h3 className="font-['Montserrat'] text-[12px] font-bold uppercase leading-none">
+                    <h3 className="font-['Montserrat'] text-[12px] font-bold uppercase leading-none text-white">
                       CERTIFIED MECHANICS
                     </h3>
 
-                    <p className="mt-2 max-w-[390px] text-[11px] leading-[1.45] text-white/65">
+                    <p className="mt-2 max-w-[430px] text-[11px] leading-[1.45] text-white/65">
                       Our team consists of certified professionals with years
                       of experience.
                     </p>
@@ -695,18 +695,18 @@ export default function RootPage() {
 
                 {/* Satisfaction Guarantee */}
                 <div className="flex items-start gap-4">
-                  <div className="mt-[2px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-[#096B3B] text-[11px] font-bold text-white">
+                  <div className="mt-[2px] flex h-[20px] w-[20px] shrink-0 items-center justify-center rounded-full bg-[#096B3B] text-[12px] font-bold leading-none text-white">
                     ✓
                   </div>
 
                   <div>
-                    <h3 className="font-['Montserrat'] text-[12px] font-bold uppercase leading-none">
+                    <h3 className="font-['Montserrat'] text-[12px] font-bold uppercase leading-none text-white">
                       SATISFACTION GUARANTEE
                     </h3>
 
-                    <p className="mt-2 max-w-[390px] text-[11px] leading-[1.45] text-white/65">
-                      We guarantee our work. If you're not satisfied,
-                      we'll make it right.
+                    <p className="mt-2 max-w-[430px] text-[11px] leading-[1.45] text-white/65">
+                      We guarantee our work. If you're not satisfied, we'll
+                      make it right.
                     </p>
                   </div>
                 </div>
@@ -716,7 +716,7 @@ export default function RootPage() {
               {/* CTA */}
               <a
                 href="#about"
-                className="mt-8 inline-flex h-[38px] items-center justify-center rounded-[4px] bg-[#096B3B] px-5 text-[11px] font-semibold uppercase text-white transition-colors hover:bg-[#075C32]"
+                className="mt-8 inline-flex h-[38px] items-center justify-center rounded-[4px] bg-[#096B3B] px-5 font-['Montserrat'] text-[11px] font-semibold uppercase text-white transition-colors hover:bg-[#075C32]"
               >
                 LEARN ABOUT MORE
               </a>
