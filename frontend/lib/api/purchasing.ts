@@ -119,6 +119,12 @@ export interface PurchaseReturn {
   goods_received_note_number: string;
   return_date: string;
   reason: string;
+  // System-determined at creation, never user-editable — "before
+  // any supplier invoice existed" vs "after an unpaid invoice
+  // existed". Real audit visibility: which liability account this
+  // return actually reduced.
+  return_classification: "BEFORE_INVOICE" | "AFTER_INVOICE_UNPAID";
+  classification_display: string;
   line_items: PurchaseReturnLineItem[];
   total_value: string;
   created_by: string | null;
