@@ -6,8 +6,21 @@
 // reached via ?id= (query param), not a dynamic route segment.
 // Doesn't render PurchasingSubNav — standalone detail pages in this
 // app don't appear to participate in a persistent tab bar.
+//
+// UPDATED for Retur Pembelian Case B: the return guard used to
+// disable the button whenever ANY invoice was linked at all — a real
+// bug once Case B shipped on the backend, since an UNPAID invoice no
+// longer blocks a return, only a PAID one does (Case C, still
+// deferred). Same class of mistake as the PurchaseOrder cancel-
+// button bug fixed earlier — one hardcoded reason standing in for
+// several genuinely different real states. Fixed the same way: fetch
+// the real invoice status, and give an honest, status-specific
+// explanation for whichever state actually applies.
 // =============================================================================
-import { GoodsReceivedNote, goodsReceivedNotesApi, PurchaseReturn, purchaseReturnsApi } from "@/lib/api/purchasing";
+import {
+  GoodsReceivedNote, goodsReceivedNotesApi, PurchaseReturn, purchaseReturnsApi,
+  SupplierInvoice, supplierInvoicesApi,
+} from "@/lib/api/purchasing";
 import { AlertCircle, ArrowLeft, Loader2, RotateCcw, X } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -118,6 +131,7 @@ export default function GoodsReceivedNoteDetailPage() {
   const id = searchParams.get("id") ?? "";
 
   const [grn, setGrn] = useState<GoodsReceivedNote | null>(null);
+  const [invoice, setInvoice] = useState<SupplierInvoice | null>(null);
   const [returns, setReturns] = useState<PurchaseReturn[]>([]);
   const [loading, setLoading] = useState(true);
   const [showReturn, setShowReturn] = useState(false);
@@ -126,9 +140,18 @@ export default function GoodsReceivedNoteDetailPage() {
     if (!id) { setLoading(false); return; }
     setLoading(true);
     Promise.all([goodsReceivedNotesApi.get(id), purchaseReturnsApi.list()])
-      .then(([g, allReturns]) => {
+      .then(async ([g, allReturns]) => {
         setGrn(g);
         setReturns(allReturns.filter((r) => r.goods_received_note === id));
+        // Real invoice STATUS, not just its existence — the whole
+        // point of the Case B fix. An UNPAID invoice no longer blocks
+        // a return; only a PAID one does (Case C, still deferred).
+        if (g.supplier_invoice) {
+          const inv = await supplierInvoicesApi.get(g.supplier_invoice);
+          setInvoice(inv);
+        } else {
+          setInvoice(null);
+        }
       })
       .finally(() => setLoading(false));
   };
@@ -153,6 +176,19 @@ export default function GoodsReceivedNoteDetailPage() {
 
   const alreadyInvoiced = !!grn.supplier_invoice;
 
+  // Real guard mirrored from the backend's own three-way
+  // classification (see PurchaseReturn.create_return()): no invoice
+  // -> always allowed (Case A). Invoice exists, UNPAID -> still
+  // allowed (Case B). Invoice exists, PAID -> blocked (Case C, not
+  // supported yet). canReturn being false has genuinely different
+  // real causes — the explanation must match which one actually
+  // applies, not a single hardcoded message for all of them.
+  const canReturn = !alreadyInvoiced || invoice?.status === "UNPAID";
+  const returnBlockedReason =
+    alreadyInvoiced && invoice?.status === "PAID"
+      ? "Invoice untuk GRN ini sudah dibayar ke supplier — retur untuk invoice yang sudah lunas belum didukung di versi ini."
+      : null;
+
   return (
     <div>
       <Link href="/dashboard/purchasing/goods-received" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--steel)", marginBottom: 12, textDecoration: "none" }}>
@@ -166,14 +202,14 @@ export default function GoodsReceivedNoteDetailPage() {
         </div>
         <div style={{ textAlign: "right" }}>
           <button
-            className="btn-rust" onClick={() => setShowReturn(true)} disabled={alreadyInvoiced}
-            style={{ display: "inline-flex", alignItems: "center", gap: 7, opacity: alreadyInvoiced ? 0.5 : 1 }}
+            className="btn-rust" onClick={() => setShowReturn(true)} disabled={!canReturn}
+            style={{ display: "inline-flex", alignItems: "center", gap: 7, opacity: canReturn ? 1 : 0.5 }}
           >
             <RotateCcw size={15} /> Retur Pembelian
           </button>
-          {alreadyInvoiced && (
+          {returnBlockedReason && (
             <div style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 6, maxWidth: 220 }}>
-              GRN ini sudah memiliki invoice supplier — retur untuk GRN yang sudah ditagih belum didukung.
+              {returnBlockedReason}
             </div>
           )}
         </div>
@@ -238,7 +274,10 @@ export default function GoodsReceivedNoteDetailPage() {
                   <span className="mono">{formatRupiah(r.total_value)}</span>
                 </div>
                 <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 2 }}>{r.reason}</div>
-                <div style={{ fontSize: 11.5, color: "var(--steel-lt)", marginTop: 2 }}>{new Date(r.return_date).toLocaleString("id-ID")}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+                  <span style={{ fontSize: 11, color: "var(--steel-lt)" }}>{r.classification_display}</span>
+                  <span style={{ fontSize: 11.5, color: "var(--steel-lt)" }}>{new Date(r.return_date).toLocaleString("id-ID")}</span>
+                </div>
               </div>
             ))}
           </div>
