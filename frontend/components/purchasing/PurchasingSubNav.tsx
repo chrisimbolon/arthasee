@@ -10,6 +10,7 @@ const SUBNAV = [
   { href: "/dashboard/purchasing/purchase-orders",   label: "Purchase Order" },
   { href: "/dashboard/purchasing/goods-received",    label: "Penerimaan Barang" },
   { href: "/dashboard/purchasing/supplier-invoices", label: "Invoice Supplier" },
+  { href: "/dashboard/purchasing/purchase-returns",  label: "Retur Pembelian" },
 ];
 
 export default function PurchasingSubNav() {
@@ -18,10 +19,10 @@ export default function PurchasingSubNav() {
   return (
     <div style={{ display: "flex", gap: 20, marginBottom: 24, borderBottom: "1px solid var(--line)" }}>
       {SUBNAV.map((item) => {
-        // startsWith, not exact match — goods-received/[id] detail
-        // pages should still show "Penerimaan Barang" as active,
-        // same prefix-matching reasoning the Sidebar itself already
-        // uses for "Akuntansi".
+        // startsWith, not exact match — any future detail page under
+        // one of these sections should still show its own tab as
+        // active, same prefix-matching reasoning the Sidebar itself
+        // already uses for "Akuntansi".
         const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
         return (
           <Link
