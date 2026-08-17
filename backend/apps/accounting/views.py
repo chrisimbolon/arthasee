@@ -47,7 +47,13 @@ class TrialBalanceView(TenantScopedAPIView):
 
 class ProfitLossView(TenantScopedAPIView):
     """
-    GET /api/accounting/profit-loss/?since=YYYY-MM-DD&as_of=YYYY-MM-DD
+    GET /api/accounting/profit-loss/?since=YYYY-MM-DD&as_of=YYYY-MM-DD&compare=1
+
+    compare=1 wraps the response with a real period-over-period
+    comparison (reports.profit_and_loss_comparison()) instead of the
+    plain single-period report. Same since/as_of parsing either way
+    — existing callers that never pass compare get byte-identical
+    behavior to before this was added.
     """
 
     def get(self, request):
@@ -67,7 +73,11 @@ class ProfitLossView(TenantScopedAPIView):
             ).first()
             since = period.start_date if period else date(as_of.year, 1, 1)
 
-        data = reports.profit_and_loss(organization, since=since, as_of=as_of)
+        compare = request.query_params.get("compare") in ("1", "true", "True")
+        if compare:
+            data = reports.profit_and_loss_comparison(organization, since=since, as_of=as_of)
+        else:
+            data = reports.profit_and_loss(organization, since=since, as_of=as_of)
         return Response({"success": True, **data})
 
 
