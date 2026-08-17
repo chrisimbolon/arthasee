@@ -119,9 +119,11 @@ function ComparisonPanel({ since, asOf }: { since: string; asOf: string }) {
   return (
     <div className="card" style={{ marginBottom: 20 }}>
       <div className="label" style={{ marginBottom: 4 }}>Dibandingkan Periode Sebelumnya</div>
-      <div style={{ fontSize: 12, color: "var(--steel)", marginBottom: 14 }}>
-        Periode sebelumnya: {data.prior.since} – {data.prior.as_of} (durasi sama dengan periode saat ini)
-      </div>
+        <div style={{ fontSize: 12, color: "var(--steel)", marginBottom: 14 }}>
+        Periode sebelumnya: {new Date(data.prior.since).toLocaleDateString("id-ID")}
+        {" – "}
+        {new Date(data.prior.as_of).toLocaleDateString("id-ID")} (durasi sama dengan periode saat ini)
+        </div>
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", gap: 12, fontSize: 11, color: "var(--steel)", textTransform: "uppercase", letterSpacing: "0.02em", paddingBottom: 6, borderBottom: "1.5px solid var(--line)" }}>
         <span></span>
         <span style={{ textAlign: "right" }}>Periode Ini</span>
