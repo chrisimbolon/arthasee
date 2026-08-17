@@ -4,14 +4,15 @@
 from django.urls import path
 
 from .views import (AgingAPView, AgingARView, BalanceSheetView,
-                    FailedPostingsView, JournalEntryListView,
-                    ManualJournalListCreateView, ProfitLossView,
-                    TrialBalanceView)
+                    CashConversionCycleView, FailedPostingsView,
+                    JournalEntryListView, ManualJournalListCreateView,
+                    ProfitLossView, TrialBalanceView)
 
 urlpatterns = [
     path("trial-balance/",   TrialBalanceView.as_view(),           name="trial-balance"),
     path("profit-loss/",     ProfitLossView.as_view(),             name="profit-loss"),
     path("balance-sheet/",   BalanceSheetView.as_view(),           name="balance-sheet"),
+    path("cash-conversion-cycle/", CashConversionCycleView.as_view(), name="cash-conversion-cycle"),
     path("aging-ar/",        AgingARView.as_view(),                name="aging-ar"),
     path("aging-ap/",        AgingAPView.as_view(),                name="aging-ap"),
     path("manual-journals/", ManualJournalListCreateView.as_view(), name="manual-journal-list-create"),
