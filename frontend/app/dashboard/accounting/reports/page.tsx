@@ -5,8 +5,8 @@
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   ACCOUNT_TYPE_LABELS, accountingApi, AgingBucket, AgingInvoiceRow,
-  AgingReportResponse, BalanceSheetResponse, ProfitLossResponse,
-  ReportLine, TrialBalanceResponse,
+  AgingReportResponse, BalanceSheetResponse, ProfitLossComparisonResponse,
+  ProfitLossResponse, ReportDelta, ReportLine, TrialBalanceResponse,
 } from "@/lib/api/accounting";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { ChangeEvent, useEffect, useState } from "react";
@@ -73,6 +73,64 @@ function ReportSection({ title, rows, total }: { title: string; rows: ReportLine
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+function formatPct(pct: string | number | null): string {
+  if (pct === null) return "—";
+  const n = toNumber(pct);
+  const sign = n >= 0 ? "+" : "";
+  return `${sign}${n.toFixed(1)}%`;
+}
+
+function DeltaRow({ label, current, prior, delta }: {
+  label: string; current: string | number; prior: string | number; delta: ReportDelta;
+}) {
+  const changeIsPositive = toNumber(delta.change) >= 0;
+  const color = changeIsPositive ? "var(--workshop)" : "var(--rust)";
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", gap: 12, alignItems: "center", padding: "9px 0", borderBottom: "1px solid var(--line)" }}>
+      <span style={{ fontSize: 13.5, fontWeight: 600 }}>{label}</span>
+      <span className="mono" style={{ fontSize: 13, textAlign: "right" }}>{formatRupiah(current)}</span>
+      <span className="mono" style={{ fontSize: 13, color: "var(--steel)", textAlign: "right" }}>{formatRupiah(prior)}</span>
+      <span className="mono" style={{ fontSize: 13, fontWeight: 700, color, textAlign: "right" }}>
+        {formatPct(delta.change_pct)}
+      </span>
+    </div>
+  );
+}
+
+function ComparisonPanel({ since, asOf }: { since: string; asOf: string }) {
+  const [data, setData] = useState<ProfitLossComparisonResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    accountingApi.profitLossComparison(since, asOf).then((res) => { setData(res); setLoading(false); });
+  }, [since, asOf]);
+
+  // Deliberately renders nothing (not an error state) if comparison
+  // fails to load — this is a nice-to-have addition to the P&L view,
+  // not something that should ever block seeing the main report
+  // itself, which loads completely independently.
+  if (loading || !data) return null;
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <div className="label" style={{ marginBottom: 4 }}>Dibandingkan Periode Sebelumnya</div>
+      <div style={{ fontSize: 12, color: "var(--steel)", marginBottom: 14 }}>
+        Periode sebelumnya: {data.prior.since} – {data.prior.as_of} (durasi sama dengan periode saat ini)
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", gap: 12, fontSize: 11, color: "var(--steel)", textTransform: "uppercase", letterSpacing: "0.02em", paddingBottom: 6, borderBottom: "1.5px solid var(--line)" }}>
+        <span></span>
+        <span style={{ textAlign: "right" }}>Periode Ini</span>
+        <span style={{ textAlign: "right" }}>Periode Lalu</span>
+        <span style={{ textAlign: "right" }}>Perubahan</span>
+      </div>
+      <DeltaRow label="Pendapatan" current={data.current.total_revenue} prior={data.prior.total_revenue} delta={data.revenue_delta} />
+      <DeltaRow label="Laba Kotor" current={data.current.gross_profit} prior={data.prior.gross_profit} delta={data.gross_profit_delta} />
+      <DeltaRow label="Laba Bersih" current={data.current.net_income} prior={data.prior.net_income} delta={data.net_income_delta} />
     </div>
   );
 }
@@ -166,6 +224,8 @@ function ProfitLossPanel() {
           <input type="date" className="input" value={asOf} onChange={(e: ChangeEvent<HTMLInputElement>) => setAsOf(e.target.value)} />
         </div>
       </div>
+
+      <ComparisonPanel since={since} asOf={asOf} />
 
       <ReportSection title="Pendapatan" rows={data.revenue} total={data.total_revenue} />
       <ReportSection title="Harga Pokok Penjualan (HPP)" rows={data.cogs} total={data.total_cogs} />
