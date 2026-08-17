@@ -84,6 +84,21 @@ export interface BalanceSheetResponse {
   is_balanced: boolean;
 }
 
+export interface CashConversionCycleResponse {
+  since: string;
+  as_of: string;
+  days_in_period: number;
+  avg_inventory: string | number;
+  avg_ar: string | number;
+  avg_ap: string | number;
+  total_cogs: string | number;
+  total_revenue: string | number;
+  dio: string | number;
+  dso: string | number;
+  dpo: string | number;
+  ccc: string | number;
+}
+
 export type AgingBucket = "0-30" | "31-60" | "61-90" | "90+";
 
 export interface AgingInvoiceRow {
@@ -196,6 +211,9 @@ export const accountingApi = {
 
   balanceSheet: (asOf?: string) =>
     getOrNull<BalanceSheetResponse>("/api/accounting/balance-sheet/", { as_of: asOf }),
+
+  cashConversionCycle: (since?: string, asOf?: string) =>
+    getOrNull<CashConversionCycleResponse>("/api/accounting/cash-conversion-cycle/", { since, as_of: asOf }),
 
   agingAR: (asOf?: string) =>
     getOrNull<AgingReportResponse>("/api/accounting/aging-ar/", { as_of: asOf }),
