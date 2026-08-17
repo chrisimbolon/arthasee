@@ -11,7 +11,7 @@ params, call a function, return a Response), the actual accounting
 logic lives here where it can be tested directly against real ledger
 data without going through HTTP.
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from apps.accounting.models import Account, AccountingPeriod
@@ -113,6 +113,52 @@ def profit_and_loss(organization, *, since, as_of) -> dict:
         "net_income": net_income,
     }
 
+def profit_and_loss_comparison(organization, *, since, as_of) -> dict:
+    """
+    Wraps profit_and_loss() twice — once for the requested period,
+    once for an equal-length period immediately preceding it — and
+    computes real deltas. Callers get real period-over-period
+    comparison, not a raw second report they'd have to diff
+    themselves.
+
+    The "comparable prior period" is derived from the CURRENT
+    period's own actual length (as_of - since, inclusive), never
+    assumed to be "the previous calendar month" — a user comparing
+    Aug 1-15 gets compared against Jul 17-31 (also 15 days), not an
+    unequal, misleading comparison. Verified by hand across a full
+    calendar month, an uneven half-month range, and a year boundary
+    before this was written.
+
+    change_pct is None when the prior period's value was exactly
+    zero — an honest "can't compute a percentage from zero" rather
+    than a division error or a fabricated infinite/undefined number.
+    Uses abs(prior_val) as the denominator so a swing from a loss to
+    a profit (or vice versa) still produces an interpretable
+    magnitude rather than a sign-flipped, confusing percentage —
+    verified by hand: -100k -> +50k correctly reads as +150%, not a
+    nonsensical negative.
+    """
+    duration_days = (as_of - since).days + 1  # inclusive span
+    prior_as_of = since - timedelta(days=1)
+    prior_since = prior_as_of - timedelta(days=duration_days - 1)
+
+    current = profit_and_loss(organization, since=since, as_of=as_of)
+    prior   = profit_and_loss(organization, since=prior_since, as_of=prior_as_of)
+
+    def _delta(curr_val, prior_val):
+        change = curr_val - prior_val
+        change_pct = None
+        if prior_val != Decimal("0"):
+            change_pct = (change / abs(prior_val)) * Decimal("100")
+        return {"change": change, "change_pct": change_pct}
+
+    return {
+        "current": current,
+        "prior": prior,
+        "revenue_delta":      _delta(current["total_revenue"], prior["total_revenue"]),
+        "gross_profit_delta": _delta(current["gross_profit"],  prior["gross_profit"]),
+        "net_income_delta":   _delta(current["net_income"],    prior["net_income"]),
+    }
 
 def _current_period_start(organization, as_of):
     period = AccountingPeriod.objects.filter(
