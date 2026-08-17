@@ -424,18 +424,26 @@ class PurchaseReturnTests(PurchasingModelTestBase):
         adjustment = StockAdjustment.objects.get(part=self.part_a, reason="purchase_return")
         self.assertEqual(adjustment.quantity_change, Decimal("-3.00"))
 
-    def test_return_blocked_if_grn_already_has_supplier_invoice(self):
+    def test_return_blocked_if_grn_already_has_paid_supplier_invoice(self):
         """
-        The real Case-A guard — the whole reason v1 is scoped the way
-        it is. Once an invoice exists, Accrued Inventory is already
-        cleared and this reversal would be silently wrong.
+        The real Case-C guard — the boundary that's still standing
+        after Case B shipped. An UNPAID invoice no longer blocks a
+        return on its own (that's Case B, correctly allowed now) —
+        only a PAID one does, since the payable has already been
+        settled and a reversal at that point would be silently
+        wrong. Renamed from the old test name (which described the
+        pre-Case-B world, where ANY invoice blocked) to match what
+        this test actually proves now.
         """
         grn = self._receive()
-        SupplierInvoice.record(
+        invoice = SupplierInvoice.record(
             organization=self.org, supplier=self.supplier,
             amount=Decimal("450000.00"), invoice_date="2026-08-09",
             goods_received_notes=[grn],
         )
+        invoice.status = "PAID"
+        invoice.save(update_fields=["status"])
+
         with self.assertRaises(ValueError):
             PurchaseReturn.create_return(
                 organization=self.org, goods_received_note=grn,
@@ -950,7 +958,15 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
         self.assertEqual(inventory.balance(), Decimal("315000.00"))
         self.assertEqual(accrued.balance(), Decimal("315000.00"))
 
-    def test_return_rejects_grn_already_invoiced(self):
+    def test_return_rejects_grn_already_invoiced_and_paid(self):
+        """
+        Renamed to match what this now actually proves — an UNPAID
+        invoice no longer blocks a return via the API either (Case B,
+        correctly allowed). The real remaining boundary is Case C:
+        once the invoice is genuinely PAID (via the real /pay/
+        endpoint, not just a direct field flip, so this exercises the
+        actual payment flow too), the return must still be rejected.
+        """
         po = self._create_po_via_api()
         po_line_id = po["line_items"][0]["id"]
 
@@ -962,12 +978,19 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
         grn_data = grn_resp.data["goods_received_note"]
 
         with self.captureOnCommitCallbacks(execute=True):
-            self.client.post("/api/supplier-invoices/", {
+            invoice_resp = self.client.post("/api/supplier-invoices/", {
                 "supplier": str(self.supplier.id),
                 "amount": "450000.00",
                 "invoice_date": "2026-08-09",
                 "goods_received_note_ids": [grn_data["id"]],
             }, format="json")
+        supplier_invoice_id = invoice_resp.data["supplier_invoice"]["id"]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                f"/api/supplier-invoices/{supplier_invoice_id}/pay/",
+                {"method": "bank_transfer"}, format="json",
+            )
 
         resp = self.client.post("/api/purchase-returns/", {
             "goods_received_note": grn_data["id"],
