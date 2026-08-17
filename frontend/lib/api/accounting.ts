@@ -34,17 +34,35 @@ export interface ReportLine {
 }
 
 export interface ProfitLossResponse {
-  since: string;
   as_of: string;
   revenue: ReportLine[];
   total_revenue: string | number;
   cogs: ReportLine[];
+  since: string;
   total_cogs: string | number;
   gross_profit: string | number;
   gross_profit_note: string;
   expenses: ReportLine[];
   total_expenses: string | number;
   net_income: string | number;
+}
+
+// change_pct is null when the prior period's value was exactly zero
+// — an honest "can't compute a percentage from zero," not a
+// fabricated infinite number. See reports.py's own
+// profit_and_loss_comparison() docstring for the full reasoning,
+// including how a loss-to-profit swing is handled.
+export interface ReportDelta {
+  change: string | number;
+  change_pct: string | number | null;
+}
+
+export interface ProfitLossComparisonResponse {
+  current: ProfitLossResponse;
+  prior: ProfitLossResponse;
+  revenue_delta: ReportDelta;
+  gross_profit_delta: ReportDelta;
+  net_income_delta: ReportDelta;
 }
 
 export interface BalanceSheetLine {
@@ -168,6 +186,13 @@ export const accountingApi = {
 
   profitLoss: (since?: string, asOf?: string) =>
     getOrNull<ProfitLossResponse>("/api/accounting/profit-loss/", { since, as_of: asOf }),
+
+// Same real endpoint as profitLoss() above, just with compare=1 —
+  // deliberately a separate method rather than an overload, so call
+  // sites are explicit about which response shape they're getting
+  // instead of relying on a conditional return type.
+  profitLossComparison: (since?: string, asOf?: string) =>
+    getOrNull<ProfitLossComparisonResponse>("/api/accounting/profit-loss/", { since, as_of: asOf, compare: "1" }),  
 
   balanceSheet: (asOf?: string) =>
     getOrNull<BalanceSheetResponse>("/api/accounting/balance-sheet/", { as_of: asOf }),
