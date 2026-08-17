@@ -11,7 +11,6 @@ import {
 import { Loader2, TriangleAlert } from "lucide-react";
 import { ChangeEvent, useEffect, useState } from "react";
 // ── Shared helpers ──────────────────────────────────────────────
-
 // The one place that resolves the string|number Decimal ambiguity —
 // see accounting.ts's own note on why this exists. Every component
 // below goes through this, never compares/formats a raw API value
