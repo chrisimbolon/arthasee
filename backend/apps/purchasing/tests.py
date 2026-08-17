@@ -1048,13 +1048,23 @@ class PurchaseReturnClassificationTests(PurchasingModelTestBase):
             organization=self.org, supplier=self.supplier, order_date="2026-08-14",
             lines=[{"part": self.part_a, "quantity_ordered": quantity, "unit_cost": unit_cost}],
         )
-        return GoodsReceivedNote.receive(
-            organization=self.org, purchase_order=po,
-            lines=[{
-                "purchase_order_line_item": po.line_items.first(),
-                "quantity": quantity, "unit_cost": unit_cost,
-            }],
-        )
+        # Real bug, caught live: this was missing
+        # captureOnCommitCallbacks — Django's on_commit() hooks never
+        # fire inside a TestCase's own rolled-back transaction unless
+        # explicitly captured, so the GoodsReceived event silently
+        # never posted. Every downstream balance assertion in this
+        # class was checking numbers that only ever reflected the
+        # RETURN's own posting, never the original receive — a test
+        # bug, not a backend bug.
+        with self.captureOnCommitCallbacks(execute=True):
+            grn = GoodsReceivedNote.receive(
+                organization=self.org, purchase_order=po,
+                lines=[{
+                    "purchase_order_line_item": po.line_items.first(),
+                    "quantity": quantity, "unit_cost": unit_cost,
+                }],
+            )
+        return grn
 
     def test_case_a_return_before_invoice_is_classified_and_posts_to_accrued_inventory(self):
         """
