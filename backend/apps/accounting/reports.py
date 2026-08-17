@@ -160,6 +160,83 @@ def profit_and_loss_comparison(organization, *, since, as_of) -> dict:
         "net_income_delta":   _delta(current["net_income"],    prior["net_income"]),
     }
 
+def cash_conversion_cycle(organization, *, since, as_of) -> dict:
+    """
+    CCC = DIO + DSO - DPO, all in days — how long cash is tied up
+    between paying for inventory and collecting cash from a
+    customer. Lower is healthier; a negative CCC means suppliers are
+    effectively financing operations (DPO exceeds DIO+DSO).
+
+    Inventory for DIO deliberately includes BOTH 1301 (Spare Parts)
+    and 1302 (Work In Progress) — Chris's own explicit call: total
+    stock valuation on hand covers parts sitting on the shelf AND
+    labor/parts already committed to an open job, both real capital
+    tied up before a sale completes.
+
+    COGS and Revenue are summed via the SAME _period_totals() helper
+    already used by profit_and_loss() — not hardcoded account codes
+    — so this automatically covers every real COGS/Revenue account
+    (5001/5002/5003, 4001/4002 today) without needing an update if a
+    new one is ever added to the Chart of Accounts.
+
+    "Average" balance = (opening + closing) / 2, where opening is
+    the balance as of the day BEFORE `since` (the true cumulative
+    balance immediately prior to this period — NOT a balance that
+    already includes this period's own activity) and closing is the
+    balance as of `as_of` itself.
+
+    Division-by-zero is handled explicitly, not left to crash —
+    Chris's own explicit requirement: a period with zero COGS or
+    zero Revenue (e.g. a brand-new organization's first few days)
+    returns 0 days for the affected metric rather than raising
+    ZeroDivisionError. Full formula and this exact edge case both
+    verified by hand before being written here.
+    """
+    days_in_period = (as_of - since).days + 1  # inclusive span, same convention as profit_and_loss_comparison()
+    opening_as_of = since - timedelta(days=1)
+
+    def _avg_balance(account):
+        opening = account.balance(as_of=opening_as_of)
+        closing = account.balance(as_of=as_of)
+        return (opening + closing) / Decimal("2")
+
+    part_inventory = Account.resolve(organization, "1301")
+    wip            = Account.resolve(organization, "1302")
+    ar             = Account.resolve(organization, "1201")
+    ap             = Account.resolve(organization, "2001")
+
+    avg_inventory = _avg_balance(part_inventory) + _avg_balance(wip)
+    avg_ar        = _avg_balance(ar)
+    avg_ap        = _avg_balance(ap)
+
+    _, total_cogs    = _period_totals(organization, Account.AccountType.COGS,    since=since, as_of=as_of)
+    _, total_revenue = _period_totals(organization, Account.AccountType.REVENUE, since=since, as_of=as_of)
+
+    def _days(avg_balance, denominator):
+        if denominator == Decimal("0"):
+            return Decimal("0")
+        return (avg_balance / denominator) * Decimal(days_in_period)
+
+    dio = _days(avg_inventory, total_cogs)
+    dso = _days(avg_ar, total_revenue)
+    dpo = _days(avg_ap, total_cogs)
+    ccc = dio + dso - dpo
+
+    return {
+        "since": since,
+        "as_of": as_of,
+        "days_in_period": days_in_period,
+        "avg_inventory": avg_inventory,
+        "avg_ar": avg_ar,
+        "avg_ap": avg_ap,
+        "total_cogs": total_cogs,
+        "total_revenue": total_revenue,
+        "dio": dio,
+        "dso": dso,
+        "dpo": dpo,
+        "ccc": ccc,
+    }
+
 def _current_period_start(organization, as_of):
     period = AccountingPeriod.objects.filter(
         organization=organization, start_date__lte=as_of, end_date__gte=as_of,
