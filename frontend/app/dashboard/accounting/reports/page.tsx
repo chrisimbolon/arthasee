@@ -5,7 +5,7 @@
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   ACCOUNT_TYPE_LABELS, accountingApi, AgingBucket, AgingInvoiceRow,
-  AgingReportResponse, BalanceSheetResponse, ProfitLossComparisonResponse,
+  AgingReportResponse, BalanceSheetResponse, CashConversionCycleResponse, ProfitLossComparisonResponse,
   ProfitLossResponse, ReportDelta, ReportLine, TrialBalanceResponse,
 } from "@/lib/api/accounting";
 import { Loader2, TriangleAlert } from "lucide-react";
@@ -332,6 +332,66 @@ function BalanceSheetPanel() {
   );
 }
 
+// ── Cash Conversion Cycle ────────────────────────────────────────
+
+function CashConversionCyclePanel() {
+  const today = new Date().toISOString().slice(0, 10);
+  const [since, setSince] = useState(`${new Date().getFullYear()}-01-01`);
+  const [asOf, setAsOf] = useState(today);
+  const [data, setData] = useState<CashConversionCycleResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    accountingApi.cashConversionCycle(since, asOf).then((res) => { setData(res); setLoading(false); });
+  }, [since, asOf]);
+
+  if (loading) return <LoadingState />;
+  if (!data) return <EmptyState />;
+
+  const ccc = toNumber(data.ccc);
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
+        <div style={{ flex: 1 }}>
+          <div className="label">Dari Tanggal</div>
+          <input type="date" className="input" value={since} onChange={(e: ChangeEvent<HTMLInputElement>) => setSince(e.target.value)} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <div className="label">Sampai Tanggal</div>
+          <input type="date" className="input" value={asOf} onChange={(e: ChangeEvent<HTMLInputElement>) => setAsOf(e.target.value)} />
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
+        <div className="card" style={{ padding: 16 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Hari Persediaan (DIO)</div>
+          <div className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{toNumber(data.dio).toFixed(1)} hari</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Hari Piutang (DSO)</div>
+          <div className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{toNumber(data.dso).toFixed(1)} hari</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Hari Utang (DPO)</div>
+          <div className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{toNumber(data.dpo).toFixed(1)} hari</div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 0", borderTop: "1.5px solid var(--line)" }}>
+        <div style={{ fontSize: 16, fontWeight: 700 }}>Siklus Konversi Kas (CCC)</div>
+        <div className="mono" style={{ fontWeight: 800, fontSize: 22, color: ccc <= 0 ? "var(--workshop)" : "var(--ink)" }}>
+          {ccc.toFixed(1)} hari
+        </div>
+      </div>
+      <div style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 8 }}>
+        CCC = DIO + DSO − DPO — jumlah hari kas terikat antara membeli persediaan dan menerima pembayaran dari pelanggan. Semakin rendah semakin sehat; CCC negatif berarti supplier secara efektif mendanai operasional (DPO melebihi DIO+DSO).
+      </div>
+    </div>
+  );
+}
+
 // ── Aging AR / AP ────────────────────────────────────────────────
 
 function AgingPanel({ type }: { type: "ar" | "ap" }) {
@@ -403,12 +463,13 @@ function AgingPanel({ type }: { type: "ar" | "ap" }) {
 
 // ── Page shell ───────────────────────────────────────────────────
 
-type ReportTab = "trial-balance" | "profit-loss" | "balance-sheet" | "aging-ar" | "aging-ap";
+type ReportTab = "trial-balance" | "profit-loss" | "balance-sheet" | "cash-conversion-cycle" | "aging-ar" | "aging-ap";
 
 const TABS: { id: ReportTab; label: string }[] = [
   { id: "trial-balance", label: "Neraca Saldo" },
   { id: "profit-loss",   label: "Laba Rugi" },
   { id: "balance-sheet", label: "Neraca" },
+  { id: "cash-conversion-cycle", label: "Siklus Konversi Kas" },
   { id: "aging-ar",      label: "Piutang (AR)" },
   { id: "aging-ap",      label: "Utang (AP)" },
 ];
@@ -440,6 +501,7 @@ export default function AccountingReportsPage() {
       {tab === "trial-balance" && <TrialBalancePanel />}
       {tab === "profit-loss" && <ProfitLossPanel />}
       {tab === "balance-sheet" && <BalanceSheetPanel />}
+      {tab === "cash-conversion-cycle" && <CashConversionCyclePanel />}      
       {tab === "aging-ar" && <AgingPanel type="ar" />}
       {tab === "aging-ap" && <AgingPanel type="ap" />}
     </div>
