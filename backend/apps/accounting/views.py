@@ -80,6 +80,33 @@ class ProfitLossView(TenantScopedAPIView):
             data = reports.profit_and_loss(organization, since=since, as_of=as_of)
         return Response({"success": True, **data})
 
+class CashConversionCycleView(TenantScopedAPIView):
+    """
+    GET /api/accounting/cash-conversion-cycle/?since=YYYY-MM-DD&as_of=YYYY-MM-DD
+    Same since/as_of defaulting as ProfitLossView — falls back to the
+    current AccountingPeriod's own start date, then Jan 1, if since
+    isn't explicitly passed.
+    """
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        as_of = _parse_date(request.query_params.get("as_of"), default=date.today())
+        since = _parse_date(request.query_params.get("since"))
+        if since is None:
+            from apps.accounting.models import AccountingPeriod
+            period = AccountingPeriod.objects.filter(
+                organization=organization, start_date__lte=as_of, end_date__gte=as_of,
+            ).first()
+            since = period.start_date if period else date(as_of.year, 1, 1)
+
+        data = reports.cash_conversion_cycle(organization, since=since, as_of=as_of)
+        return Response({"success": True, **data})
 
 class BalanceSheetView(TenantScopedAPIView):
     """GET /api/accounting/balance-sheet/?as_of=YYYY-MM-DD"""
