@@ -9,7 +9,7 @@ from .views import (GoodsReceivedNoteDetailView,
                     PurchaseOrderListCreateView, PurchaseReturnDetailView,
                     PurchaseReturnListCreateView, SupplierDetailView,
                     SupplierInvoiceDetailView, SupplierInvoiceListCreateView,
-                    SupplierListCreateView)
+                    SupplierListCreateView, SupplierReliabilityView)
 
 urlpatterns = [
     path("suppliers/",                       SupplierListCreateView.as_view(),        name="supplier-list-create"),
@@ -25,4 +25,5 @@ urlpatterns = [
     path("supplier-invoices/<uuid:pk>/",      SupplierInvoiceDetailView.as_view(),     name="supplier-invoice-detail"),
     path("purchase-returns/",                 PurchaseReturnListCreateView.as_view(),  name="purchase-return-list-create"),
     path("purchase-returns/<uuid:pk>/",       PurchaseReturnDetailView.as_view(),      name="purchase-return-detail"),
+    path("supplier-reliability/",             SupplierReliabilityView.as_view(), name="supplier-reliability"),    
 ]
