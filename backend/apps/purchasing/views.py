@@ -6,11 +6,14 @@ NOTE: TenantScopedAPIView's exact interface is confirmed against the
 real apps/core/views.py, including the new get_organization() method
 added alongside this delivery — see apps/core/PATCH_get_organization.md.
 """
+from datetime import date
+
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import Part
 from rest_framework import status
 from rest_framework.response import Response
 
+from . import reports
 from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
                      PurchaseOrder, PurchaseOrderLineItem, PurchaseReturn,
                      Supplier, SupplierInvoice)
@@ -416,3 +419,32 @@ class PurchaseReturnDetailView(TenantScopedAPIView):
     def get(self, request, pk):
         purchase_return = self.get_object(pk)
         return Response({"success": True, "purchase_return": PurchaseReturnSerializer(purchase_return).data})
+
+class SupplierReliabilityView(TenantScopedAPIView):
+    """
+    GET /api/purchasing/supplier-reliability/?since=YYYY-MM-DD&as_of=YYYY-MM-DD
+
+    Defaults since to Jan 1 of the as_of year when not explicitly
+    passed — deliberately NOT looking up the org's real
+    AccountingPeriod (an apps.accounting concept) to derive a
+    default here, since that would reintroduce the exact cross-
+    domain reach this report was moved out of apps.accounting to
+    avoid in the first place.
+    """
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        as_of_raw = request.query_params.get("as_of")
+        as_of = date.fromisoformat(as_of_raw) if as_of_raw else date.today()
+
+        since_raw = request.query_params.get("since")
+        since = date.fromisoformat(since_raw) if since_raw else date(as_of.year, 1, 1)
+
+        data = reports.supplier_reliability(organization, since=since, as_of=as_of)
+        return Response({"success": True, **data})
