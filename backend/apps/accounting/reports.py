@@ -384,3 +384,69 @@ def aging_ap(organization, *, as_of=None) -> dict:
         "buckets": buckets,
         "total_outstanding": total_outstanding,
     }
+
+def dashboard_financial_summary(organization, *, as_of=None) -> dict:
+    """
+    Purpose-built for the owner-facing overview dashboard — Made's
+    own real question, quoted directly: "Berapa banyak pelanggan
+    yang belum bayar? Siapa saja? (Piutang)" and "Bengkel kita
+    berhutang ke siapa saja dan berapa jumlahnya? (Utang)".
+
+    AR's "overdue" callout reuses aging_ar()'s own buckets directly
+    (everything outside "0-30") — safe to do, because Invoice ages
+    from created_at, which can never be in the future relative to
+    as_of, so that bucket boundary means what it looks like it means.
+
+    AP's callout is deliberately NOT built the same way. aging_ap()
+    ages from due_date, which CAN be in the future — a real,
+    different risk verified by hand before this was written: a
+    SupplierInvoice due a week from now has a NEGATIVE age_days,
+    which still satisfies "<= 30" and would silently land in that
+    same "0-30" bucket, mixing "not due yet" with "overdue by up to
+    a month." Made's own framing is explicitly forward-looking
+    ("due within the current week"), so this builds a fresh,
+    explicit due_date <= as_of + 7 days filter instead of reusing
+    aging_ap()'s bucket at all.
+
+    Both detail lists are capped at 5 rows, sorted by what matters
+    most (AR: highest balance first; AP: soonest due first) — this
+    is a dashboard summary widget, not the full aging report; the
+    full Piutang (AR) / Utang (AP) tabs already exist for everything
+    beyond the headline.
+    """
+    as_of = as_of or date.today()
+
+    ar_data = aging_ar(organization, as_of=as_of)
+    ar_overdue_rows = [row for row in ar_data["invoices"] if row["bucket"] != "0-30"]
+    ar_overdue_rows.sort(key=lambda r: r["balance_due"], reverse=True)
+    ar_overdue_total = sum((row["balance_due"] for row in ar_overdue_rows), Decimal("0"))
+    ar_overdue_customers = sorted({row["customer_name"] for row in ar_overdue_rows})
+
+    ap_week_cutoff = as_of + timedelta(days=7)
+    unpaid = SupplierInvoice.objects.filter(organization=organization, status="UNPAID").select_related("supplier")
+    ap_total_outstanding = Decimal("0")
+    ap_due_soon_rows = []
+    for invoice in unpaid:
+        ap_total_outstanding += invoice.amount
+        reference_date = invoice.due_date or invoice.invoice_date
+        if reference_date <= ap_week_cutoff:
+            ap_due_soon_rows.append({
+                "id": str(invoice.id), "number": invoice.number,
+                "supplier_name": invoice.supplier.name,
+                "amount": invoice.amount, "due_date": reference_date,
+            })
+    ap_due_soon_rows.sort(key=lambda r: r["due_date"])
+    ap_due_soon_total = sum((r["amount"] for r in ap_due_soon_rows), Decimal("0"))
+
+    return {
+        "as_of": as_of,
+        "ar_total_outstanding": ar_data["total_outstanding"],
+        "ar_overdue_total": ar_overdue_total,
+        "ar_overdue_count": len(ar_overdue_rows),
+        "ar_overdue_customers": ar_overdue_customers,
+        "ar_overdue_invoices": ar_overdue_rows[:5],
+        "ap_total_outstanding": ap_total_outstanding,
+        "ap_due_soon_total": ap_due_soon_total,
+        "ap_due_soon_count": len(ap_due_soon_rows),
+        "ap_due_soon_invoices": ap_due_soon_rows[:5],
+    }
