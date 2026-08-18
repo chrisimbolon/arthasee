@@ -132,6 +132,23 @@ export interface PurchaseReturn {
   created_at: string;
 }
 
+export interface SupplierReliabilityRow {
+  supplier_id: string;
+  supplier_name: string;
+  total_pos_judged: number;
+  on_time_pos: number;
+  on_time_rate: string | number | null;
+  total_received_value: string | number;
+  total_returned_value: string | number;
+  return_rate: string | number;
+}
+
+export interface SupplierReliabilityResponse {
+  since: string;
+  as_of: string;
+  suppliers: SupplierReliabilityRow[];
+}
+
 export const suppliersApi = {
   async list(): Promise<Supplier[]> {
     const { data } = await api.get("/api/suppliers/");
@@ -253,5 +270,16 @@ export const purchaseReturnsApi = {
   }): Promise<PurchaseReturn> {
     const { data } = await api.post("/api/purchase-returns/", payload);
     return data.purchase_return;
+  },
+};
+
+export const purchasingReportsApi = {
+  async supplierReliability(since?: string, asOf?: string): Promise<SupplierReliabilityResponse | null> {
+    try {
+      const { data } = await api.get("/api/purchasing/supplier-reliability/", { params: { since, as_of: asOf } });
+      return data as SupplierReliabilityResponse;
+    } catch {
+      return null;
+    }
   },
 };
