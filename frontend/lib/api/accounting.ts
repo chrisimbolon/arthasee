@@ -120,6 +120,36 @@ export interface AgingReportResponse {
   total_outstanding: string | number;
 }
 
+export interface DashboardOverdueInvoiceRow {
+  id: string;
+  number: string;
+  customer_name: string;
+  balance_due: string | number;
+  age_days: number;
+  bucket: AgingBucket;
+}
+
+export interface DashboardDueSoonInvoiceRow {
+  id: string;
+  number: string;
+  supplier_name: string;
+  amount: string | number;
+  due_date: string;
+}
+
+export interface DashboardFinancialSummaryResponse {
+  as_of: string;
+  ar_total_outstanding: string | number;
+  ar_overdue_total: string | number;
+  ar_overdue_count: number;
+  ar_overdue_customers: string[];
+  ar_overdue_invoices: DashboardOverdueInvoiceRow[];
+  ap_total_outstanding: string | number;
+  ap_due_soon_total: string | number;
+  ap_due_soon_count: number;
+  ap_due_soon_invoices: DashboardDueSoonInvoiceRow[];
+}
+
 // Task 5.2 — new types for the journal viewer.
 
 export type JournalSource = "DOMAIN_EVENT" | "MANUAL";
@@ -220,6 +250,9 @@ export const accountingApi = {
 
   agingAP: (asOf?: string) =>
     getOrNull<AgingReportResponse>("/api/accounting/aging-ap/", { as_of: asOf }),
+
+  dashboardFinancialSummary: (asOf?: string) =>
+    getOrNull<DashboardFinancialSummaryResponse>("/api/accounting/dashboard-financial-summary/", { as_of: asOf }),
 
   journalEntries: (opts?: { source?: JournalSource; since?: string; asOf?: string }) =>
     getListOrNull<JournalEntryRow>("/api/accounting/journal-entries/", "journal_entries", {
