@@ -2,9 +2,13 @@
 // =============================================================================
 // === frontend/app/dashboard/page.tsx ===
 // =============================================================================
+import { accountingApi, DashboardFinancialSummaryResponse } from "@/lib/api/accounting";
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { ActiveJob, activeJobsApi, dashboardApi, DashboardSummary } from "@/lib/api/workorders";
-import { AlertTriangle, Car, CheckCircle2, Clock, Layers, Loader2, Users, Wrench } from "lucide-react";
+import {
+  AlertTriangle, Car, CheckCircle2, Clock, Landmark, Layers,
+  Loader2, Users, Wallet, Wrench,
+} from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
@@ -13,6 +17,14 @@ const PERIOD_LABEL: Record<Period, string> = { today: "Hari Ini", week: "Minggu 
 
 function formatHours(h: number) {
   return h < 1 ? `${Math.round(h * 60)} menit` : `${h.toFixed(1)} jam`;
+}
+
+function toNumber(value: string | number): number {
+  return typeof value === "string" ? parseFloat(value) : value;
+}
+
+function formatRupiah(value: string | number): string {
+  return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(toNumber(value));
 }
 
 export default function DashboardOverviewPage() {
@@ -38,6 +50,14 @@ export default function DashboardOverviewPage() {
   const [stagedJobs, setStagedJobs] = useState<ActiveJob[]>([]);
   const [stagedJobsLoading, setStagedJobsLoading] = useState(true);
 
+  // Made's own real question, quoted directly: "Berapa banyak
+  // pelanggan yang belum bayar? Siapa saja? (Piutang)" and "Bengkel
+  // kita berhutang ke siapa saja dan berapa jumlahnya? (Utang)".
+  // Fetched independently — a point-in-time snapshot, not tied to
+  // the operational `period` toggle above.
+  const [financialSummary, setFinancialSummary] = useState<DashboardFinancialSummaryResponse | null>(null);
+  const [financialSummaryLoading, setFinancialSummaryLoading] = useState(true);  
+
   useEffect(() => {
     Promise.all([customersApi.list(), vehiclesApi.list(), vehiclesApi.list({ dueForService: true })])
       .then(([c, v, due]) => { setCustomers(c); setVehicles(v); setDueVehicles(due); })
@@ -59,6 +79,12 @@ export default function DashboardOverviewPage() {
       .then((jobs) => setStagedJobs(jobs.filter((j) => j.current_stage_name !== null)))
       .finally(() => setStagedJobsLoading(false));
   }, []);
+
+  useEffect(() => {
+    accountingApi.dashboardFinancialSummary()
+      .then(setFinancialSummary)
+      .finally(() => setFinancialSummaryLoading(false));
+  }, []);  
 
   if (loading) {
     return <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…</div>;
@@ -92,6 +118,78 @@ export default function DashboardOverviewPage() {
           <div className="mono" style={{ fontSize: 32, fontWeight: 600, color: dueVehicles.length > 0 ? "var(--hazard-dark)" : "var(--ink)" }}>{dueVehicles.length}</div>
         </div>
       </div>
+
+      {!financialSummaryLoading && financialSummary && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16, marginBottom: 16 }}>
+            <div className="card" style={{ borderColor: toNumber(financialSummary.ar_overdue_total) > 0 ? "var(--hazard)" : "var(--line)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <Wallet size={18} style={{ color: "var(--workshop)" }} />
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--steel)", textTransform: "uppercase" }}>Piutang Belum Dibayar</span>
+              </div>
+              <div className="mono" style={{ fontSize: 28, fontWeight: 600 }}>{formatRupiah(financialSummary.ar_total_outstanding)}</div>
+              {toNumber(financialSummary.ar_overdue_total) > 0 && (
+                <p style={{ fontSize: 11.5, color: "var(--hazard-dark)", marginTop: 6 }}>
+                  {formatRupiah(financialSummary.ar_overdue_total)} lewat 30 hari — {financialSummary.ar_overdue_customers.length} pelanggan
+                </p>
+              )}
+            </div>
+            <div className="card" style={{ borderColor: toNumber(financialSummary.ap_due_soon_total) > 0 ? "var(--hazard)" : "var(--line)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <Landmark size={18} style={{ color: "var(--steel)" }} />
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--steel)", textTransform: "uppercase" }}>Utang Belum Dibayar</span>
+              </div>
+              <div className="mono" style={{ fontSize: 28, fontWeight: 600 }}>{formatRupiah(financialSummary.ap_total_outstanding)}</div>
+              {toNumber(financialSummary.ap_due_soon_total) > 0 && (
+                <p style={{ fontSize: 11.5, color: "var(--hazard-dark)", marginTop: 6 }}>
+                  {formatRupiah(financialSummary.ap_due_soon_total)} jatuh tempo minggu ini — {financialSummary.ap_due_soon_count} invoice
+                </p>
+              )}
+            </div>
+          </div>
+
+          {(financialSummary.ar_overdue_invoices.length > 0 || financialSummary.ap_due_soon_invoices.length > 0) && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 32 }}>
+              {financialSummary.ar_overdue_invoices.length > 0 && (
+                <div className="card" style={{ borderColor: "var(--danger)" }}>
+                  <h2 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 7, color: "var(--danger)" }}>
+                    <AlertTriangle size={15} /> Piutang Lewat 30 Hari
+                  </h2>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {financialSummary.ar_overdue_invoices.map((inv) => (
+                      <div key={inv.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                        <span>{inv.customer_name}</span>
+                        <span className="mono" style={{ fontWeight: 600 }}>{formatRupiah(inv.balance_due)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <Link href="/dashboard/accounting/reports" style={{ display: "inline-block", fontSize: 12, color: "var(--rust)", marginTop: 12 }}>
+                    Lihat semua piutang →
+                  </Link>
+                </div>
+              )}
+              {financialSummary.ap_due_soon_invoices.length > 0 && (
+                <div className="card" style={{ borderColor: "var(--hazard)" }}>
+                  <h2 style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 7, color: "var(--hazard-dark)" }}>
+                    <AlertTriangle size={15} /> Utang Jatuh Tempo Minggu Ini
+                  </h2>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {financialSummary.ap_due_soon_invoices.map((inv) => (
+                      <div key={inv.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                        <span>{inv.supplier_name}</span>
+                        <span className="mono" style={{ fontWeight: 600 }}>{formatRupiah(inv.amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <Link href="/dashboard/accounting/reports" style={{ display: "inline-block", fontSize: 12, color: "var(--rust)", marginTop: 12 }}>
+                    Lihat semua utang →
+                  </Link>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <h2 style={{ fontSize: 16, fontWeight: 700 }}>Operasional Bengkel</h2>
