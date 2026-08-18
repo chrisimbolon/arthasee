@@ -152,6 +152,25 @@ class AgingAPView(TenantScopedAPIView):
         data = reports.aging_ap(organization, as_of=as_of)
         return Response({"success": True, **data})
 
+class DashboardFinancialSummaryView(TenantScopedAPIView):
+    """
+    GET /api/accounting/dashboard-financial-summary/?as_of=YYYY-MM-DD
+    A point-in-time snapshot, not a period report — no `since`, same
+    as balance-sheet/trial-balance/aging-ar/aging-ap. Purpose-built
+    for the owner-facing Ringkasan dashboard, not the Laporan
+    Keuangan reports page.
+    """
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        as_of = _parse_date(request.query_params.get("as_of"))
+        data = reports.dashboard_financial_summary(organization, as_of=as_of)
+        return Response({"success": True, **data})
 
 _CONTROL_ACCOUNT_CODES = {"1201", "2001"}
 
