@@ -276,7 +276,7 @@ export const purchaseReturnsApi = {
 export const purchasingReportsApi = {
   async supplierReliability(since?: string, asOf?: string): Promise<SupplierReliabilityResponse | null> {
     try {
-      const { data } = await api.get("/api/purchasing/supplier-reliability/", { params: { since, as_of: asOf } });
+      const { data } = await api.get("/api/supplier-reliability/", { params: { since, as_of: asOf } });
       return data as SupplierReliabilityResponse;
     } catch {
       return null;
