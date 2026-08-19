@@ -20,7 +20,29 @@ from django.db import models
 # standard Indonesian service-reminder interval, not an arbitrary
 # number.
 SERVICE_DUE_INTERVAL_KM = 5000
+SERVICE_REMINDER_THRESHOLD_MONTHS = 3
 
+def _add_months(d, months):
+    """
+    Real calendar-month arithmetic, no dateutil dependency — same
+    "pure Python month arithmetic" discipline already established in
+    apps.analytics.growth._last_n_month_starts(). Clamps an invalid
+    result (e.g. Jan 31 + 3 months landing on a non-existent "April
+    31") down to the real last day of that month, rather than
+    raising. A naive "just compare month numbers" version was tried
+    first and found genuinely wrong by hand — it counted a date only
+    2 months and 29 days later as a full 3 months elapsed, since it
+    ignored day-of-month entirely. Verified against that exact case,
+    a year boundary, and the invalid-date clamp before being written
+    here.
+    """
+    import calendar
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    from datetime import date
+    return date(year, month, day)
 
 class Customer(TenantScopedModel):
     """
@@ -152,6 +174,29 @@ class Vehicle(TenantScopedModel):
         from datetime import date, timedelta
         return self.registration_expiry <= (date.today() + timedelta(days=30))
 
+    @property
+    def is_due_for_service_reminder(self):
+        """
+        Made's own calendar-based nudge — deliberately kept SEPARATE
+        from is_due_for_service above, which is purely mileage-based
+        and drives the already-live "Harus Servis" dashboard badge.
+        A customer who drives less than average could sit under
+        5,000 km for well past 4 months and never trip that one —
+        this is exactly the signal meant to catch them anyway.
+
+        No upper bound, same pattern as is_registration_expiring_soon
+        — once due, it stays due until a real new ServiceRecord
+        resets last_service_date, nothing to reset by hand. The
+        actual send-once guard lives in ServiceReminderLog, not
+        here — this property only answers "is this vehicle
+        currently in the reminder window," not "have we already
+        reminded them about it."
+        """
+        if self.last_service_date is None:
+            return False
+        from datetime import date
+        return date.today() >= _add_months(self.last_service_date, SERVICE_REMINDER_THRESHOLD_MONTHS)
+
 
 class ServiceRecord(TenantScopedModel):
     """
@@ -193,3 +238,47 @@ class ServiceRecord(TenantScopedModel):
         self.vehicle.save(update_fields=[
             "last_service_date", "last_service_odometer_km", "current_odometer_km", "updated_at",
         ])
+
+class ServiceReminderLog(TenantScopedModel):
+    """
+    One row per reminder actually ATTEMPTED for a vehicle (sent or
+    failed), tied to the specific last_service_date it was sent
+    about — the real mechanism stopping this from becoming a daily
+    email every single day forever. A failed attempt still creates a
+    row here, same "fails soft, don't retry-storm" philosophy as
+    apps.customers.email.send_magic_link_email — a transient Resend
+    outage is treated the same as a permanent bad address; both wait
+    for the vehicle's own next real service visit before trying
+    again, rather than hammering an unreliable address daily.
+
+    Tied to for_last_service_date, not just the vehicle — a genuine
+    new ServiceRecord updates last_service_date (see
+    ServiceRecord.save() above), which naturally makes the vehicle
+    eligible for a fresh reminder next time 3 months pass. Nothing
+    to reset by hand.
+    """
+    STATUS_CHOICES = [
+        ("SENT",   "Terkirim"),
+        ("FAILED", "Gagal"),
+    ]
+
+    id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vehicle = models.ForeignKey(
+        Vehicle, on_delete=models.CASCADE, related_name="reminder_logs",
+        verbose_name="Kendaraan",
+    )
+    for_last_service_date = models.DateField(verbose_name="Untuk Service Terakhir Tanggal")
+    status  = models.CharField(max_length=20, choices=STATUS_CHOICES, verbose_name="Status")
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Service Reminder Log"
+        verbose_name_plural  = "Service Reminder Logs"
+        unique_together      = [("vehicle", "for_last_service_date")]
+        ordering             = ["-sent_at"]
+
+    def __str__(self):
+        return f"{self.vehicle.plate_number} — {self.for_last_service_date} — {self.status}"
+
+    def _resolve_organization(self):
+        return self.vehicle.organization
