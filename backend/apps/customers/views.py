@@ -1,25 +1,32 @@
 # =============================================================================
 # === backend/apps/customers/views.py ===
 # =============================================================================
+from datetime import timedelta
+
 from apps.core.views import TenantScopedAPIView
+from apps.service.models import Customer, Vehicle
 from apps.workorders.models import WorkOrder
 from django.conf import settings
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from datetime import timedelta
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.service.models import Customer
-from .auth import CustomerJWTAuthentication, IsCustomerAuthenticated, generate_customer_access_token
+from .auth import (CustomerJWTAuthentication, IsCustomerAuthenticated,
+                   generate_customer_access_token)
 from .email import send_magic_link_email
 from .models import MagicLinkToken, TrackingLink
 from .payload import build_work_order_tracking_payload
-from .serializers import (CustomerSessionSerializer, CustomerWorkOrderSummarySerializer,
-                          MagicLinkRequestSerializer, MagicLinkVerifySerializer,
-                          PublicTrackingSerializer, TrackingLinkSerializer)
+from .serializers import (CustomerSelfRegistrationSerializer,
+                          CustomerSessionSerializer,
+                          CustomerWorkOrderSummarySerializer,
+                          MagicLinkRequestSerializer,
+                          MagicLinkVerifySerializer, PublicTrackingSerializer,
+                          TrackingLinkSerializer)
+from .tenant import get_customer_portal_organization
 
 # Mirrors WorkOrder.STATUS_CHOICES' own labels — duplicated rather
 # than imported, since this is customer-facing copy and the two are
@@ -208,6 +215,124 @@ class CustomerMagicLinkVerifyView(APIView):
         session = {"access": access_token, "name": customer.name, "email": customer.email}
         return Response({"success": True, "session": CustomerSessionSerializer(session).data})
 
+class CustomerSelfRegistrationView(APIView):
+    """
+    POST /api/customer-auth/register/
+    Body: {"full_name": ..., "phone": ..., "email": ..., "plate_number": ...}
+
+    Made's own confirmed decision (mandatory login, no guest
+    checkout) surfaced a real gap: the existing magic-link flow only
+    ever LOOKS UP an existing Customer, never creates one — a
+    genuine first-time visitor had no way in at all. This endpoint
+    is that missing path.
+
+    Organization is resolved via get_customer_portal_organization(),
+    never from any client-supplied value — single-deployment-per-
+    shop for now, see tenant.py's own docstring for what changes
+    when this becomes real multi-tenant subdomain routing later.
+
+    Defense in depth: the real intended flow always checks
+    CustomerMagicLinkRequestView FIRST, only showing the
+    registration form when that lookup comes back empty — but this
+    view re-checks for an existing Customer with the same email in
+    the SAME organization anyway, before creating anything. A direct
+    call to this endpoint (buggy client, stale frontend state, or
+    someone poking the API directly) must never create a duplicate
+    Customer for a real person who already has an account. If one
+    already exists, this behaves exactly like a normal login request
+    instead — the submitted plate_number is deliberately ignored in
+    that case, no vehicle side effect on what's really just a
+    misrouted login attempt — never a silent no-op, never an error
+    revealing whether the email was already registered, same "never
+    confirm or deny" discipline as CustomerMagicLinkRequestView's
+    own response shape. Verified by hand across all three real cases
+    (new registration, duplicate email, plate conflict) before this
+    was written.
+
+    Vehicle.plate_number is unique per organization (a real DB
+    constraint) — a plate that already exists for this org is
+    rejected with a clear message BEFORE attempting to create
+    anything, never left to surface as a raw IntegrityError.
+
+    Missing Vehicle fields (manufacture_year, vehicle_type, model)
+    get honest, clearly-flagged placeholder values — Chris's own
+    explicit call: real intake staff fills these in properly when
+    the customer's actual appointment converts into a real
+    WorkOrder, not guessed at here.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        organization = get_customer_portal_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Portal pelanggan belum dikonfigurasi dengan benar."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        serializer = CustomerSelfRegistrationSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        email = data["email"]
+
+        existing_customer = Customer.objects.filter(organization=organization, email__iexact=email).first()
+
+        if existing_customer is not None:
+            customer = existing_customer
+        else:
+            plate_conflict = Vehicle.objects.filter(
+                organization=organization, plate_number=data["plate_number"],
+            ).exists()
+            if plate_conflict:
+                return Response(
+                    {
+                        "success": False,
+                        "message": (
+                            "Plat nomor ini sudah terdaftar di sistem kami. "
+                            "Silakan hubungi bengkel untuk verifikasi akun Anda."
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            with transaction.atomic():
+                customer = Customer.objects.create(
+                    organization=organization,
+                    name=data["full_name"],
+                    phone=data["phone"],
+                    email=email,
+                )
+                Vehicle.objects.create(
+                    customer=customer,
+                    plate_number=data["plate_number"],
+                    manufacture_year=0,
+                    vehicle_type="UNKNOWN",
+                    model="Belum diisi",
+                )
+
+        link = MagicLinkToken.objects.create(
+            organization=customer.organization, customer=customer,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        sent = send_magic_link_email(customer, link.token)
+
+        # Same self-eliminating dev_token pattern as
+        # CustomerMagicLinkRequestView — appears only when a real
+        # send genuinely did not go out, DEBUG or not, no further
+        # action needed once real sending works.
+        dev_token = None
+        if not sent and settings.DEBUG:
+            dev_token = link.token
+
+        response_data = {
+            "success": True,
+            "message": "Pendaftaran berhasil — link masuk telah dikirim ke email Anda.",
+        }
+        if dev_token:
+            response_data["dev_token"] = dev_token
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 class CustomerWorkOrdersListView(APIView):
     """
