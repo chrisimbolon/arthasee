@@ -3,16 +3,20 @@
 # =============================================================================
 from datetime import date, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from apps.authentication.models import CustomUser
 from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.core.management import call_command
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Customer, ServiceRecord, Vehicle
+from .models import (Customer, ServiceRecord, ServiceReminderLog, Vehicle,
+                     _add_months)
 
 
 class ServiceAPITestBase(APITestCase):
@@ -510,3 +514,239 @@ class ServiceRecordWorkOrderLinkTests(ServiceAPITestBase):
         work_order.cancel()
         self.assertIsNone(work_order.service_record)
         self.assertEqual(ServiceRecord.objects.filter(vehicle=self.vehicle).count(), 0)
+
+class VehicleServiceReminderTests(ServiceAPITestBase):
+    """
+    Real coverage for is_due_for_service_reminder — Made's own rule,
+    3 months since last_service_date. Includes the exact near-miss
+    case that caught a real bug before it ever became code: a naive
+    "just compare month numbers" version would have wrongly flagged
+    a date only 2 months and 29 days later as a full 3 months
+    elapsed. Verified by hand in a sandbox before any of this was
+    written; now a permanent test so a future change can't silently
+    reintroduce that same bug.
+    """
+
+    def test_false_when_no_last_service_date(self):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5001 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        self.assertFalse(vehicle.is_due_for_service_reminder)
+
+    def test_false_less_than_3_months(self):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5002 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=date.today() - timedelta(days=60),
+        )
+        self.assertFalse(vehicle.is_due_for_service_reminder)
+
+    def test_false_two_days_short_of_3_months(self):
+        """
+        The exact real bug caught by hand before this property was
+        written — a naive month-number comparison would have wrongly
+        called this True. Dates built off _add_months(), not
+        hardcoded, so this stays correct no matter when it runs.
+        """
+        just_short = _add_months(date.today(), -3) + timedelta(days=2)
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5003 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=just_short,
+        )
+        self.assertFalse(vehicle.is_due_for_service_reminder)
+
+    def test_true_exactly_at_3_month_boundary(self):
+        exactly_3_months_ago = _add_months(date.today(), -3)
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5004 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=exactly_3_months_ago,
+        )
+        self.assertTrue(vehicle.is_due_for_service_reminder)
+
+    def test_true_well_past_3_months_no_upper_bound(self):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 5005 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=date.today() - timedelta(days=400),
+        )
+        self.assertTrue(vehicle.is_due_for_service_reminder)
+
+
+class ServiceReminderLogTests(ServiceAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 6001 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+
+    def test_same_vehicle_same_window_is_blocked_by_unique_together(self):
+        """
+        The real mechanism stopping this feature from becoming a
+        daily spam email — a second row for the same
+        (vehicle, for_last_service_date) must be impossible at the
+        database level, not just discouraged by application logic.
+        """
+        from django.db import IntegrityError, transaction
+        ServiceReminderLog.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            for_last_service_date=date(2026, 4, 1), status="SENT",
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ServiceReminderLog.objects.create(
+                    organization=self.org, vehicle=self.vehicle,
+                    for_last_service_date=date(2026, 4, 1), status="SENT",
+                )
+
+    def test_different_windows_for_same_vehicle_are_allowed(self):
+        """
+        A real new ServiceRecord naturally moves last_service_date
+        forward — a genuinely NEW window must be loggable
+        independently of any prior one.
+        """
+        ServiceReminderLog.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            for_last_service_date=date(2026, 1, 1), status="SENT",
+        )
+        ServiceReminderLog.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            for_last_service_date=date(2026, 4, 1), status="SENT",
+        )
+        self.assertEqual(ServiceReminderLog.objects.filter(vehicle=self.vehicle).count(), 2)
+
+
+class ServiceReminderEmailTests(ServiceAPITestBase):
+    """
+    Direct unit coverage for send_service_reminder_email() itself —
+    mirrors apps.customers.tests.MagicLinkEmailTests' own real
+    pattern: mock resend.Emails.send directly, not the whole HTTP
+    stack.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.customer.email = "budi@test.id"
+        self.customer.save(update_fields=["email"])
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 8001 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=date(2026, 4, 1),
+        )
+
+    @override_settings(RESEND_API_KEY="")
+    def test_returns_false_when_not_configured(self):
+        from apps.service.email import send_service_reminder_email
+        self.assertFalse(send_service_reminder_email(self.vehicle))
+
+    @override_settings(RESEND_API_KEY="test_key_123")
+    @patch("resend.Emails.send")
+    def test_returns_true_and_calls_resend_when_configured(self, mock_send):
+        from apps.service.email import send_service_reminder_email
+        result = send_service_reminder_email(self.vehicle)
+        self.assertTrue(result)
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args[0][0]
+        self.assertEqual(call_args["to"], ["budi@test.id"])
+        self.assertIn("BP 8001 AA", call_args["subject"])
+
+    @override_settings(RESEND_API_KEY="test_key_123")
+    @patch("resend.Emails.send")
+    def test_returns_false_on_provider_failure_without_raising(self, mock_send):
+        from apps.service.email import send_service_reminder_email
+        mock_send.side_effect = Exception("Resend API error")
+        result = send_service_reminder_email(self.vehicle)
+        self.assertFalse(result)
+
+
+@override_settings(RESEND_API_KEY="")
+class SendServiceRemindersCommandTests(ServiceAPITestBase):
+    """
+    Real coverage for the actual daily job. RESEND_API_KEY="" at
+    class level — same reasoning as
+    apps.customers.tests.CustomerMagicLinkRequestViewTests: avoids
+    ever making a live call to Resend during `manage.py test`. Every
+    due vehicle with an email correctly logs FAILED under this
+    override, which is itself the real thing being proven: the
+    command must never crash just because sending isn't configured,
+    and must still create the log row so a real retry storm can't
+    happen even in a misconfigured environment.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.customer.email = "budi@test.id"
+        self.customer.save(update_fields=["email"])
+
+    def test_due_vehicle_with_email_gets_logged(self):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 7001 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=date.today() - timedelta(days=120),
+        )
+        call_command("send_service_reminders")
+        self.assertTrue(
+            ServiceReminderLog.objects.filter(
+                vehicle=vehicle, for_last_service_date=vehicle.last_service_date,
+            ).exists()
+        )
+
+    def test_rerunning_the_same_day_does_not_double_log(self):
+        """
+        The real idempotency guard — the entire reason
+        ServiceReminderLog exists. Verified by hand in a sandbox
+        before this was written; now a permanent test.
+        """
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 7002 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=date.today() - timedelta(days=120),
+        )
+        call_command("send_service_reminders")
+        call_command("send_service_reminders")
+        self.assertEqual(
+            ServiceReminderLog.objects.filter(
+                vehicle=vehicle, for_last_service_date=vehicle.last_service_date,
+            ).count(),
+            1,
+        )
+
+    def test_not_yet_due_vehicle_is_never_logged(self):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 7003 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=date.today() - timedelta(days=10),
+        )
+        call_command("send_service_reminders")
+        self.assertFalse(ServiceReminderLog.objects.filter(vehicle=vehicle).exists())
+
+    def test_due_vehicle_with_no_email_is_never_logged(self):
+        """
+        No email — surfaced for manual follow-up, never silently
+        sent to nowhere, and never logged either, so it correctly
+        stays flagged every day until a real email exists or the
+        vehicle gets a new real service visit.
+        """
+        no_email_customer = Customer.objects.create(organization=self.org, name="No Email Customer")
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=no_email_customer,
+            plate_number="BP 7004 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+            last_service_date=date.today() - timedelta(days=120),
+        )
+        call_command("send_service_reminders")
+        self.assertFalse(ServiceReminderLog.objects.filter(vehicle=vehicle).exists())
