@@ -39,7 +39,7 @@ export default function RegisterPage() {
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              marginBottom: 36,
+              marginBottom: 16,
             }}
           >
             <Image
