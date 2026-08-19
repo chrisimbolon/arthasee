@@ -60,11 +60,31 @@ export interface CustomerSession {
   email:  string;
 }
 
+export interface CustomerRegistrationPayload {
+  full_name:    string;
+  phone:        string;
+  email:        string;
+  plate_number: string;
+}
+
 export const customerAuthApi = {
   async requestMagicLink(email: string) {
     return customerFetch<{ success: boolean; message: string; dev_token?: string }>(
       "/api/customer-auth/magic-link/",
       { method: "POST", body: JSON.stringify({ email }) },
+    );
+  },
+  // The missing path for a genuine first-time visitor — mandatory
+  // login (confirmed directly) meant requestMagicLink() alone could
+  // never onboard someone who has no Customer record yet. Same
+  // response shape as requestMagicLink — including the same
+  // self-eliminating dev_token passthrough — since both hit the
+  // same real send_magic_link_email() path on the backend once a
+  // Customer genuinely exists.
+  async register(payload: CustomerRegistrationPayload) {
+    return customerFetch<{ success: boolean; message: string; dev_token?: string }>(
+      "/api/customer-auth/register/",
+      { method: "POST", body: JSON.stringify(payload) },
     );
   },
   async verifyMagicLink(token: string): Promise<CustomerSession> {
