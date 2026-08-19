@@ -4,9 +4,9 @@
 from django.urls import path
 
 from .views import (CustomerMagicLinkRequestView, CustomerMagicLinkVerifyView,
-                    CustomerWorkOrderDetailView, CustomerWorkOrdersListView,
-                    PublicTrackingView, TrackingLinkListView,
-                    TrackingLinkRevokeView)
+                    CustomerSelfRegistrationView, CustomerWorkOrderDetailView,
+                    CustomerWorkOrdersListView, PublicTrackingView,
+                    TrackingLinkListView, TrackingLinkRevokeView)
 
 urlpatterns = [
     path("work-orders/<uuid:work_order_id>/tracking-links/",
@@ -25,6 +25,12 @@ urlpatterns = [
          CustomerMagicLinkRequestView.as_view(), name="customer-magic-link-request"),
     path("customer-auth/magic-link/verify/",
          CustomerMagicLinkVerifyView.as_view(), name="customer-magic-link-verify"),
+    # New — self-registration, the missing path for a genuine
+    # first-time visitor (see CustomerSelfRegistrationView's own
+    # docstring). Grouped right next to the login route it feeds
+    # into, not off with the appointment-booking work yet to come.
+    path("customer-auth/register/",
+         CustomerSelfRegistrationView.as_view(), name="customer-register"),
     path("customer/work-orders/",
          CustomerWorkOrdersListView.as_view(), name="customer-work-order-list"),
     path("customer/work-orders/<uuid:pk>/",
