@@ -28,6 +28,16 @@ class Organization(models.Model):
             "kapan saja di Pengaturan Bengkel."
         ),
     )
+    daily_appointment_capacity = models.PositiveIntegerField(
+        default=4, verbose_name="Kapasitas Janji Temu Harian",
+        help_text=(
+            "Made's own confirmed number, 19 Aug — jumlah maksimum janji "
+            "temu online per hari, mencerminkan ketersediaan mekanik nyata "
+            "yang berubah-ubah, bukan kapasitas fisik bengkel (Arthasee "
+            "tidak melacak jadwal mekanik per hari). Bisa diubah kapan saja "
+            "di Pengaturan Bengkel."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
