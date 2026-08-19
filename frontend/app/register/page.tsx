@@ -36,21 +36,21 @@ export default function RegisterPage() {
       <div style={{ width: "100%", maxWidth: 420 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 36, justifyContent: "center" }}>
           <div
-  style={{
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 36,
-  }}
->
-  <Image
-    src="/Logo-teks.png"
-    alt="Arthasee"
-    width={150}
-    height={40}
-    priority
-  />
-</div>
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              marginBottom: 36,
+            }}
+          >
+            <Image
+              src="/Logo-teks.png"
+              alt="Arthasee"
+              width={150}
+              height={40}
+              priority
+            />
+          </div>
         </div>
 
         <div className="card">
