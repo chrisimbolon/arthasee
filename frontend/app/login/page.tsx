@@ -4,6 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { Loader2, LogIn } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
 
@@ -31,8 +32,22 @@ export default function LoginPage() {
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
       <div style={{ width: "100%", maxWidth: 380 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 36, justifyContent: "center" }}>
-          <div style={{ width: 34, height: 34, background: "var(--ink)", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--paper)", fontFamily: "'Big Shoulders Display', sans-serif", fontWeight: 900, fontSize: 18, transform: "rotate(-2deg)" }}>A</div>
-          <div className="display" style={{ fontSize: 22 }}>Arthasee</div>
+<div
+  style={{
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 36,
+  }}
+>
+  <Image
+    src="/Logo-teks.png"
+    alt="Arthasee"
+    width={150}
+    height={40}
+    priority
+  />
+</div>          
         </div>
 
         <div className="card">
