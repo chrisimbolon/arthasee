@@ -818,3 +818,93 @@ class CustomerMagicLinkRequestViewEmailWiringTests(CustomersAPITestBase):
             "/api/customer-auth/magic-link/", {"email": "brian@test.id"}, format="json",
         )
         self.assertIn("dev_token", resp.data)
+
+@override_settings(RESEND_API_KEY="")
+class CustomerSelfRegistrationViewTests(CustomersAPITestBase):
+    """
+    Same class-level RESEND_API_KEY="" override as
+    CustomerMagicLinkRequestViewTests above, same real reasoning —
+    avoids ever making a live call to Resend during `manage.py test`.
+
+    organization is resolved via get_customer_portal_organization(),
+    so CUSTOMER_PORTAL_ORGANIZATION_ID must point at self.org for
+    these tests to exercise the real endpoint at all — set per-call
+    via _register()'s own override_settings, not globally, so
+    test_returns_503_when_portal_organization_not_configured can
+    deliberately test the OTHER state without fighting a class-wide
+    default.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.public_client = self.client_class()
+
+    def _register(self, **overrides):
+        payload = {
+            "full_name": "Rud Sira", "phone": "081234567890",
+            "email": "rud@test.id", "plate_number": "BP 9999 ZZ",
+        }
+        payload.update(overrides)
+        with override_settings(CUSTOMER_PORTAL_ORGANIZATION_ID=str(self.org.id)):
+            return self.public_client.post("/api/customer-auth/register/", payload, format="json")
+
+    def test_creates_a_real_customer_and_vehicle(self):
+        resp = self._register()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        new_customer = Customer.objects.get(email="rud@test.id")
+        self.assertEqual(new_customer.name, "Rud Sira")
+        vehicle = Vehicle.objects.get(customer=new_customer)
+        self.assertEqual(vehicle.plate_number, "BP 9999 ZZ")
+        self.assertEqual(vehicle.model, "Belum diisi")
+
+    def test_email_matching_is_case_insensitive_and_whitespace_trimmed(self):
+        resp = self._register(email="  RUD@TEST.ID  ")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Customer.objects.filter(email="rud@test.id").exists())
+
+    def test_plate_number_is_normalized_uppercase(self):
+        resp = self._register(plate_number="bp 9999 zz")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Vehicle.objects.filter(plate_number="BP 9999 ZZ").exists())
+
+    def test_registering_with_an_existing_email_does_not_create_a_duplicate(self):
+        """
+        The real defense-in-depth case — a resubmission for an email
+        that already has a real account must behave like a login,
+        never create a second Customer row. Verified by hand across
+        this exact scenario before the view was written.
+        """
+        self.customer.email = "rud@test.id"
+        self.customer.save(update_fields=["email"])
+        before_count = Customer.objects.count()
+
+        resp = self._register(email="rud@test.id", plate_number="BP 1111 XX")
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Customer.objects.count(), before_count)
+        # The submitted plate must NEVER be attached — this was
+        # really just a misrouted login attempt.
+        self.assertFalse(Vehicle.objects.filter(plate_number="BP 1111 XX").exists())
+
+    def test_plate_conflict_with_a_different_existing_vehicle_is_rejected(self):
+        resp = self._register(plate_number=self.vehicle.plate_number, email="brandnew@test.id")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Customer.objects.filter(email="brandnew@test.id").exists())
+
+    def test_missing_required_field_is_rejected(self):
+        resp = self._register(full_name="")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(DEBUG=True)
+    def test_dev_token_included_when_debug_true_and_send_not_configured(self):
+        resp = self._register(email="devtoken@test.id")
+        self.assertIn("dev_token", resp.data)
+
+    def test_returns_503_when_portal_organization_not_configured(self):
+        with override_settings(CUSTOMER_PORTAL_ORGANIZATION_ID=""):
+            resp = self.public_client.post(
+                "/api/customer-auth/register/",
+                {"full_name": "X", "phone": "0812", "email": "x@test.id", "plate_number": "BP 0000 XX"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
