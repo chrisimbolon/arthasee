@@ -128,3 +128,23 @@ class CustomerSessionSerializer(serializers.Serializer):
     access = serializers.CharField()
     name   = serializers.CharField()
     email  = serializers.EmailField()
+
+class CustomerSelfRegistrationSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/customer-auth/register/. A plain
+    Serializer, not a ModelSerializer against Customer or Vehicle
+    directly — this form's own fields don't map one-to-one onto
+    either model (Vehicle needs several more real fields the view
+    fills with placeholders; Customer's own `name` field is renamed
+    to full_name here for form clarity).
+    """
+    full_name    = serializers.CharField(max_length=200)
+    phone        = serializers.CharField(max_length=20)
+    email        = serializers.EmailField()
+    plate_number = serializers.CharField(max_length=20)
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+    def validate_plate_number(self, value):
+        return value.strip().upper()
