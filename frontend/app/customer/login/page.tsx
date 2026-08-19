@@ -80,6 +80,9 @@ export default function CustomerLoginPage() {
             <button type="submit" className="btn-rust" style={{ width: "100%", justifyContent: "center" }} disabled={sending}>
               {sending ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Kirim Link Masuk"}
             </button>
+            <p style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 16, textAlign: "center" }}>
+              Pelanggan baru? <Link href="/customer/register" style={{ color: "var(--rust)" }}>Daftar di sini</Link>
+            </p>
           </form>
         )}
       </div>
