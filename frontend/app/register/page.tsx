@@ -3,7 +3,7 @@
 // === frontend/app/register/page.tsx ===
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
-import { Loader2 } from "lucide-react";
+import { Loader2, UserPlus } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
