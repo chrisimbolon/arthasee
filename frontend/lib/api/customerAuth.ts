@@ -32,7 +32,7 @@ export const customerTokenStorage = {
   },
 };
 
-async function customerFetch<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
+export async function customerFetch<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
   const token = customerTokenStorage.get();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
