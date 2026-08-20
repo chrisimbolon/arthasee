@@ -908,3 +908,33 @@ class CustomerSelfRegistrationViewTests(CustomersAPITestBase):
                 format="json",
             )
         self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+
+class CustomerVehiclesListViewTests(CustomersAPITestBase):
+    """
+    CustomersAPITestBase.setUp() force-authenticates as self.owner
+    (a CustomUser, internal staff) by default — this endpoint needs
+    a Customer instead, so each test here re-authenticates as
+    self.customer explicitly.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.other_customer = Customer.objects.create(organization=self.org, name="Other Customer")
+        Vehicle.objects.create(
+            organization=self.org, customer=self.other_customer,
+            plate_number="BP 9999 ZZ", manufacture_year=2020,
+            vehicle_type="Mobil", model="Honda Jazz",
+        )
+
+    def test_returns_only_own_vehicles(self):
+        self.client.force_authenticate(user=self.customer)
+        resp = self.client.get("/api/customer/vehicles/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        plates = [v["plate_number"] for v in resp.data["results"]]
+        self.assertIn(self.vehicle.plate_number, plates)
+        self.assertNotIn("BP 9999 ZZ", plates)
+
+    def test_rejects_unauthenticated_request(self):
+        public_client = self.client_class()
+        resp = public_client.get("/api/customer/vehicles/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
