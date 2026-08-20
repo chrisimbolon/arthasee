@@ -148,3 +148,15 @@ class CustomerSelfRegistrationSerializer(serializers.Serializer):
 
     def validate_plate_number(self, value):
         return value.strip().upper()
+
+class CustomerVehicleSerializer(serializers.Serializer):
+    """
+    Deliberately whitelist-only, same discipline as
+    PublicTrackingSerializer above — Vehicle has several internal-
+    only fields (chassis_number, bpkb_number, etc) that must never
+    reach a customer-facing endpoint just by existing on the model.
+    """
+    id                 = serializers.CharField()
+    plate_number       = serializers.CharField()
+    model              = serializers.CharField()
+    manufacture_year   = serializers.IntegerField()
