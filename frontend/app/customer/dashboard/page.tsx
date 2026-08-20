@@ -84,12 +84,17 @@ export default function CustomerDashboardPage() {
     <div style={{ maxWidth: 640, margin: "0 auto", padding: "40px 20px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700 }}>Kendaraan Saya</h1>
-        <button
-          onClick={() => { customerAuthApi.logout(); setSignedOut(true); }}
-          style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", color: "var(--steel)", fontSize: 13 }}
-        >
-          <LogOut size={14} /> Keluar
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <Link href="/customer/appointments" className="btn-rust" style={{ fontSize: 13 }}>
+            Buat Janji Temu
+          </Link>
+          <button
+            onClick={() => { customerAuthApi.logout(); setSignedOut(true); }}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", color: "var(--steel)", fontSize: 13 }}
+          >
+            <LogOut size={14} /> Keluar
+          </button>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 4, marginBottom: 18 }}>
