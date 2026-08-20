@@ -42,3 +42,23 @@ class AppointmentAvailabilityDaySerializer(serializers.Serializer):
     booked    = serializers.IntegerField()
     capacity  = serializers.IntegerField()
     available = serializers.BooleanField()
+
+class TenantAppointmentSerializer(serializers.Serializer):
+    """
+    Staff-facing — deliberately a wider whitelist than the customer-
+    facing AppointmentSerializer above (customer name/phone are
+    legitimate internal-view fields; a customer's own booking never
+    needs to see them back at themselves). Still whitelist-only, same
+    discipline as everywhere else customer-adjacent in this project —
+    a field added to Customer/Vehicle later can't silently leak here
+    just by existing on the model.
+    """
+    id              = serializers.CharField()
+    requested_date  = serializers.DateField()
+    notes           = serializers.CharField()
+    status          = serializers.CharField()
+    customer_name   = serializers.CharField(source="customer.name")
+    customer_phone  = serializers.CharField(source="customer.phone")
+    vehicle_plate   = serializers.CharField(source="vehicle.plate_number")
+    vehicle_model   = serializers.CharField(source="vehicle.model")
+    created_at      = serializers.DateTimeField()
