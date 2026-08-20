@@ -3,7 +3,9 @@
 # =============================================================================
 from datetime import date, timedelta
 
-from apps.customers.auth import CustomerJWTAuthentication, IsCustomerAuthenticated
+from apps.core.views import TenantScopedAPIView
+from apps.customers.auth import (CustomerJWTAuthentication,
+                                 IsCustomerAuthenticated)
 from apps.service.models import Vehicle
 from django.db.models import Count
 from rest_framework import status
@@ -11,8 +13,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Appointment
-from .serializers import (AppointmentAvailabilityDaySerializer, AppointmentCreateSerializer,
-                          AppointmentSerializer)
+from .serializers import (AppointmentAvailabilityDaySerializer,
+                          AppointmentCreateSerializer, AppointmentSerializer,
+                          TenantAppointmentSerializer)
 
 
 def _parse_date(raw, default):
@@ -121,3 +124,64 @@ class AppointmentCancelView(APIView):
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"success": True, "appointment": AppointmentSerializer(appointment).data})
+
+class TenantAppointmentListView(TenantScopedAPIView):
+    """
+    GET /api/appointments/?all=1
+    Staff-facing — Made and his mechanics need to see real, upcoming
+    bookings to know who's actually coming in. Defaults to CONFIRMED
+    only, the actionable set — CANCELLED has nothing left to act on,
+    and CONVERTED already has its own real home, the resulting
+    WorkOrder itself. ?all=1 shows every status for a full history
+    view.
+    """
+    model = Appointment
+
+    def get(self, request):
+        appointments = self.get_queryset().select_related("customer", "vehicle").order_by("requested_date")
+        if request.query_params.get("all") != "1":
+            appointments = appointments.filter(status="CONFIRMED")
+        return Response({"success": True, "results": TenantAppointmentSerializer(appointments, many=True).data})
+
+
+class TenantAppointmentConvertView(TenantScopedAPIView):
+    """
+    POST /api/appointments/<id>/convert/
+    The real missing link — Appointment.convert_to_work_order()
+    has existed and been tested since the model was first built;
+    this is the first thing that actually calls it. "Customer
+    arrived" becomes a real WorkOrder, right here.
+    """
+    model = Appointment
+
+    def post(self, request, pk):
+        appointment = self.get_object(pk)
+        try:
+            work_order = appointment.convert_to_work_order(received_by=request.user.full_name)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "success": True,
+            "appointment": TenantAppointmentSerializer(appointment).data,
+            "work_order_id": str(work_order.id),
+        })
+
+
+class TenantAppointmentCancelView(TenantScopedAPIView):
+    """
+    POST /api/appointments/<id>/cancel/
+    Staff-side cancellation — a customer calling in by phone rather
+    than using the app. Same real cancel() method the customer-
+    facing AppointmentCancelView above already uses; this exists
+    purely because staff need their own authenticated path to it,
+    not a different cancellation rule.
+    """
+    model = Appointment
+
+    def post(self, request, pk):
+        appointment = self.get_object(pk)
+        try:
+            appointment.cancel()
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"success": True, "appointment": TenantAppointmentSerializer(appointment).data})
