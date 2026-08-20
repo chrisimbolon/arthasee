@@ -4,9 +4,10 @@
 from django.urls import path
 
 from .views import (CustomerMagicLinkRequestView, CustomerMagicLinkVerifyView,
-                    CustomerSelfRegistrationView, CustomerWorkOrderDetailView,
-                    CustomerWorkOrdersListView, PublicTrackingView,
-                    TrackingLinkListView, TrackingLinkRevokeView)
+                    CustomerSelfRegistrationView, CustomerVehiclesListView,
+                    CustomerWorkOrderDetailView, CustomerWorkOrdersListView,
+                    PublicTrackingView, TrackingLinkListView,
+                    TrackingLinkRevokeView)
 
 urlpatterns = [
     path("work-orders/<uuid:work_order_id>/tracking-links/",
@@ -35,4 +36,8 @@ urlpatterns = [
          CustomerWorkOrdersListView.as_view(), name="customer-work-order-list"),
     path("customer/work-orders/<uuid:pk>/",
          CustomerWorkOrderDetailView.as_view(), name="customer-work-order-detail"),
+    # New — the missing piece for picking WHICH saved vehicle a
+    # booking is for (apps.appointments' own booking form).
+    path("customer/vehicles/",
+         CustomerVehiclesListView.as_view(), name="customer-vehicles-list"),
 ]
