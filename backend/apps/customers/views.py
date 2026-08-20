@@ -21,7 +21,7 @@ from .email import send_magic_link_email
 from .models import MagicLinkToken, TrackingLink
 from .payload import build_work_order_tracking_payload
 from .serializers import (CustomerSelfRegistrationSerializer,
-                          CustomerSessionSerializer,
+                          CustomerSessionSerializer, CustomerVehicleSerializer,
                           CustomerWorkOrderSummarySerializer,
                           MagicLinkRequestSerializer,
                           MagicLinkVerifySerializer, PublicTrackingSerializer,
@@ -404,3 +404,22 @@ class CustomerWorkOrderDetailView(APIView):
 
         payload = build_work_order_tracking_payload(work_order)
         return Response({"success": True, "tracking": PublicTrackingSerializer(payload).data})
+
+
+class CustomerVehiclesListView(APIView):
+    """
+    GET /api/customer/vehicles/
+    The missing piece for a returning logged-in customer to pick
+    WHICH of their saved cars they're booking an appointment for.
+    Whitelist-only response — see CustomerVehicleSerializer's own
+    docstring. Vehicle is already imported at the top of this file
+    (see the apps.service.models import above) — no new import
+    needed.
+    """
+    authentication_classes = [CustomerJWTAuthentication]
+    permission_classes = [IsCustomerAuthenticated]
+
+    def get(self, request):
+        customer = request.user
+        vehicles = Vehicle.objects.filter(customer=customer).order_by("plate_number")
+        return Response({"success": True, "results": CustomerVehicleSerializer(vehicles, many=True).data})
