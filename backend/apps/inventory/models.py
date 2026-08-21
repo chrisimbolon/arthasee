@@ -16,10 +16,30 @@ stock counts, PartUsage history) — see this app's migrations/0001_
 initial.py and apps/service/migrations/0004_... for how the move
 happens without losing or recreating any of it: a migration-state
 relabel plus a table rename, not a drop-and-recreate.
+
+--- Sprint 7, Task 7.1: taxonomy + reorder cadence (added here) ---
+Real requirements from Made's own handwritten meeting notes, 20 Aug
+2026 — parts are genuinely different depending on type: a spare part
+is vehicle-brand-specific (a Toyota spark plug won't fit a Honda), a
+fluid is fluid-brand-specific but universal across vehicle brands
+(Castrol works in any engine). reorder_cadence reflects real,
+different restocking behavior per part class — an expensive,
+low-turnover sensor is deliberately kept at zero stock and bought
+same-day (HARIAN), while oli/kain/lampu get checked monthly.
+
+Mutual-exclusivity between the two brand fields (a SPARE_PART row
+must never carry fluid_brand/viscosity_grade, and vice versa) is
+enforced in Part.clean() — Chris's own confirmed call, matching this
+model's existing discipline of keeping real domain invariants at the
+model layer (see minimum_stock's own docstring) rather than
+scattering them across serializers. Note DRF's ModelSerializer does
+NOT call model.clean() automatically — see PartSerializer.validate()
+in serializers.py for where this actually gets invoked.
 """
 import uuid
 
 from apps.core.models import TenantScopedModel
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -39,6 +59,37 @@ class Part(TenantScopedModel):
     `F("current_stock") ± quantity` on save — see below — so it's
     always correct without a recompute step.
     """
+
+    class ItemType(models.TextChoices):
+        SPARE_PART = "SPARE_PART", "Spare Part"
+        FLUID      = "FLUID",      "Fluida"
+
+    class VehicleBrand(models.TextChoices):
+        TOYOTA     = "TOYOTA",     "Toyota"
+        HONDA      = "HONDA",      "Honda"
+        DAIHATSU   = "DAIHATSU",   "Daihatsu"
+        SUZUKI     = "SUZUKI",     "Suzuki"
+        MITSUBISHI = "MITSUBISHI", "Mitsubishi"
+
+    class FluidBrand(models.TextChoices):
+        SHELL               = "SHELL",               "Shell"
+        CASTROL             = "CASTROL",              "Castrol"
+        REPSOL              = "REPSOL",                "Repsol"
+        FASTRON             = "FASTRON",               "Fastron"
+        PERTAMINA_MEDITRAN  = "PERTAMINA_MEDITRAN",    "Pertamina Meditran"
+
+    class ViscosityGrade(models.TextChoices):
+        ENGINE_10W40 = "10W-40",  "10W-40"
+        ENGINE_5W30  = "5W-30",   "5W-30"
+        GEAR_SAE90   = "SAE_90",  "Oli 90 (SAE 90)"
+        GEAR_SAE140  = "SAE_140", "Oli 140 (SAE 140)"
+
+    class ReorderCadence(models.TextChoices):
+        HARIAN        = "HARIAN",        "Harian"
+        MINGGUAN      = "MINGGUAN",      "Mingguan"
+        BULANAN       = "BULANAN",       "Bulanan"
+        TIGA_BULANAN  = "TIGA_BULANAN",  "3 Bulanan"
+
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200, verbose_name="Nama Part")
     sku  = models.CharField(
@@ -58,10 +109,6 @@ class Part(TenantScopedModel):
         max_digits=12, decimal_places=2, default=0, verbose_name="Harga Satuan",
         help_text="Harga jual per satuan saat ini — perubahan di sini tidak mengubah riwayat pemakaian yang sudah tercatat.",
     )
-    unit_price = models.DecimalField(
-        max_digits=12, decimal_places=2, default=0, verbose_name="Harga Satuan",
-        help_text="Harga jual per satuan saat ini — perubahan di sini tidak mengubah riwayat pemakaian yang sudah tercatat.",
-    )
     # Real per-part reorder threshold. Replaces what used to be a
     # single hardcoded global rule (PartListView.LOW_STOCK_THRESHOLD
     # = 5, applied identically to every part in every organization)
@@ -73,7 +120,9 @@ class Part(TenantScopedModel):
     # part as low stock purely from its own threshold." A part
     # completely out of stock (current_stock <= 0) still surfaces
     # regardless of this setting — see PartListView's own low_stock
-    # filter — since "zero" needs no configuration to be meaningful.
+    # filter — since "zero" needs no configuration to be meaningful,
+    # UNLESS reorder_cadence is HARIAN (see below) — zero stock is
+    # the deliberately correct state for a HARIAN part, not a gap.
     #
     # Every part that existed before this field shipped was
     # backfilled to 5 by this migration's own data step, preserving
@@ -83,8 +132,34 @@ class Part(TenantScopedModel):
     # how that split is achieved.
     minimum_stock = models.DecimalField(
         max_digits=10, decimal_places=2, default=0, verbose_name="Stok Minimum",
-        help_text="Ambang batas peringatan stok menipis untuk part ini — 0 berarti tidak ada peringatan dari threshold ini (part yang benar-benar habis tetap muncul).",
-    )    
+        help_text="Ambang batas peringatan stok menipis untuk part ini — 0 berarti tidak ada peringatan dari threshold ini (part yang benar-benar habis tetap muncul, kecuali untuk part dengan Frekuensi Pengecekan Harian).",
+    )
+    # ── Sprint 7, Task 7.1: taxonomy ─────────────────────────────
+    item_type = models.CharField(
+        max_length=20, choices=ItemType.choices, default=ItemType.SPARE_PART,
+        verbose_name="Jenis Item",
+        help_text="Spare Part (spesifik per merk kendaraan) atau Fluida (universal lintas merk kendaraan).",
+    )
+    vehicle_brand = models.CharField(
+        max_length=30, choices=VehicleBrand.choices, blank=True, default="",
+        verbose_name="Merk Kendaraan",
+        help_text="Hanya berlaku untuk Spare Part — kosong berarti belum dikategorikan.",
+    )
+    fluid_brand = models.CharField(
+        max_length=30, choices=FluidBrand.choices, blank=True, default="",
+        verbose_name="Merk Fluida",
+        help_text="Hanya berlaku untuk Fluida — kosong berarti belum dikategorikan.",
+    )
+    viscosity_grade = models.CharField(
+        max_length=20, choices=ViscosityGrade.choices, blank=True, default="",
+        verbose_name="Tingkat Kekentalan",
+        help_text="Hanya berlaku untuk Fluida — kosong berarti belum dikategorikan.",
+    )
+    reorder_cadence = models.CharField(
+        max_length=20, choices=ReorderCadence.choices, blank=True, default="",
+        verbose_name="Frekuensi Pengecekan",
+        help_text="Seberapa sering part ini ditinjau untuk pemesanan ulang. Kosong berarti belum dikategorikan.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -95,6 +170,29 @@ class Part(TenantScopedModel):
 
     def __str__(self):
         return f"{self.name} ({self.current_stock} {self.unit})"
+
+    def clean(self):
+        """
+        The one real place the SPARE_PART/FLUID mutual-exclusivity
+        invariant is enforced — Chris's own confirmed call. Only
+        checks for the WRONG-type field being set; does not require
+        the correct-type field to already be filled in (a part mid-
+        creation, not yet fully categorized, is not itself invalid —
+        matches the same "honest blank, not a guessed default" spirit
+        as the Sprint 7 migration backfill for existing parts).
+        """
+        super().clean()
+        errors = {}
+        if self.item_type == self.ItemType.SPARE_PART:
+            if self.fluid_brand:
+                errors["fluid_brand"] = "Part bertipe Spare Part tidak boleh memiliki Merk Fluida."
+            if self.viscosity_grade:
+                errors["viscosity_grade"] = "Part bertipe Spare Part tidak boleh memiliki Tingkat Kekentalan."
+        elif self.item_type == self.ItemType.FLUID:
+            if self.vehicle_brand:
+                errors["vehicle_brand"] = "Part bertipe Fluida tidak boleh memiliki Merk Kendaraan."
+        if errors:
+            raise ValidationError(errors)
 
 
 class PartUsage(TenantScopedModel):
