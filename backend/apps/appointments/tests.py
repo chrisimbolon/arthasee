@@ -5,6 +5,7 @@ from datetime import date, timedelta
 
 from apps.organizations.models import Organization
 from apps.service.models import Customer, Vehicle
+from django.test import TransactionTestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -232,3 +233,50 @@ class AppointmentCancelViewTests(AppointmentsAPITestBase):
         )
         resp = self.client.post(f"/api/customer/appointments/{appt.id}/cancel/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+class AppointmentConvertTransactionTests(TransactionTestCase):
+    """
+    Real regression test for a genuine bug caught live: calling
+    convert_to_work_order() with no surrounding transaction crashed
+    with TransactionManagementError, because WorkOrder.save() calls
+    WorkOrderSequence.next_number(), which needs select_for_update()
+    — and Django refuses to run that outside an active transaction.
+
+    Deliberately TransactionTestCase, not the usual APITestCase used
+    everywhere else in this file. Django's regular TestCase already
+    wraps every test in its own outer transaction — select_for_update()
+    would always have something to nest inside regardless of whether
+    convert_to_work_order() opens its own transaction.atomic() or not.
+    A test written with the normal TestCase would pass whether or not
+    the real fix was even applied — false confidence, not real
+    coverage. TransactionTestCase does NOT wrap tests in an outer
+    transaction (it resets via TRUNCATE instead), so this is the one
+    test in the whole suite that actually exercises the real, literal
+    condition that broke in production.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(
+            name="Arya Motor Txn Test", invoice_code="AMTX", daily_appointment_capacity=4,
+        )
+        self.customer = Customer.objects.create(organization=self.org, name="Budi", email="budi@test.id")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 1234 TX", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        self.appointment = Appointment.create_if_available(
+            customer=self.customer, vehicle=self.vehicle,
+            requested_date=date.today() + timedelta(days=1),
+        )
+
+    def test_convert_succeeds_with_no_outer_transaction(self):
+        """
+        Called directly, with no surrounding transaction.atomic() from
+        the caller — exactly the real condition that crashed in
+        production, since the view itself never wraps this call.
+        """
+        work_order = self.appointment.convert_to_work_order(received_by="Staff")
+        self.appointment.refresh_from_db()
+        self.assertEqual(self.appointment.status, "CONVERTED")
+        self.assertEqual(self.appointment.work_order_id, work_order.id)
