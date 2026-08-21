@@ -62,13 +62,14 @@ class EventDispatcher:
         the caller, unlike _dispatch_now() below. Given just an id:
 
           1. Loads the real Outbox row.
-          2. Reconstructs the original DomainEvent from its
-             event_type + payload, via
-             apps.core.events.registry.event_class_for() — the
-             payload was stripped of envelope fields at publish time
-             (DomainEvent.payload()), so reconstruction is exactly
-             EventClass(organization_id=..., event_id=...,
-             occurred_at=..., **payload), no guessing at field names.
+          2. Reconstructs the original DomainEvent via
+             apps.core.events.registry.reconstruct_event() — which
+             also handles the real Decimal/UUID/date round-trip that
+             a plain JSON payload loses (see that module's own
+             docstring for the actual production bug this closes:
+             a naive splat of the raw payload dict raised a real
+             TypeError deep inside posting_engine.py on the first
+             genuine replay attempt).
           3. Re-resolves the CURRENT handler list from default_bus —
              asked fresh, not cached from whenever the event was
              first published, so a handler added after the original
@@ -88,16 +89,10 @@ class EventDispatcher:
         """
         from apps.core.events.bus import default_bus
         from apps.core.events.outbox import Outbox
-        from apps.core.events.registry import event_class_for
+        from apps.core.events.registry import reconstruct_event
 
         outbox_row = Outbox.objects.get(pk=outbox_id)
-        event_cls = event_class_for(outbox_row.event_type)
-        event = event_cls(
-            organization_id=outbox_row.organization_id,
-            event_id=outbox_row.event_id,
-            occurred_at=outbox_row.occurred_at,
-            **outbox_row.payload,
-        )
+        event = reconstruct_event(outbox_row)
         handlers = default_bus.subscribers_for(event.event_type)
         self._dispatch_now(event, handlers, outbox_id)
 
