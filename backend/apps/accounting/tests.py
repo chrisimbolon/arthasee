@@ -855,6 +855,80 @@ class DashboardFinancialSummaryTests(TestCase):
         self.assertEqual(data["ap_due_soon_count"], 1)
 
 
+class DashboardFinancialSummaryARTests(InvoicingAPITestBase):
+    """
+    The AR side of dashboard_financial_summary() — the gap
+    deliberately left open when DashboardFinancialSummaryTests above
+    was first written, since testing this properly needs the real
+    WorkOrder -> ServiceRecord -> Invoice chain, not a guessed
+    shortcut. Deliberately a separate class from the AP-only tests
+    above, mirroring this file's own existing AgingAPReportTests /
+    AgingARReportTests split — reuses InvoicingAPITestBase and the
+    exact same _new_issued_invoice recipe AgingARReportTests already
+    proves works, including its backdating technique
+    (Invoice.objects.filter(pk=...).update(created_at=...)) for
+    controlling age without waiting real time.
+    """
+
+    def _new_issued_invoice(self, amount=Decimal("100000"), customer=None):
+        customer = customer or self.customer
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=customer,
+            plate_number=f"BP {timezone.now().microsecond % 10000:04d}",
+            manufacture_year=2022, vehicle_type="Mobil", model="Honda Brio",
+        )
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=vehicle, assigned_to=self.mechanic)
+        wo.status = "IN_PROGRESS"
+        wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=wo, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        wo.status = "QC"
+        wo.save(update_fields=["status"])
+        service_record = wo.close(closed_by=self.owner)
+
+        create = self.client.post(
+            f"/api/service-records/{service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa", "quantity": 1, "unit_price": str(amount)}]},
+            format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        return invoice_id
+
+    def test_overdue_invoice_appears_in_ar_overdue(self):
+        invoice_id = self._new_issued_invoice(Decimal("300000"))
+        Invoice.objects.filter(pk=invoice_id).update(created_at=timezone.now() - timedelta(days=45))
+
+        data = reports.dashboard_financial_summary(self.org, as_of=date.today())
+        self.assertEqual(data["ar_overdue_total"], Decimal("300000"))
+        self.assertIn(self.customer.name, data["ar_overdue_customers"])
+
+    def test_recent_invoice_is_not_overdue_but_still_outstanding(self):
+        invoice_id = self._new_issued_invoice(Decimal("150000"))
+        Invoice.objects.filter(pk=invoice_id).update(created_at=timezone.now() - timedelta(days=10))
+
+        data = reports.dashboard_financial_summary(self.org, as_of=date.today())
+        self.assertEqual(data["ar_overdue_total"], Decimal("0"))
+        self.assertEqual(data["ar_total_outstanding"], Decimal("150000"))
+        self.assertNotIn(self.customer.name, data["ar_overdue_customers"])
+
+    def test_same_customer_two_overdue_invoices_counted_once(self):
+        """
+        The real dedup rule — a customer with multiple overdue
+        invoices must appear once in ar_overdue_customers, not once
+        per invoice. Verified by hand before being written here.
+        """
+        first_id = self._new_issued_invoice(Decimal("100000"))
+        second_id = self._new_issued_invoice(Decimal("200000"))
+        Invoice.objects.filter(pk__in=[first_id, second_id]).update(created_at=timezone.now() - timedelta(days=40))
+
+        data = reports.dashboard_financial_summary(self.org, as_of=date.today())
+        self.assertEqual(data["ar_overdue_customers"].count(self.customer.name), 1)
+        self.assertEqual(data["ar_overdue_total"], Decimal("300000"))
+
+
 # ⚠️ AgingARReportTests below reuses apps.invoicing.tests.
 # InvoicingAPITestBase to get a real, issued Invoice without
 # reconstructing the whole WorkOrder -> ServiceRecord -> Invoice
