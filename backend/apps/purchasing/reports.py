@@ -88,7 +88,7 @@ def supplier_reliability(organization, *, since, as_of) -> dict:
         total_returned_value = Decimal("0")
         returns = PurchaseReturn.objects.filter(
             organization=organization, goods_received_note__purchase_order__supplier=supplier,
-            return_date__gte=since, return_date__lte=as_of,
+            return_date__date__gte=since, return_date__date__lte=as_of,
         )
         for ret in returns:
             total_returned_value += ret.total_value
