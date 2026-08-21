@@ -10,20 +10,29 @@ there is no async transport to dispatch onto. Everything here is
 still structured around the Outbox row's lifecycle (PENDING ->
 PROCESSED/FAILED) specifically so that adding a real async transport
 later is a change confined to this one file: a future Celery task
-would just call `default_dispatcher.dispatch_now(event_id)` for a
+would just call `default_dispatcher.dispatch_now(outbox_id)` for a
 PENDING Outbox row instead of this module calling it directly via
 transaction.on_commit(). Nothing in bus.py, handlers.py, or any
 domain app's events.py would need to change.
+
+--- dispatch_now() added for real replay ---
+This method is the real form of what the paragraph above already
+promised on day one — it just didn't actually exist until a genuine
+production incident needed it (5 real Outbox rows stuck FAILED on
+2026-08-09, only because no AccountingPeriod existed yet). See
+apps.core.events.registry for how a stored Outbox row gets
+reconstructed back into a live DomainEvent, and
+apps.core.management.commands.replay_failed_events for the actual
+command that calls this.
 """
 from __future__ import annotations
 
 import logging
 import uuid
 
-from django.db import transaction
-
 from apps.core.events.handlers import EventHandler
 from apps.core.events.interfaces import DomainEvent
+from django.db import transaction
 
 logger = logging.getLogger("arthasee.events")
 
@@ -45,6 +54,52 @@ class EventDispatcher:
             self._dispatch_now(event, handlers, outbox_id)
 
         transaction.on_commit(_run)
+
+    def dispatch_now(self, outbox_id: uuid.UUID) -> None:
+        """
+        Reconstructs and re-dispatches a stored Outbox row directly —
+        no live DomainEvent or handler list needs to be supplied by
+        the caller, unlike _dispatch_now() below. Given just an id:
+
+          1. Loads the real Outbox row.
+          2. Reconstructs the original DomainEvent from its
+             event_type + payload, via
+             apps.core.events.registry.event_class_for() — the
+             payload was stripped of envelope fields at publish time
+             (DomainEvent.payload()), so reconstruction is exactly
+             EventClass(organization_id=..., event_id=...,
+             occurred_at=..., **payload), no guessing at field names.
+          3. Re-resolves the CURRENT handler list from default_bus —
+             asked fresh, not cached from whenever the event was
+             first published, so a handler added after the original
+             failure still gets picked up on replay.
+          4. Dispatches immediately via _dispatch_now(), the exact
+             same code path a first-time dispatch would run —
+             replay behaves identically to an original dispatch, not
+             a parallel, slightly-different mechanism.
+
+        No transaction.on_commit() involved here — there is no new
+        business transaction to defer past; reconstructing a past
+        event isn't itself a business action requiring that guard.
+
+        Used by replay_failed_events (see
+        apps/core/management/commands/) — the real fix for FAILED
+        Outbox rows whose underlying cause has since been resolved.
+        """
+        from apps.core.events.bus import default_bus
+        from apps.core.events.outbox import Outbox
+        from apps.core.events.registry import event_class_for
+
+        outbox_row = Outbox.objects.get(pk=outbox_id)
+        event_cls = event_class_for(outbox_row.event_type)
+        event = event_cls(
+            organization_id=outbox_row.organization_id,
+            event_id=outbox_row.event_id,
+            occurred_at=outbox_row.occurred_at,
+            **outbox_row.payload,
+        )
+        handlers = default_bus.subscribers_for(event.event_type)
+        self._dispatch_now(event, handlers, outbox_id)
 
     def _dispatch_now(
         self, event: DomainEvent, handlers: list[EventHandler], outbox_id: uuid.UUID,
