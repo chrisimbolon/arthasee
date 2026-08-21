@@ -1,31 +1,37 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/inventory/page.tsx ===
-// Full rewrite — Menu Persediaan. Mirrors vehicles/page.tsx's
-// established structure, same as the original. Real changes:
-//   1. AddPartModal generalized into PartFormModal, handling both
-//      create AND edit — partsApi.update() already existed in
-//      service.ts with zero UI ever calling it; this finally wires
-//      it up, which is exactly what a per-part minimum_stock needs
-//      (backfilled parts need a way to be re-tuned afterward).
-//   2. The low-stock badge logic now reads each part's OWN
-//      minimum_stock instead of a hardcoded global constant.
-//   3. A real stock summary row — the actual "Menu Persediaan"
-//      report deliverable, with an honest note on which valuation
-//      basis the total uses.
-//   4. A per-part movement history modal — the real merged
-//      PartUsage + StockAdjustment timeline from the new backend
-//      endpoint.
+// Sprint 7, Task 7.2 — "Inventaris" -> "Spare Parts & Fluids".
+// Real changes on top of the existing page:
+//   1. Item taxonomy (item_type, vehicle_brand / fluid_brand +
+//      viscosity_grade) and reorder_cadence added to PartFormModal —
+//      the only way Made can actually categorize a part through the UI.
+//   2. Six-tab cadence filter: Semua | Harian | Mingguan | Bulanan |
+//      3 Bulanan | Belum Dikategorikan — the last tab exists so real,
+//      pre-existing parts (Busi, Filter) never silently vanish after
+//      the Sprint 7 migration left their cadence honestly blank.
+//   3. "Stok Menipis" toggle now COMBINES with the active cadence tab
+//      rather than replacing it — both filters, plus the whole parts
+//      list, are fetched ONCE and filtered entirely client-side. This
+//      is a deliberate change from the original page's per-toggle
+//      server refetch: simpler, more responsive, one source of truth
+//      for what's currently on screen.
+//   4. Real bug fix: row rendering computed isOut/isLow independently
+//      from the backend, with zero HARIAN awareness — the same class
+//      of bug already fixed twice on the backend (PartListView,
+//      stock_summary()). A HARIAN part at zero stock would have shown
+//      a red "Habis" pill here even after both backend fixes. Fixed
+//      via isOutOfStock()/isLowStock() helpers that mirror the
+//      backend's own logic exactly.
 // =============================================================================
 import {
-  Part, partsApi, StockAdjustment,
-  stockAdjustmentsApi,
-  StockMovement, StockSummary,
+  FluidBrand, ItemType, Part, partsApi, ReorderCadence, StockAdjustment,
+  stockAdjustmentsApi, StockMovement, StockSummary, VehicleBrand, ViscosityGrade,
 } from "@/lib/api/service";
 import {
   AlertTriangle, Clock, Loader2, Package, Pencil, Plus, X,
 } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 function toNumber(value: string): number {
   const n = parseFloat(value);
@@ -35,6 +41,66 @@ function toNumber(value: string): number {
 function formatRupiah(value: string | number): string {
   const n = typeof value === "string" ? toNumber(value) : value;
   return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n);
+}
+
+// ── Sprint 7, Task 7.1: taxonomy label maps — mirrors the backend's
+// TextChoices display labels exactly (apps/inventory/models.py) ────
+
+const ITEM_TYPE_LABELS: Record<ItemType, string> = {
+  SPARE_PART: "Spare Part",
+  FLUID: "Fluida",
+};
+
+const VEHICLE_BRAND_LABELS: Record<Exclude<VehicleBrand, "">, string> = {
+  TOYOTA: "Toyota", HONDA: "Honda", DAIHATSU: "Daihatsu",
+  SUZUKI: "Suzuki", MITSUBISHI: "Mitsubishi",
+};
+
+const FLUID_BRAND_LABELS: Record<Exclude<FluidBrand, "">, string> = {
+  SHELL: "Shell", CASTROL: "Castrol", REPSOL: "Repsol",
+  FASTRON: "Fastron", PERTAMINA_MEDITRAN: "Pertamina Meditran",
+};
+
+const VISCOSITY_LABELS: Record<Exclude<ViscosityGrade, "">, string> = {
+  "10W-40": "10W-40", "5W-30": "5W-30",
+  SAE_90: "Oli 90 (SAE 90)", SAE_140: "Oli 140 (SAE 140)",
+};
+
+const CADENCE_LABELS: Record<Exclude<ReorderCadence, "">, string> = {
+  HARIAN: "Harian", MINGGUAN: "Mingguan",
+  BULANAN: "Bulanan", TIGA_BULANAN: "3 Bulanan",
+};
+
+// ── Sprint 7, Task 7.2: cadence tabs, including the real 6th tab for
+// parts that exist but haven't been categorized yet ────────────────
+
+type CadenceTabKey = "ALL" | "HARIAN" | "MINGGUAN" | "BULANAN" | "TIGA_BULANAN" | "UNSET";
+
+const CADENCE_TABS: { key: CadenceTabKey; label: string }[] = [
+  { key: "ALL", label: "Semua" },
+  { key: "HARIAN", label: "Harian" },
+  { key: "MINGGUAN", label: "Mingguan" },
+  { key: "BULANAN", label: "Bulanan" },
+  { key: "TIGA_BULANAN", label: "3 Bulanan" },
+  { key: "UNSET", label: "Belum Dikategorikan" },
+];
+
+// ── Sprint 7, Task 7.1's real behavioral rule, mirrored exactly on
+// the frontend: a HARIAN part is deliberately meant to sit at zero
+// stock (e.g. an expensive, on-demand sensor) — it must NEVER surface
+// as "Habis" or "Menipis", full stop, matching the backend's own
+// belt-and-suspenders guard in PartListView and stock_summary(). ───
+
+function isOutOfStock(p: Part): boolean {
+  if (p.reorder_cadence === "HARIAN") return false;
+  return toNumber(p.current_stock) <= 0;
+}
+
+function isLowStock(p: Part): boolean {
+  if (p.reorder_cadence === "HARIAN") return false;
+  const stockNum = toNumber(p.current_stock);
+  const minNum = toNumber(p.minimum_stock);
+  return stockNum > 0 && minNum > 0 && stockNum <= minNum;
 }
 
 // ── Create/Edit part — one shared form, not two near-duplicates ───
@@ -53,9 +119,28 @@ function PartFormModal({
     unit: editingPart?.unit ?? "pcs",
     unit_price: editingPart?.unit_price ?? "",
     minimum_stock: editingPart?.minimum_stock ?? "",
+    item_type: (editingPart?.item_type ?? "SPARE_PART") as ItemType,
+    vehicle_brand: (editingPart?.vehicle_brand ?? "") as VehicleBrand,
+    fluid_brand: (editingPart?.fluid_brand ?? "") as FluidBrand,
+    viscosity_grade: (editingPart?.viscosity_grade ?? "") as ViscosityGrade,
+    reorder_cadence: (editingPart?.reorder_cadence ?? "") as ReorderCadence,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Switching item type must clear whichever brand fields belong to
+  // the OTHER type — otherwise a leftover fluid_brand from a prior
+  // selection would still be sent alongside item_type=SPARE_PART and
+  // trip Part.clean()'s mutual-exclusivity validation on the backend.
+  const handleItemTypeChange = (value: ItemType) => {
+    setForm((prev) => ({
+      ...prev,
+      item_type: value,
+      vehicle_brand: value === "SPARE_PART" ? prev.vehicle_brand : "",
+      fluid_brand: value === "FLUID" ? prev.fluid_brand : "",
+      viscosity_grade: value === "FLUID" ? prev.viscosity_grade : "",
+    }));
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -65,6 +150,11 @@ function PartFormModal({
         name: form.name, sku: form.sku, unit: form.unit,
         unit_price: Number(form.unit_price) || 0,
         minimum_stock: Number(form.minimum_stock) || 0,
+        item_type: form.item_type,
+        vehicle_brand: form.vehicle_brand,
+        fluid_brand: form.fluid_brand,
+        viscosity_grade: form.viscosity_grade,
+        reorder_cadence: form.reorder_cadence,
       };
       const part = isEdit
         ? await partsApi.update(editingPart!.id, payload)
@@ -80,7 +170,7 @@ function PartFormModal({
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div className="card" style={{ width: 420, background: "var(--paper-3)" }}>
+      <div className="card" style={{ width: 460, maxHeight: "88vh", overflowY: "auto", background: "var(--paper-3)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <h2 style={{ fontSize: 18, fontWeight: 700 }}>{isEdit ? "Ubah Part" : "Tambah Part"}</h2>
           <button onClick={onClose} style={{ background: "none", border: "none", display: "flex" }}><X size={18} /></button>
@@ -106,7 +196,7 @@ function PartFormModal({
               </select>
             </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
             <div>
               <label className="label">Harga Satuan (Rp)</label>
               <input className="input" type="number" min={0} value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} placeholder="0" />
@@ -116,6 +206,64 @@ function PartFormModal({
               <input className="input" type="number" min={0} value={form.minimum_stock} onChange={(e) => setForm({ ...form, minimum_stock: e.target.value })} placeholder="0" />
             </div>
           </div>
+
+          <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14, marginBottom: 14 }}>
+            <label className="label">Jenis Item</label>
+            <select className="input" value={form.item_type} onChange={(e) => handleItemTypeChange(e.target.value as ItemType)}>
+              {(Object.keys(ITEM_TYPE_LABELS) as ItemType[]).map((key) => (
+                <option key={key} value={key}>{ITEM_TYPE_LABELS[key]}</option>
+              ))}
+            </select>
+          </div>
+
+          {form.item_type === "SPARE_PART" ? (
+            <div style={{ marginBottom: 14 }}>
+              <label className="label">Merk Kendaraan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
+              <select className="input" value={form.vehicle_brand} onChange={(e) => setForm({ ...form, vehicle_brand: e.target.value as VehicleBrand })}>
+                <option value="">Belum dipilih</option>
+                {(Object.keys(VEHICLE_BRAND_LABELS) as Exclude<VehicleBrand, "">[]).map((key) => (
+                  <option key={key} value={key}>{VEHICLE_BRAND_LABELS[key]}</option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+              <div>
+                <label className="label">Merk Fluida <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
+                <select className="input" value={form.fluid_brand} onChange={(e) => setForm({ ...form, fluid_brand: e.target.value as FluidBrand })}>
+                  <option value="">Belum dipilih</option>
+                  {(Object.keys(FLUID_BRAND_LABELS) as Exclude<FluidBrand, "">[]).map((key) => (
+                    <option key={key} value={key}>{FLUID_BRAND_LABELS[key]}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="label">Tingkat Kekentalan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
+                <select className="input" value={form.viscosity_grade} onChange={(e) => setForm({ ...form, viscosity_grade: e.target.value as ViscosityGrade })}>
+                  <option value="">Belum dipilih</option>
+                  {(Object.keys(VISCOSITY_LABELS) as Exclude<ViscosityGrade, "">[]).map((key) => (
+                    <option key={key} value={key}>{VISCOSITY_LABELS[key]}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginBottom: 20 }}>
+            <label className="label">Frekuensi Pengecekan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
+            <select className="input" value={form.reorder_cadence} onChange={(e) => setForm({ ...form, reorder_cadence: e.target.value as ReorderCadence })}>
+              <option value="">Belum dipilih</option>
+              {(Object.keys(CADENCE_LABELS) as Exclude<ReorderCadence, "">[]).map((key) => (
+                <option key={key} value={key}>{CADENCE_LABELS[key]}</option>
+              ))}
+            </select>
+            <p style={{ fontSize: 12, color: "var(--steel)", marginTop: 6 }}>
+              {form.reorder_cadence === "HARIAN"
+                ? "Part Harian tidak akan pernah memicu peringatan \u201cStok Menipis\u201d atau \u201cStok Habis\u201d \u2014 stok 0 adalah kondisi yang benar untuk part ini."
+                : "Menentukan tab kategori tempat part ini muncul di halaman Spare Parts & Fluids."}
+            </p>
+          </div>
+
           <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 14 }}>
             {isEdit
               ? "Stok Minimum menentukan kapan part ini muncul di filter \u201cStok Menipis\u201d \u2014 0 berarti tidak ada peringatan dari ambang batas ini."
@@ -197,7 +345,7 @@ function StockAdjustmentModal({ part, onClose, onAdjusted }: {
   );
 }
 
-// ── Movement history — new, the real merged timeline ──────────────
+// ── Movement history — unchanged from the original page ───────────
 
 function MovementHistoryModal({ part, onClose }: { part: Part; onClose: () => void }) {
   const [movements, setMovements] = useState<StockMovement[] | null>(null);
@@ -243,7 +391,7 @@ function MovementHistoryModal({ part, onClose }: { part: Part; onClose: () => vo
   );
 }
 
-// ── Stock summary row — the real "Menu Persediaan" deliverable ────
+// ── Stock summary row — unchanged from the original page ──────────
 
 function StockSummaryRow({ data }: { data: StockSummary | null }) {
   if (!data) {
@@ -278,41 +426,90 @@ function StockSummaryRow({ data }: { data: StockSummary | null }) {
   );
 }
 
+// ── Category cell — brand/viscosity summary for one row ───────────
+
+function CategoryCell({ part }: { part: Part }) {
+  if (part.item_type === "FLUID") {
+    const brand = part.fluid_brand ? FLUID_BRAND_LABELS[part.fluid_brand] : null;
+    const grade = part.viscosity_grade ? VISCOSITY_LABELS[part.viscosity_grade] : null;
+    if (!brand && !grade) return <span style={{ color: "var(--steel-lt)" }}>—</span>;
+    return <span>{[brand, grade].filter(Boolean).join(" • ")}</span>;
+  }
+  const brand = part.vehicle_brand ? VEHICLE_BRAND_LABELS[part.vehicle_brand] : null;
+  return brand ? <span>{brand}</span> : <span style={{ color: "var(--steel-lt)" }}>—</span>;
+}
+
 // ── Page shell ─────────────────────────────────────────────────────
 
 export default function InventoryPage() {
   const [parts, setParts] = useState<Part[]>([]);
   const [summary, setSummary] = useState<StockSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<CadenceTabKey>("ALL");
   const [lowStockOnly, setLowStockOnly] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingPart, setEditingPart] = useState<Part | null>(null);
   const [adjustingPart, setAdjustingPart] = useState<Part | null>(null);
   const [historyPart, setHistoryPart] = useState<Part | null>(null);
 
-  const load = (lowStock: boolean) => {
+  // Fetched ONCE, unfiltered — both the cadence tabs and the "Stok
+  // Menipis" toggle are applied client-side below. See the file-level
+  // comment for why this replaces the original page's per-toggle
+  // server refetch.
+  const loadAll = () => {
     setLoading(true);
-    partsApi.list({ lowStock }).then(setParts).finally(() => setLoading(false));
+    partsApi.list().then(setParts).finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(lowStockOnly); }, [lowStockOnly]);
+  useEffect(() => { loadAll(); }, []);
   useEffect(() => { partsApi.stockSummary().then(setSummary); }, []);
+
+  const visibleParts = useMemo(() => {
+    let result = parts;
+    if (activeTab === "UNSET") {
+      result = result.filter((p) => !p.reorder_cadence);
+    } else if (activeTab !== "ALL") {
+      result = result.filter((p) => p.reorder_cadence === activeTab);
+    }
+    if (lowStockOnly) {
+      result = result.filter((p) => isOutOfStock(p) || isLowStock(p));
+    }
+    return result;
+  }, [parts, activeTab, lowStockOnly]);
+
+  const refreshSummary = () => partsApi.stockSummary().then(setSummary);
 
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
         <div>
-          <h1 className="display" style={{ fontSize: 30, marginBottom: 4, textTransform: "none" }}>Inventaris</h1>
-          <p style={{ color: "var(--steel)", fontSize: 14 }}>{parts.length} part {lowStockOnly ? "dengan stok menipis" : "tercatat"}</p>
+          <h1 className="display" style={{ fontSize: 30, marginBottom: 4, textTransform: "none" }}>Spare Parts & Fluids</h1>
+          <p style={{ color: "var(--steel)", fontSize: 14 }}>{visibleParts.length} part {lowStockOnly ? "dengan stok menipis" : "tercatat"}</p>
         </div>
         <button className="btn-rust" onClick={() => setShowForm(true)}><Plus size={16} /> Tambah Part</button>
       </div>
 
       <StockSummaryRow data={summary} />
 
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+        {CADENCE_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={activeTab === tab.key ? "btn-rust" : "btn-ghost"}
+            style={{ fontSize: 13 }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-        <button onClick={() => setLowStockOnly(false)} className={lowStockOnly ? "btn-ghost" : "btn-rust"} style={{ fontSize: 13 }}>Semua</button>
-        <button onClick={() => setLowStockOnly(true)} className={lowStockOnly ? "btn-rust" : "btn-ghost"} style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+        <button
+          onClick={() => setLowStockOnly((prev) => !prev)}
+          className={lowStockOnly ? "btn-rust" : "btn-ghost"}
+          style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}
+        >
           <AlertTriangle size={14} /> Stok Menipis
         </button>
       </div>
@@ -323,29 +520,28 @@ export default function InventoryPage() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Nama</th><th>SKU</th><th>Stok</th><th>Stok Min.</th><th>Harga Satuan</th><th></th></tr>
+              <tr><th>Nama</th><th>SKU</th><th>Kategori</th><th>Frekuensi</th><th>Stok</th><th>Stok Min.</th><th>Harga Satuan</th><th></th></tr>
             </thead>
             <tbody>
-              {parts.map((p) => {
-                const stockNum = toNumber(p.current_stock);
-                const minNum = toNumber(p.minimum_stock);
-                // Real per-part logic, matching the backend exactly:
-                // completely out always flags regardless of any
-                // threshold; "low" only applies once a real,
-                // nonzero threshold has been configured for this
-                // specific part.
-                const isOut = stockNum <= 0;
-                const isLow = !isOut && minNum > 0 && stockNum <= minNum;
+              {visibleParts.map((p) => {
+                // Mirrors the backend's own HARIAN-aware logic exactly
+                // — see isOutOfStock()/isLowStock() above.
+                const isOut = isOutOfStock(p);
+                const isLow = isLowStock(p);
                 return (
                   <tr key={p.id}>
                     <td style={{ display: "flex", alignItems: "center", gap: 8 }}><Package size={14} style={{ color: "var(--steel)" }} />{p.name}</td>
                     <td className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{p.sku || "—"}</td>
+                    <td style={{ fontSize: 13 }}><CategoryCell part={p} /></td>
+                    <td style={{ fontSize: 13, color: "var(--steel)" }}>
+                      {p.reorder_cadence ? CADENCE_LABELS[p.reorder_cadence] : <span style={{ color: "var(--steel-lt)" }}>—</span>}
+                    </td>
                     <td className="mono">
                       {p.current_stock} {p.unit}
                       {isOut && <span className="pill due" style={{ marginLeft: 8, fontSize: 11 }}>Habis</span>}
                       {isLow && <span className="pill due" style={{ marginLeft: 8, fontSize: 11 }}>Menipis</span>}
                     </td>
-                    <td className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{minNum > 0 ? `${p.minimum_stock} ${p.unit}` : "—"}</td>
+                    <td className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{toNumber(p.minimum_stock) > 0 ? `${p.minimum_stock} ${p.unit}` : "—"}</td>
                     <td className="mono">{formatRupiah(p.unit_price)}</td>
                     <td>
                       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
@@ -363,9 +559,9 @@ export default function InventoryPage() {
                   </tr>
                 );
               })}
-              {parts.length === 0 && (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>
-                  {lowStockOnly ? "Tidak ada part dengan stok menipis" : "Belum ada part tercatat"}
+              {visibleParts.length === 0 && (
+                <tr><td colSpan={8} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>
+                  {lowStockOnly ? "Tidak ada part dengan stok menipis di kategori ini" : "Tidak ada part di kategori ini"}
                 </td></tr>
               )}
             </tbody>
@@ -376,7 +572,7 @@ export default function InventoryPage() {
       {showForm && (
         <PartFormModal
           onClose={() => setShowForm(false)}
-          onSaved={(p) => { setParts((prev) => [p, ...prev]); partsApi.stockSummary().then(setSummary); }}
+          onSaved={(p) => { setParts((prev) => [p, ...prev]); refreshSummary(); }}
         />
       )}
       {editingPart && (
@@ -385,7 +581,7 @@ export default function InventoryPage() {
           onClose={() => setEditingPart(null)}
           onSaved={(updated) => {
             setParts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-            partsApi.stockSummary().then(setSummary);
+            refreshSummary();
           }}
         />
       )}
@@ -395,7 +591,7 @@ export default function InventoryPage() {
           onClose={() => setAdjustingPart(null)}
           onAdjusted={(updated) => {
             setParts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-            partsApi.stockSummary().then(setSummary);
+            refreshSummary();
           }}
         />
       )}
