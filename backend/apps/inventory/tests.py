@@ -508,3 +508,235 @@ class MovementHistoryAPITests(InventoryAPITestBase):
         resp = self.client.get(f"/api/parts/{part.id}/movements/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["movements"]), 1)
+
+class PartTaxonomyValidationTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.1 — proves Part.clean()'s mutual-exclusivity
+    invariant, both at the model layer directly and through the real
+    API (PartSerializer.validate(), which is what actually invokes
+    clean() for API-created/updated parts — DRF does not call it
+    automatically).
+    """
+
+    def test_model_clean_rejects_spare_part_with_fluid_brand(self):
+        part = Part(
+            organization=self.org, name="Busi Salah", item_type=Part.ItemType.SPARE_PART,
+            fluid_brand=Part.FluidBrand.CASTROL,
+        )
+        with self.assertRaises(Exception):
+            part.clean()
+
+    def test_model_clean_rejects_fluid_with_vehicle_brand(self):
+        part = Part(
+            organization=self.org, name="Oli Salah", item_type=Part.ItemType.FLUID,
+            vehicle_brand=Part.VehicleBrand.TOYOTA,
+        )
+        with self.assertRaises(Exception):
+            part.clean()
+
+    def test_model_clean_allows_correctly_typed_spare_part(self):
+        part = Part(
+            organization=self.org, name="Busi Benar", item_type=Part.ItemType.SPARE_PART,
+            vehicle_brand=Part.VehicleBrand.HONDA,
+        )
+        part.clean()  # must not raise
+
+    def test_model_clean_allows_correctly_typed_fluid(self):
+        part = Part(
+            organization=self.org, name="Oli Benar", item_type=Part.ItemType.FLUID,
+            fluid_brand=Part.FluidBrand.SHELL, viscosity_grade=Part.ViscosityGrade.ENGINE_10W40,
+        )
+        part.clean()  # must not raise
+
+    def test_model_clean_allows_untagged_part_mid_categorization(self):
+        """
+        A part that hasn't been given a brand yet at all (neither
+        field set) is NOT itself invalid — clean() only rejects the
+        WRONG-type field being set, never requires the correct-type
+        field to already be filled in. Matches the real migration
+        backfill state for Busi/Filter.
+        """
+        part = Part(organization=self.org, name="Belum Dikategorikan")
+        part.clean()  # must not raise
+
+    def test_api_rejects_spare_part_with_fluid_brand(self):
+        resp = self.client.post(
+            "/api/parts/",
+            {
+                "name": "Busi Salah API", "unit": "pcs",
+                "item_type": "SPARE_PART", "fluid_brand": "CASTROL",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("fluid_brand", resp.data["errors"])
+
+    def test_api_accepts_correctly_typed_fluid(self):
+        resp = self.client.post(
+            "/api/parts/",
+            {
+                "name": "Oli Mesin API", "unit": "liter",
+                "item_type": "FLUID", "fluid_brand": "SHELL", "viscosity_grade": "10W-40",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["part"]["fluid_brand"], "SHELL")
+
+    def test_api_update_to_wrong_type_field_is_rejected(self):
+        """
+        A PUT that would push an EXISTING, previously-valid part into
+        an invalid state must be rejected the same way creation is —
+        the merged-instance validate() logic has to consider the
+        instance's current field values, not just the incoming
+        partial payload.
+        """
+        part = Part.objects.create(
+            organization=self.org, name="Busi Existing", item_type=Part.ItemType.SPARE_PART,
+            vehicle_brand=Part.VehicleBrand.TOYOTA,
+        )
+        resp = self.client.put(
+            f"/api/parts/{part.id}/", {"fluid_brand": "SHELL"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PartMigrationBackfillTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.1 — proves the real backfill defaults from
+    migration 0007 land the way the design intended: item_type
+    correctly defaults to SPARE_PART (a real, correct value for
+    existing parts, not a placeholder), while vehicle_brand and
+    reorder_cadence are left honestly blank rather than guessed.
+    """
+
+    def test_new_part_created_without_taxonomy_defaults_to_spare_part_unset_cadence(self):
+        part = Part.objects.create(organization=self.org, name="Untagged")
+        self.assertEqual(part.item_type, Part.ItemType.SPARE_PART)
+        self.assertEqual(part.vehicle_brand, "")
+        self.assertEqual(part.reorder_cadence, "")
+
+
+class HarianReorderCadenceLowStockTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.1 — the real behavioral fix: a HARIAN part
+    (e.g. an on-demand sensor deliberately kept at zero stock) must
+    NEVER surface in the low_stock filter, unconditionally — not
+    just for the zero-stock case, but even if a HARIAN part were
+    somehow given a non-zero minimum_stock too (belt-and-suspenders,
+    matching the view's own widened guard).
+    """
+
+    def test_harian_part_at_zero_stock_never_flags_low_stock(self):
+        Part.objects.create(
+            organization=self.org, name="Sensor Oksigen", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_harian_part_below_a_configured_threshold_still_never_flags(self):
+        """
+        Defensive case — even if someone mistakenly configures a
+        minimum_stock on a HARIAN part, the HARIAN exclusion still
+        wins. The guard excludes the whole cadence, not just the
+        zero-stock half of the filter.
+        """
+        Part.objects.create(
+            organization=self.org, name="Sensor Dengan Threshold", current_stock=Decimal("1"),
+            minimum_stock=Decimal("5"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_non_harian_part_at_zero_stock_still_flags_as_before(self):
+        """
+        Regression proof — the HARIAN guard must not accidentally
+        suppress the existing, correct zero-stock behavior for every
+        OTHER cadence (or for parts with no cadence set at all, the
+        real migration-backfill state for Busi/Filter).
+        """
+        Part.objects.create(
+            organization=self.org, name="Filter Biasa", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.MINGGUAN,
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_untagged_part_at_zero_stock_still_flags(self):
+        """
+        A part with reorder_cadence="" (the real state for every
+        pre-Sprint-7 part until Made categorizes it) must keep
+        today's exact existing zero-stock alerting behavior — the
+        HARIAN exclusion is a string-equality exclude(), which
+        correctly never matches an empty string.
+        """
+        Part.objects.create(
+            organization=self.org, name="Belum Ditandai", current_stock=Decimal("0"), minimum_stock=Decimal("0"),
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 1)
+
+class StockSummaryHarianExclusionTests(APITestCase):
+    """
+    Sprint 7, Task 7.1 (follow-up fix) — proves stock_summary()'s
+    out_of_stock_count/low_stock_count now match PartListView's
+    ?low_stock=true filter exactly. Before this fix, a HARIAN part at
+    zero stock was correctly hidden from the parts list but still
+    wrongly counted on the dashboard's own "Stok Habis" card — two
+    views of the same data disagreeing about the same part.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor Harian Summary", invoice_code="AMHS")
+
+    def test_harian_zero_stock_excluded_from_out_of_stock_count(self):
+        from . import reports
+        Part.objects.create(
+            organization=self.org, name="Sensor", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        result = reports.stock_summary(self.org)
+        self.assertEqual(result["out_of_stock_count"], 0)
+        # Still counted in the honest catalog total — a HARIAN part
+        # is a real part, just not a reorder signal.
+        self.assertEqual(result["total_parts"], 1)
+
+    def test_non_harian_zero_stock_still_counts_as_before(self):
+        """Regression proof — the fix must not suppress the real, existing case."""
+        from . import reports
+        Part.objects.create(
+            organization=self.org, name="Filter", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.MINGGUAN,
+        )
+        result = reports.stock_summary(self.org)
+        self.assertEqual(result["out_of_stock_count"], 1)
+
+    def test_summary_and_list_filter_agree_on_the_same_harian_part(self):
+        """
+        The real proof this fix was for — both endpoints, asked
+        about the exact same part, must now give consistent answers.
+        """
+        from apps.authentication.models import CustomUser
+        from apps.organizations.models import OrganizationMembership
+
+        from . import reports
+
+        part = Part.objects.create(
+            organization=self.org, name="Sensor Konsisten", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        owner = CustomUser.objects.create_user(
+            email="owner.summary@test.id", password="pass12345!",
+            full_name="Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=owner)
+
+        summary = reports.stock_summary(self.org)
+        list_resp = self.client.get("/api/parts/?low_stock=true")
+
+        self.assertEqual(summary["out_of_stock_count"], 0)
+        self.assertEqual(list_resp.data["count"], 0)
