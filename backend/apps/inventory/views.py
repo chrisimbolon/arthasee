@@ -21,6 +21,16 @@ class PartListView(TenantScopedAPIView):
     global rule. See Part.minimum_stock's own docstring for the full
     reasoning behind this replacing the old flat "<=5 for everyone"
     behavior.
+
+    Sprint 7, Task 7.1 — HARIAN parts (e.g. an expensive, on-demand
+    sensor deliberately kept at zero stock, bought same-day per job)
+    are excluded from this filter entirely, unconditionally — Made
+    and Chris's own confirmed design call: "Parts tagged as Harian
+    will never generate 'Low Stock' reorder warnings." Applied to
+    the WHOLE filter (not just the zero-stock half of it) so the
+    guarantee holds even if a HARIAN part is ever accidentally given
+    a non-zero minimum_stock — belt and suspenders, not just covering
+    today's expected case.
     """
     model = Part
 
@@ -38,7 +48,10 @@ class PartListView(TenantScopedAPIView):
             # be meaningful. minimum_stock=0 (the default for any
             # part nobody's configured) deliberately never triggers
             # the threshold half of this on its own.
-            parts = parts.filter(
+            #
+            # HARIAN parts are excluded from this filter entirely —
+            # see class docstring above.
+            parts = parts.exclude(reorder_cadence=Part.ReorderCadence.HARIAN).filter(
                 Q(current_stock__lte=0) |
                 Q(minimum_stock__gt=0, current_stock__lte=F("minimum_stock"))
             )
@@ -70,8 +83,9 @@ class PartDetailView(TenantScopedAPIView):
     """
     GET/PUT/DELETE /api/parts/<id>/
     PUT deliberately cannot touch current_stock (read_only in the
-    serializer) — only name/sku/unit/unit_price are editable this
-    way. Stock only ever moves through PartUsage or StockAdjustment.
+    serializer) — only name/sku/unit/unit_price/taxonomy fields are
+    editable this way. Stock only ever moves through PartUsage or
+    StockAdjustment.
     """
     model = Part
 
