@@ -707,6 +707,150 @@ class AgingAPReportTests(TestCase):
         self.assertEqual(data["buckets"]["0-30"], Decimal("50000"))
 
 
+class CashConversionCycleTests(TestCase):
+    """
+    Real coverage for cash_conversion_cycle() — verified by hand
+    before being written: round, balanced numbers (DIO=10, DSO=15,
+    DPO=25 -> CCC=0) chosen specifically so any future regression
+    shows up as a clearly nonzero result, not lost in decimal noise.
+    Every posting happens AFTER `since`, so every account's own
+    OPENING balance is 0 and "average" collapses to closing/2 —
+    deliberate, keeps the arithmetic exactly checkable.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.inventory = Account.objects.get(organization=self.org, code="1301")
+        self.ap        = Account.objects.get(organization=self.org, code="2001")
+        self.ar        = Account.objects.get(organization=self.org, code="1201")
+        self.cogs      = Account.objects.get(organization=self.org, code="5001")
+        self.revenue   = Account.objects.get(organization=self.org, code="4001")
+
+    def test_ccc_matches_hand_verified_scenario(self):
+        since = date(2026, 1, 1)
+        as_of = date(2026, 1, 31)  # 30 days
+
+        # Buy 500k of inventory on credit
+        JournalEntry.post(
+            organization=self.org, posting_date=since, source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.inventory, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
+        )
+        # 300k of that inventory becomes COGS
+        JournalEntry.post(
+            organization=self.org, posting_date=since, source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cogs, "debit": Decimal("300000")}, {"account": self.inventory, "credit": Decimal("300000")}],
+        )
+        # A 1,000,000 sale on credit
+        JournalEntry.post(
+            organization=self.org, posting_date=since, source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
+        )
+
+        data = reports.cash_conversion_cycle(self.org, since=since, as_of=as_of)
+        self.assertAlmostEqual(float(data["dio"]), 10.0, places=2)
+        self.assertAlmostEqual(float(data["dso"]), 15.0, places=2)
+        self.assertAlmostEqual(float(data["dpo"]), 25.0, places=2)
+        self.assertAlmostEqual(float(data["ccc"]), 0.0, places=2)
+
+    def test_zero_cogs_does_not_crash(self):
+        """
+        The original zero-division guard, hand-verified when the
+        function was first built — zero COGS in the period must
+        return 0 days, never raise.
+        """
+        data = reports.cash_conversion_cycle(self.org, since=date(2026, 1, 1), as_of=date(2026, 1, 31))
+        self.assertEqual(data["dio"], 0)
+        self.assertEqual(data["dpo"], 0)
+
+
+class ProfitAndLossComparisonTests(TestCase):
+    """
+    Real coverage for profit_and_loss_comparison().
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.ar      = Account.objects.get(organization=self.org, code="1201")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+
+    def test_compares_current_period_against_the_immediately_preceding_one(self):
+        # Prior period: Jan 1-15 (15 days) -- 500,000 revenue
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 10), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        # Current period: Jan 16-30 (15 days) -- 1,000,000 revenue, exactly double
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 20), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
+        )
+
+        data = reports.profit_and_loss_comparison(self.org, since=date(2026, 1, 16), as_of=date(2026, 1, 30))
+        self.assertEqual(data["current"]["total_revenue"], Decimal("1000000"))
+        self.assertEqual(data["prior"]["total_revenue"], Decimal("500000"))
+        self.assertEqual(data["revenue_delta"]["change_pct"], Decimal("100"))
+
+    def test_change_pct_is_none_when_prior_period_was_zero(self):
+        """
+        The original real edge case — a prior period with zero
+        revenue must render as "—" on the frontend, not crash on
+        division by zero or show a misleading infinite percentage.
+        """
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 20), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        data = reports.profit_and_loss_comparison(self.org, since=date(2026, 1, 16), as_of=date(2026, 1, 30))
+        self.assertIsNone(data["revenue_delta"]["change_pct"])
+
+
+class DashboardFinancialSummaryTests(TestCase):
+    """
+    Real coverage for dashboard_financial_summary() — scoped to the
+    AP side, where the actual hand-verified precision risk lives: a
+    due_date in the future has a NEGATIVE age_days, which could
+    silently land in aging_ap()'s own "0-30" bucket if that bucket
+    were reused directly here (confirmed by hand before the function
+    was written — see its own docstring). AR-overdue coverage needs
+    a full real Invoice fixture chain (InvoicingAPITestBase, same as
+    AgingARReportTests below) — deliberately left for a follow-up
+    round rather than guessed at here.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+
+    def test_far_future_invoice_excluded_from_due_soon(self):
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("400000"),
+            invoice_date=date.today(), due_date=date.today() + timedelta(days=20),
+        )
+        data = reports.dashboard_financial_summary(self.org, as_of=date.today())
+        self.assertEqual(data["ap_due_soon_count"], 0)
+        self.assertEqual(data["ap_total_outstanding"], Decimal("400000"))
+
+    def test_invoice_due_within_a_week_is_included(self):
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("150000"),
+            invoice_date=date.today(), due_date=date.today() + timedelta(days=3),
+        )
+        data = reports.dashboard_financial_summary(self.org, as_of=date.today())
+        self.assertEqual(data["ap_due_soon_count"], 1)
+        self.assertEqual(data["ap_due_soon_total"], Decimal("150000"))
+
+    def test_already_overdue_invoice_still_counts_as_due_soon(self):
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("200000"),
+            invoice_date=date.today() - timedelta(days=10), due_date=date.today() - timedelta(days=3),
+        )
+        data = reports.dashboard_financial_summary(self.org, as_of=date.today())
+        self.assertEqual(data["ap_due_soon_count"], 1)
+
+
 # ⚠️ AgingARReportTests below reuses apps.invoicing.tests.
 # InvoicingAPITestBase to get a real, issued Invoice without
 # reconstructing the whole WorkOrder -> ServiceRecord -> Invoice
