@@ -5,6 +5,7 @@
 Sprint 3 — model-layer tests (Stage 1) plus real event/posting proof
 (Stage 2). No HTTP endpoints exist yet — that's a later stage.
 """
+from datetime import date, timedelta
 from decimal import Decimal
 
 from apps.accounting.models import Account
@@ -17,6 +18,7 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from . import reports
 from .models import (GoodsReceivedNote, PurchaseOrder, PurchaseReturn,
                      Supplier, SupplierInvoice)
 
@@ -1174,3 +1176,110 @@ class PurchaseReturnClassificationTests(PurchasingModelTestBase):
                 reason="Terlambat, sudah dibayar",
             )
         self.assertFalse(PurchaseReturn.objects.exists())
+
+class SupplierReliabilityReportTests(PurchasingModelTestBase):
+    """
+    Real coverage for supplier_reliability() — the on-time judgment
+    (fully received AND has a real expected_date, judged by the
+    LATEST GRN's own received_at against expected_date), the return-
+    rate calculation, and the "no real activity -> excluded entirely"
+    rule. All verified by hand before the function was originally
+    written; these are the same scenarios as permanent tests.
+
+    GoodsReceivedNote.receive() sets received_at to the real moment
+    it's called — always "today" during a test run — so "on time" is
+    tested by setting expected_date to tomorrow, "late" by setting it
+    to yesterday, rather than trying to control received_at directly.
+    """
+
+    def _create_po(self, expected_date=None):
+        po = PurchaseOrder.create_order(
+            organization=self.org, supplier=self.supplier, order_date="2026-08-14",
+            lines=[{"part": self.part_a, "quantity_ordered": Decimal("10.00"), "unit_cost": Decimal("45000.00")}],
+        )
+        if expected_date is not None:
+            po.expected_date = expected_date
+            po.save(update_fields=["expected_date"])
+        return po
+
+    def test_on_time_po_counts_correctly(self):
+        po = self._create_po(expected_date=date.today() + timedelta(days=1))
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00"),
+            }],
+        )
+        data = reports.supplier_reliability(self.org, since=date(2026, 1, 1), as_of=date.today())
+        row = data["suppliers"][0]
+        self.assertEqual(row["total_pos_judged"], 1)
+        self.assertEqual(row["on_time_pos"], 1)
+        self.assertEqual(row["on_time_rate"], Decimal("100"))
+
+    def test_late_po_counts_correctly(self):
+        po = self._create_po(expected_date=date.today() - timedelta(days=1))
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00"),
+            }],
+        )
+        data = reports.supplier_reliability(self.org, since=date(2026, 1, 1), as_of=date.today())
+        row = data["suppliers"][0]
+        self.assertEqual(row["total_pos_judged"], 1)
+        self.assertEqual(row["on_time_pos"], 0)
+        self.assertEqual(row["on_time_rate"], Decimal("0"))
+
+    def test_po_with_no_expected_date_excluded_from_judgment_but_counts_value(self):
+        po = self._create_po(expected_date=None)
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00"),
+            }],
+        )
+        data = reports.supplier_reliability(self.org, since=date(2026, 1, 1), as_of=date.today())
+        row = data["suppliers"][0]
+        self.assertEqual(row["total_pos_judged"], 0)
+        self.assertIsNone(row["on_time_rate"])
+        self.assertEqual(row["total_received_value"], Decimal("450000.00"))
+
+    def test_still_open_po_produces_no_activity_row(self):
+        """
+        A PO created but never received stays ORDERED — not
+        FULLY_RECEIVED — so it must never be judged. With no GRN at
+        all, it also contributes zero received value, so the
+        supplier has genuinely zero real activity and is excluded
+        entirely, same rule as a supplier never touched at all.
+        """
+        self._create_po(expected_date=date.today() + timedelta(days=1))
+        data = reports.supplier_reliability(self.org, since=date(2026, 1, 1), as_of=date.today())
+        self.assertEqual(len(data["suppliers"]), 0)
+
+    def test_supplier_with_zero_activity_is_excluded_entirely(self):
+        Supplier.objects.create(organization=self.org, name="Unused Supplier")
+        data = reports.supplier_reliability(self.org, since=date(2026, 1, 1), as_of=date.today())
+        names = [s["supplier_name"] for s in data["suppliers"]]
+        self.assertNotIn("Unused Supplier", names)
+
+    def test_return_rate_reflects_a_real_return(self):
+        po = self._create_po(expected_date=date.today() + timedelta(days=1))
+        grn = GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00"),
+            }],
+        )
+        PurchaseReturn.create_return(
+            organization=self.org, goods_received_note=grn,
+            lines=[{"grn_line_item": grn.line_items.first(), "quantity": Decimal("2.00")}],
+            reason="Barang cacat",
+        )
+        data = reports.supplier_reliability(self.org, since=date(2026, 1, 1), as_of=date.today())
+        row = data["suppliers"][0]
+        self.assertEqual(row["total_returned_value"], Decimal("90000.00"))  # 2 * 45000
+        self.assertEqual(row["return_rate"].quantize(Decimal("1")), Decimal("20"))  # 90000/450000*100
