@@ -96,6 +96,18 @@ export interface Vehicle {
   updated_at:               string;
 }
 
+// ── Sprint 7, Task 7.1: Part taxonomy ──────────────────────────
+// Every value here matches the backend's models.TextChoices exactly
+// (apps/inventory/models.py) — the empty string "" is a real,
+// distinct state (blank/unset), not a placeholder to work around;
+// it's the honest migration-backfill state for every part that
+// existed before this taxonomy shipped (Busi, Filter).
+export type ItemType = "SPARE_PART" | "FLUID";
+export type VehicleBrand = "TOYOTA" | "HONDA" | "DAIHATSU" | "SUZUKI" | "MITSUBISHI" | "";
+export type FluidBrand = "SHELL" | "CASTROL" | "REPSOL" | "FASTRON" | "PERTAMINA_MEDITRAN" | "";
+export type ViscosityGrade = "10W-40" | "5W-30" | "SAE_90" | "SAE_140" | "";
+export type ReorderCadence = "HARIAN" | "MINGGUAN" | "BULANAN" | "TIGA_BULANAN" | "";
+
 export interface Part {
   id:            string;
   name:          string;
@@ -106,9 +118,17 @@ export interface Part {
   // Real per-part reorder threshold — replaces what used to be a
   // single hardcoded global "<=5" rule shared by every part. "0"
   // means no threshold configured; a part completely out of stock
-  // still surfaces regardless of this value. See the backend's own
-  // Part.minimum_stock docstring for the full reasoning.
+  // still surfaces regardless of this value — UNLESS reorder_cadence
+  // is "HARIAN" (see below), where zero stock is the deliberately
+  // correct state, not a gap. See the backend's own Part.minimum_stock
+  // docstring for the full reasoning.
   minimum_stock: string;
+  // Sprint 7, Task 7.1 — see the type comment above each type alias.
+  item_type:       ItemType;
+  vehicle_brand:   VehicleBrand;
+  fluid_brand:     FluidBrand;
+  viscosity_grade: ViscosityGrade;
+  reorder_cadence: ReorderCadence;
   created_at:    string;
   updated_at:    string;
 }
@@ -232,6 +252,17 @@ export const serviceRecordsApi = {
   },
 };
 
+// Sprint 7, Task 7.1 — shared payload shape for both create and
+// update, all taxonomy fields optional (matches the backend's own
+// blank=True fields — a part can be saved mid-categorization).
+export interface PartTaxonomyPayload {
+  item_type?:       ItemType;
+  vehicle_brand?:   VehicleBrand;
+  fluid_brand?:     FluidBrand;
+  viscosity_grade?: ViscosityGrade;
+  reorder_cadence?: ReorderCadence;
+}
+
 export const partsApi = {
   async list(opts?: { search?: string; lowStock?: boolean }): Promise<Part[]> {
     const params: Record<string, string> = {};
@@ -240,11 +271,11 @@ export const partsApi = {
     const { data } = await api.get("/api/parts/", { params });
     return data.results;
   },
-  async create(payload: { name: string; sku?: string; unit: string; unit_price: number; minimum_stock?: number }): Promise<Part> {
+  async create(payload: { name: string; sku?: string; unit: string; unit_price: number; minimum_stock?: number } & PartTaxonomyPayload): Promise<Part> {
     const { data } = await api.post("/api/parts/", payload);
     return data.part;
   },
-  async update(id: string, payload: Partial<{ name: string; sku: string; unit: string; unit_price: number; minimum_stock: number }>): Promise<Part> {
+  async update(id: string, payload: Partial<{ name: string; sku: string; unit: string; unit_price: number; minimum_stock: number }> & PartTaxonomyPayload): Promise<Part> {
     const { data } = await api.put(`/api/parts/${id}/`, payload);
     return data.part;
   },
