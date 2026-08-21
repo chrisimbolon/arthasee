@@ -170,13 +170,27 @@ class Appointment(TenantScopedModel):
         CustomerSelfRegistrationView's own docstring for why they
         exist) — that's a real, separate staff action at intake, not
         this method's job.
+
+        Wrapped in transaction.atomic() — a real bug caught live:
+        WorkOrder.save() calls WorkOrderSequence.next_number(),
+        which needs select_for_update(), which Django refuses to run
+        outside an active transaction. create_if_available() above
+        already knew this and wrapped its own body; this method
+        didn't, and crashed the first time it was actually invoked
+        outside a test. The atomic block also closes a second, real
+        risk beyond the crash: without it, a WorkOrder could be
+        created successfully and then the Appointment's own save()
+        could fail, leaving a real orphaned WorkOrder with no
+        Appointment pointing to it as converted. Now either both
+        succeed or neither does.
         """
         if self.status != "CONFIRMED":
             raise ValueError("Hanya janji temu yang masih terkonfirmasi yang bisa dikonversi.")
-        work_order = WorkOrder.objects.create(
-            vehicle=self.vehicle, received_by=received_by, notes=self.notes,
-        )
-        self.status = "CONVERTED"
-        self.work_order = work_order
-        self.save(update_fields=["status", "work_order", "updated_at"])
+        with transaction.atomic():
+            work_order = WorkOrder.objects.create(
+                vehicle=self.vehicle, received_by=received_by, notes=self.notes,
+            )
+            self.status = "CONVERTED"
+            self.work_order = work_order
+            self.save(update_fields=["status", "work_order", "updated_at"])
         return work_order
