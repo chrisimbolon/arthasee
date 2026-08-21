@@ -1,6 +1,7 @@
 # =============================================================================
 # === backend/apps/inventory/serializers.py ===
 # =============================================================================
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from .models import Part, PartUsage, StockAdjustment
@@ -23,14 +24,54 @@ def _user_org_ids(request):
 class PartSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Part
-        fields = ["id", "name", "sku", "unit", "current_stock", "unit_price", "minimum_stock", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "sku", "unit", "current_stock", "unit_price", "minimum_stock",
+            "item_type", "vehicle_brand", "fluid_brand", "viscosity_grade", "reorder_cadence",
+            "created_at", "updated_at",
+        ]
         # current_stock is intentionally NOT writable here — it only
         # ever changes through PartUsage or StockAdjustment, both of
         # which go through the atomic F() update in models.py.
         # minimum_stock, unlike current_stock, IS writable — same
         # treatment as unit_price, since both are values a shop owner
         # sets and adjusts directly, not derived from stock movement.
+        # The Sprint 7 taxonomy fields (item_type, vehicle_brand,
+        # fluid_brand, viscosity_grade, reorder_cadence) are also
+        # writable, same treatment.
         read_only_fields = ["id", "current_stock", "created_at", "updated_at"]
+
+    def validate(self, data):
+        """
+        Sprint 7, Task 7.1 — enforces the SPARE_PART/FLUID mutual-
+        exclusivity invariant. DRF's ModelSerializer does NOT call
+        Model.full_clean()/clean() automatically, so this explicitly
+        builds a transient, correctly-merged Part (existing instance
+        fields overridden by whatever's actually changing in this
+        request) and calls its real Part.clean() — the single source
+        of truth for this rule, per Chris's own confirmed call, not a
+        second copy of the same logic living here.
+        """
+        taxonomy_fields = ("item_type", "vehicle_brand", "fluid_brand", "viscosity_grade")
+        merged = {
+            field: data.get(field, getattr(self.instance, field, None) if self.instance else None)
+            for field in taxonomy_fields
+        }
+        # item_type always has a real default even on a brand-new,
+        # not-yet-saved instance — Part.ItemType.SPARE_PART matches
+        # the model field's own default.
+        if merged["item_type"] is None:
+            merged["item_type"] = Part.ItemType.SPARE_PART
+        for field in ("vehicle_brand", "fluid_brand", "viscosity_grade"):
+            if merged[field] is None:
+                merged[field] = ""
+
+        temp = Part(**merged)
+        try:
+            temp.clean()
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.message_dict)
+        return data
+
 
 class PartUsageSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source="part.name", read_only=True)
