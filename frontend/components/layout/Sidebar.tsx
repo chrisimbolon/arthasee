@@ -16,7 +16,7 @@ const NAV = [
   { href: "/dashboard/appointments", icon: Calendar,      label: "Janji Temu" },  
   { href: "/dashboard/customers", icon: Users,            label: "Pelanggan" },
   { href: "/dashboard/vehicles",  icon: Car,              label: "Kendaraan" },
-  { href: "/dashboard/inventory", icon: Package,          label: "Inventaris" },
+  { href: "/dashboard/inventory", icon: Package,          label: "Spare Parts & Fluids" },
   { href: "/dashboard/purchasing/suppliers", icon: ShoppingCart, label: "Pembelian" },  
   { href: "/dashboard/leads",     icon: Phone,            label: "Leads" },
   { href: "/dashboard/contracts", icon: Briefcase,        label: "Kontrak" },
