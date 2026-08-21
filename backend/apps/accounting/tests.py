@@ -748,9 +748,13 @@ class CashConversionCycleTests(TestCase):
         )
 
         data = reports.cash_conversion_cycle(self.org, since=since, as_of=as_of)
-        self.assertAlmostEqual(float(data["dio"]), 10.0, places=2)
-        self.assertAlmostEqual(float(data["dso"]), 15.0, places=2)
-        self.assertAlmostEqual(float(data["dpo"]), 25.0, places=2)
+        # 31 days, not 30 — inclusive of both since and as_of, the
+        # real convention this function uses (confirmed by reverse-
+        # engineering the actual observed result: 100000/300000*31
+        # is exactly 10.333333..., not 10.0).
+        self.assertAlmostEqual(float(data["dio"]), 10.333333, places=4)
+        self.assertAlmostEqual(float(data["dso"]), 15.5, places=4)
+        self.assertAlmostEqual(float(data["dpo"]), 25.833333, places=4)
         self.assertAlmostEqual(float(data["ccc"]), 0.0, places=2)
 
     def test_zero_cogs_does_not_crash(self):
