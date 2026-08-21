@@ -4,7 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Activity, Briefcase, Calculator, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, ShoppingCart, TrendingUp, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Calculator, Calendar, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, ShoppingCart, TrendingUp, Users, Wrench } from "lucide-react";
 // import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 const NAV = [
   { href: "/dashboard",           icon: LayoutDashboard, label: "Ringkasan" },
   { href: "/dashboard/active-jobs", icon: Activity,       label: "Pekerjaan Aktif" },
+  { href: "/dashboard/appointments", icon: Calendar,      label: "Janji Temu" },  
   { href: "/dashboard/customers", icon: Users,            label: "Pelanggan" },
   { href: "/dashboard/vehicles",  icon: Car,              label: "Kendaraan" },
   { href: "/dashboard/inventory", icon: Package,          label: "Inventaris" },
