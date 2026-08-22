@@ -8,9 +8,10 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from . import reports
-from .models import Part, PartUsage, StockAdjustment
+from .models import Part, PartUsage, StockAdjustment, StockOpnameSession
 from .serializers import (PartSerializer, PartUsageSerializer,
-                          StockAdjustmentSerializer)
+                          StockAdjustmentSerializer,
+                          StockOpnameSessionSerializer)
 
 
 class PartListView(TenantScopedAPIView):
@@ -253,3 +254,115 @@ class PartMovementHistoryView(TenantScopedAPIView):
         part = self.get_object(part_id)
         rows = reports.movement_history(part)
         return Response({"success": True, "movements": rows})
+
+
+class StockOpnameSessionListView(TenantScopedAPIView):
+    """
+    GET  /api/stock-opname/  — list sessions for this org
+    POST /api/stock-opname/  — start a new session
+
+    POST body: {"part_ids": ["<uuid>", ...]} — the caller-chosen
+    scope, e.g. whatever's currently showing in the active reorder-
+    cadence tab on the frontend. Chris and Made's own confirmed call
+    (Sprint 7, Task 7.3): NOT organization-wide by default.
+
+    Deliberately flat — "stock-opname/", not "inventory/stock-opname/"
+    — matching every other route in this app's real urls.py exactly
+    (parts/, service-records/.../part-usages/). Confirmed against the
+    real file rather than guessed, avoiding a repeat of the Supplier
+    Reliability nested-vs-flat mistake this exact file's own comment
+    warns about.
+    """
+    model = StockOpnameSession
+
+    def get(self, request):
+        sessions = self.get_queryset().order_by("-created_at")
+        serializer = StockOpnameSessionSerializer(sessions, many=True)
+        return Response({"success": True, "count": sessions.count(), "results": serializer.data})
+
+    def post(self, request):
+        org = self._resolve_org(request)
+        if org is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        part_ids = request.data.get("part_ids") or []
+        try:
+            session = StockOpnameSession.start_session(
+                organization=org, part_ids=part_ids, created_by=request.user,
+            )
+        except ValueError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"success": True, "session": StockOpnameSessionSerializer(session).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+    def _resolve_org(self, request):
+        membership = request.user.memberships.filter(is_active=True).first()
+        return membership.organization if membership else None
+
+
+class StockOpnameSessionDetailView(TenantScopedAPIView):
+    """
+    GET   /api/stock-opname/<id>/  — full session detail,
+          including every line item's system_stock_at_time,
+          physical_count, and computed variance.
+    PATCH /api/stock-opname/<id>/  — record one or more
+          physical counts.
+
+    PATCH body: {"counts": [{"part_id": "<uuid>", "physical_count": 12.5}, ...]}
+    Deliberately batch-shaped, not one-line-per-request — the guided
+    UI submits every count entered so far in one call, incrementally
+    or all at once, staff's choice. Unmentioned lines are left
+    untouched. Each count goes through
+    StockOpnameLineItem.record_count(), which itself blocks any
+    attempt to edit a count after the session is already COMPLETED.
+    """
+    model = StockOpnameSession
+
+    def get(self, request, pk):
+        session = self.get_object(pk)
+        return Response({"success": True, "session": StockOpnameSessionSerializer(session).data})
+
+    def patch(self, request, pk):
+        session = self.get_object(pk)
+        counts = request.data.get("counts") or []
+        errors = []
+        for entry in counts:
+            part_id = entry.get("part_id")
+            physical_count = entry.get("physical_count")
+            line = session.line_items.filter(part_id=part_id).first()
+            if line is None:
+                errors.append(f"Part {part_id} tidak ada dalam sesi ini.")
+                continue
+            try:
+                line.record_count(physical_count)
+            except ValueError as exc:
+                errors.append(str(exc))
+        if errors:
+            return Response({"success": False, "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"success": True, "session": StockOpnameSessionSerializer(session).data})
+
+
+class StockOpnameSessionCompleteView(TenantScopedAPIView):
+    """
+    POST /api/stock-opname/<id>/complete/
+
+    Computes variance for every line, applies real StockAdjustment
+    corrections to Part.current_stock, and — only if the netted
+    totals aren't both zero — publishes StockOpnameCompleted for the
+    accounting engine to post. See StockOpnameSession.complete()'s
+    own docstring for the full behavior, including the hard block on
+    completing a session with any uncounted line.
+    """
+    model = StockOpnameSession
+
+    def post(self, request, pk):
+        session = self.get_object(pk)
+        try:
+            session.complete()
+        except ValueError as exc:
+            return Response({"success": False, "message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"success": True, "session": StockOpnameSessionSerializer(session).data})
