@@ -185,6 +185,37 @@ export interface ApiErrorShape {
   message?: string;
 }
 
+// ── Sprint 7, Task 7.3: Stock Opname ───────────────────────────
+// Mirrors apps/inventory/serializers.py's StockOpnameSessionSerializer
+// / StockOpnameLineItemSerializer exactly. Note: unit_price is
+// deliberately NOT part of this shape (the backend serializer never
+// exposes it here) — the frontend cross-references Part.unit_price
+// from the already-fetched parts list to compute Rupiah preview
+// totals client-side, rather than duplicating pricing data onto
+// every line item response.
+
+export interface StockOpnameLineItem {
+  id:                    string;
+  part:                  string;
+  part_name:             string;
+  unit:                  string;
+  system_stock_at_time:  string;
+  physical_count:        string | null;
+  variance:              string | null;
+}
+
+export interface StockOpnameSession {
+  id:               string;
+  number:           string;
+  status:           "DRAFT" | "COMPLETED";
+  completed_at:     string | null;
+  created_by:       string | null;
+  created_by_name:  string | null;
+  line_items:       StockOpnameLineItem[];
+  created_at:       string;
+  updated_at:       string;
+}
+
 export const customersApi = {
   async list(opts?: { search?: string; customerType?: CustomerType }): Promise<Customer[]> {
     const params: Record<string, string> = {};
@@ -314,5 +345,35 @@ export const stockAdjustmentsApi = {
   }): Promise<StockAdjustment> {
     const { data } = await api.post(`/api/parts/${partId}/adjustments/`, payload);
     return data.adjustment;
+  },
+};
+
+// Sprint 7, Task 7.3 — deliberately flat routes ("stock-opname/",
+// not "inventory/stock-opname/") — confirmed against the real
+// backend apps/inventory/urls.py, matching every other route in
+// that file exactly. See that file's own comment for why this
+// specific detail mattered.
+export const stockOpnameApi = {
+  async list(): Promise<StockOpnameSession[]> {
+    const { data } = await api.get("/api/stock-opname/");
+    return data.results;
+  },
+  async get(id: string): Promise<StockOpnameSession> {
+    const { data } = await api.get(`/api/stock-opname/${id}/`);
+    return data.session;
+  },
+  async start(partIds: string[]): Promise<StockOpnameSession> {
+    const { data } = await api.post("/api/stock-opname/", { part_ids: partIds });
+    return data.session;
+  },
+  async recordCounts(
+    id: string, counts: { part_id: string; physical_count: number }[],
+  ): Promise<StockOpnameSession> {
+    const { data } = await api.patch(`/api/stock-opname/${id}/`, { counts });
+    return data.session;
+  },
+  async complete(id: string): Promise<StockOpnameSession> {
+    const { data } = await api.post(`/api/stock-opname/${id}/complete/`);
+    return data.session;
   },
 };
