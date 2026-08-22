@@ -29,8 +29,9 @@ import {
   stockAdjustmentsApi, StockMovement, StockSummary, VehicleBrand, ViscosityGrade,
 } from "@/lib/api/service";
 import {
-  AlertTriangle, Clock, Loader2, Package, Pencil, Plus, X,
+  AlertTriangle, ClipboardList, Clock, Loader2, Package, Pencil, Plus, X,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 function toNumber(value: string): number {
@@ -442,6 +443,7 @@ function CategoryCell({ part }: { part: Part }) {
 // ── Page shell ─────────────────────────────────────────────────────
 
 export default function InventoryPage() {
+  const router = useRouter();
   const [parts, setParts] = useState<Part[]>([]);
   const [summary, setSummary] = useState<StockSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -486,7 +488,26 @@ export default function InventoryPage() {
           <h1 className="display" style={{ fontSize: 30, marginBottom: 4, textTransform: "none" }}>Spare Parts & Fluids</h1>
           <p style={{ color: "var(--steel)", fontSize: 14 }}>{visibleParts.length} part {lowStockOnly ? "dengan stok menipis" : "tercatat"}</p>
         </div>
-        <button className="btn-rust" onClick={() => setShowForm(true)}><Plus size={16} /> Tambah Part</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            className="btn-ghost"
+            style={{ display: "flex", alignItems: "center", gap: 6 }}
+            onClick={() => {
+              // Sprint 7, Task 7.3 — Chris and Made's own confirmed
+              // call: passes the currently active cadence tab as a
+              // scope hint, since a real physical count naturally
+              // matches whichever cadence group staff is already
+              // looking at. ALL/UNSET aren't real cadences, so no
+              // hint is passed for those — the next page lets staff
+              // select freely from the full catalog instead.
+              const cadenceHint = activeTab !== "ALL" && activeTab !== "UNSET" ? `?cadence=${activeTab}` : "";
+              router.push(`/dashboard/inventory/stock-opname${cadenceHint}`);
+            }}
+          >
+            <ClipboardList size={16} /> Mulai Stock Opname
+          </button>
+          <button className="btn-rust" onClick={() => setShowForm(true)}><Plus size={16} /> Tambah Part</button>
+        </div>
       </div>
 
       <StockSummaryRow data={summary} />
