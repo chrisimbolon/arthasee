@@ -1,6 +1,7 @@
 # =============================================================================
 # === backend/apps/inventory/tests.py ===
 # =============================================================================
+import uuid
 from decimal import Decimal
 
 from apps.authentication.models import CustomUser
@@ -740,3 +741,226 @@ class StockSummaryHarianExclusionTests(APITestCase):
 
         self.assertEqual(summary["out_of_stock_count"], 0)
         self.assertEqual(list_resp.data["count"], 0)
+
+class StockOpnameSessionTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.3 — the guided Stock Opname workflow, end to
+    end: scoped session creation, count recording, variance
+    computation, real Part.current_stock correction via
+    StockAdjustment, and (the final test in this class) proof that
+    StockOpnameCompleted actually posts a correct, balanced
+    JournalEntry — not just that the model methods ran without
+    raising.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part_a = Part.objects.create(
+            organization=self.org, name="Busi", unit="pcs",
+            unit_price=Decimal("25000.00"), current_stock=Decimal("20.00"),
+        )
+        self.part_b = Part.objects.create(
+            organization=self.org, name="Filter Oli", unit="pcs",
+            unit_price=Decimal("45000.00"), current_stock=Decimal("10.00"),
+        )
+
+    def _start(self, part_ids=None):
+        return self.client.post(
+            "/api/stock-opname/",
+            {"part_ids": part_ids if part_ids is not None else [str(self.part_a.id), str(self.part_b.id)]},
+            format="json",
+        )
+
+    def test_start_session_creates_line_items_with_frozen_system_stock(self):
+        resp = self._start()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        lines = resp.data["session"]["line_items"]
+        self.assertEqual(len(lines), 2)
+        # resp.data holds PRE-RENDER Python types, not JSON — a UUID
+        # field comes back as a real uuid.UUID object here, not a
+        # string. `UUID == str` is always False in Python, so every
+        # key/comparison against an id from resp.data must go
+        # through str() explicitly — this bit me in the first draft
+        # of this exact test.
+        by_part = {str(l["part"]): l for l in lines}
+        self.assertEqual(Decimal(by_part[str(self.part_a.id)]["system_stock_at_time"]), Decimal("20.00"))
+        self.assertEqual(Decimal(by_part[str(self.part_b.id)]["system_stock_at_time"]), Decimal("10.00"))
+        self.assertIsNone(by_part[str(self.part_a.id)]["physical_count"])
+
+    def test_start_session_requires_at_least_one_part(self):
+        resp = self._start(part_ids=[])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_start_session_rejects_unknown_part_id(self):
+        resp = self._start(part_ids=[str(uuid.uuid4())])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_records_physical_count_and_computes_variance(self):
+        session_id = self._start().data["session"]["id"]
+        resp = self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # See the earlier test's comment — resp.data gives back a
+        # real uuid.UUID for "part", not a string.
+        line = next(l for l in resp.data["session"]["line_items"] if str(l["part"]) == str(self.part_a.id))
+        self.assertEqual(Decimal(line["physical_count"]), Decimal("18.00"))
+        self.assertEqual(Decimal(line["variance"]), Decimal("-2.00"))
+
+    def test_complete_blocks_when_any_line_uncounted(self):
+        session_id = self._start().data["session"]["id"]
+        # Only count ONE of the two parts.
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},
+            format="json",
+        )
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_complete_applies_stock_adjustment_correction(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "18.00"},  # shortage of 2
+                {"part_id": str(self.part_b.id), "physical_count": "12.00"},  # surplus of 2
+            ]},
+            format="json",
+        )
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["session"]["status"], "COMPLETED")
+
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("18.00"))
+        self.assertEqual(self.part_b.current_stock, Decimal("12.00"))
+
+        self.assertTrue(StockAdjustment.objects.filter(
+            part=self.part_a, reason="correction", quantity_change=Decimal("-2.00"),
+        ).exists())
+        self.assertTrue(StockAdjustment.objects.filter(
+            part=self.part_b, reason="correction", quantity_change=Decimal("2.00"),
+        ).exists())
+
+    def test_complete_zero_variance_creates_no_correction_and_posts_nothing(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "20.00"},  # matches exactly
+                {"part_id": str(self.part_b.id), "physical_count": "10.00"},  # matches exactly
+            ]},
+            format="json",
+        )
+        adjustments_before = StockAdjustment.objects.count()
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(StockAdjustment.objects.count(), adjustments_before)
+
+        from apps.core.models import Outbox
+        self.assertFalse(Outbox.objects.filter(event_type="StockOpnameCompleted").exists())
+
+    def test_complete_twice_is_blocked(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "20.00"},
+                {"part_id": str(self.part_b.id), "physical_count": "10.00"},
+            ]},
+            format="json",
+        )
+        self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_record_count_blocked_after_session_completed(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "20.00"},
+                {"part_id": str(self.part_b.id), "physical_count": "10.00"},
+            ]},
+            format="json",
+        )
+        self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        resp = self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "99.00"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_complete_posts_one_balanced_journal_entry_with_both_shortage_and_surplus(self):
+        """
+        The real end-to-end proof: a session with both a shortage and
+        a surplus produces exactly ONE JournalEntry with 4 correctly-
+        valued, balanced lines — Dr 5004 / Cr 1301 for the shortage,
+        Dr 1301 / Cr 4004 for the surplus.
+
+        Seeds a real Chart of Accounts AND AccountingPeriod first,
+        explicitly — without both, this test would hit the exact real
+        production incident this whole sprint was spent fixing
+        (missing account / missing period), just inside a test
+        instead of production. Deliberately not left to chance.
+
+        Wraps the completion call in captureOnCommitCallbacks(execute
+        =True) — EventBus.publish() defers actual handler dispatch to
+        transaction.on_commit(), which NEVER fires inside a plain
+        TestCase's own wrapping transaction (it gets rolled back, not
+        committed). Same real pitfall the roadmap already documents
+        for Appointment.convert_to_work_order()'s own regression test
+        — without this, the assertions below would silently test
+        nothing, not because the posting logic is wrong, but because
+        the event handler never actually got invoked at all.
+        """
+        from apps.accounting.coa import seed_chart_of_accounts
+        from apps.accounting.models import JournalEntry
+        from apps.accounting.periods import ensure_current_year_period
+
+        seed_chart_of_accounts(self.org)
+        ensure_current_year_period(self.org)
+
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "18.00"},  # shortage: 2 × 25000 = 50000
+                {"part_id": str(self.part_b.id), "physical_count": "12.00"},  # surplus: 2 × 45000 = 90000
+            ]},
+            format="json",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        entries = JournalEntry.objects.filter(organization=self.org, event_type="StockOpnameCompleted")
+        self.assertEqual(entries.count(), 1)
+        lines = list(entries.first().lines.all())
+        self.assertEqual(len(lines), 4)
+
+        by_code = {}
+        for line in lines:
+            by_code.setdefault(line.account.code, []).append(line)
+
+        self.assertEqual(by_code["5004"][0].debit_amount, Decimal("50000.00"))
+        self.assertEqual(by_code["4004"][0].credit_amount, Decimal("90000.00"))
+
+        # 1301 appears TWICE in this entry — once as a credit (the
+        # shortage side) and once as a debit (the surplus side),
+        # never netted together into a single line.
+        account_1301_lines = by_code["1301"]
+        self.assertEqual(len(account_1301_lines), 2)
+        credit_1301 = next(l for l in account_1301_lines if l.credit_amount)
+        debit_1301  = next(l for l in account_1301_lines if l.debit_amount)
+        self.assertEqual(credit_1301.credit_amount, Decimal("50000.00"))
+        self.assertEqual(debit_1301.debit_amount, Decimal("90000.00"))
+
+        total_debit  = sum((l.debit_amount or Decimal("0")) for l in lines)
+        total_credit = sum((l.credit_amount or Decimal("0")) for l in lines)
+        self.assertEqual(total_debit, total_credit)
