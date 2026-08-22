@@ -4,7 +4,8 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
-from .models import Part, PartUsage, StockAdjustment
+from .models import (Part, PartUsage, StockAdjustment, StockOpnameLineItem,
+                     StockOpnameSession)
 
 
 def _user_org_ids(request):
@@ -143,3 +144,51 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
         if part.organization_id not in _user_org_ids(request):
             raise serializers.ValidationError("Part tidak ditemukan.")
         return part
+
+
+class StockOpnameLineItemSerializer(serializers.ModelSerializer):
+    """
+    Sprint 7, Task 7.3. `variance` is a real computed property
+    (physical_count - system_stock_at_time), null until a count is
+    actually recorded — never defaulted to 0, matching the model's
+    own "genuinely uncounted, not zero" distinction.
+    """
+    part_name = serializers.CharField(source="part.name", read_only=True)
+    unit      = serializers.CharField(source="part.unit", read_only=True)
+    variance  = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = StockOpnameLineItem
+        fields = [
+            "id", "part", "part_name", "unit",
+            "system_stock_at_time", "physical_count", "variance",
+        ]
+        # physical_count is writable ONLY through
+        # StockOpnameLineItem.record_count() — called from the
+        # session's own PATCH view, never directly through this
+        # serializer, so it's read-only here (the view mutates the
+        # model instance, then re-serializes for the response).
+        read_only_fields = ["id", "part_name", "unit", "system_stock_at_time", "physical_count", "variance"]
+
+    def get_variance(self, obj):
+        return obj.variance
+
+
+class StockOpnameSessionSerializer(serializers.ModelSerializer):
+    """
+    Sprint 7, Task 7.3. Entirely read-only from this serializer's own
+    point of view — sessions are only ever created via
+    StockOpnameSession.start_session() and completed via .complete(),
+    both real model methods with their own validation, never via a
+    generic serializer.save().
+    """
+    line_items = StockOpnameLineItemSerializer(many=True, read_only=True)
+    created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = StockOpnameSession
+        fields = [
+            "id", "number", "status", "completed_at",
+            "created_by", "created_by_name", "line_items", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
