@@ -17,7 +17,7 @@ initial.py and apps/service/migrations/0004_... for how the move
 happens without losing or recreating any of it: a migration-state
 relabel plus a table rename, not a drop-and-recreate.
 
---- Sprint 7, Task 7.1: taxonomy + reorder cadence (added here) ---
+--- Sprint 7, Task 7.1: taxonomy + reorder cadence (Part, below) ---
 Real requirements from Made's own handwritten meeting notes, 20 Aug
 2026 — parts are genuinely different depending on type: a spare part
 is vehicle-brand-specific (a Toyota spark plug won't fit a Honda), a
@@ -27,20 +27,20 @@ different restocking behavior per part class — an expensive,
 low-turnover sensor is deliberately kept at zero stock and bought
 same-day (HARIAN), while oli/kain/lampu get checked monthly.
 
-Mutual-exclusivity between the two brand fields (a SPARE_PART row
-must never carry fluid_brand/viscosity_grade, and vice versa) is
-enforced in Part.clean() — Chris's own confirmed call, matching this
-model's existing discipline of keeping real domain invariants at the
-model layer (see minimum_stock's own docstring) rather than
-scattering them across serializers. Note DRF's ModelSerializer does
-NOT call model.clean() automatically — see PartSerializer.validate()
-in serializers.py for where this actually gets invoked.
+--- Sprint 7, Task 7.3: guided Stock Opname (bottom of this file) ---
+StockOpnameSequence / StockOpnameSession / StockOpnameLineItem — a
+real, guided physical stock count. See StockOpnameSession's own
+docstring for the scoped-session design and the complete() method's
+own docstring for how a variance becomes both a real stock correction
+AND a real, netted GL posting.
 """
 import uuid
+from decimal import Decimal
 
 from apps.core.models import TenantScopedModel
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 
 
 class Part(TenantScopedModel):
@@ -268,6 +268,13 @@ class StockAdjustment(TenantScopedModel):
     purchase, correcting a miscount, writing off damaged/lost stock.
     Without this, current_stock could only ever go down after a
     Part's initial creation value.
+
+    "correction" (reason, below) is also now the exact mechanism
+    Sprint 7's Stock Opname uses to apply a physical count back onto
+    Part.current_stock — see StockOpnameSession.complete(), which
+    creates one of these per part with a nonzero variance, reusing
+    this same proven F()-based update rather than a second, parallel
+    stock-mutation path.
     """
     REASON_CHOICES = [
         ("restock",    "Restock / Pembelian"),
@@ -310,3 +317,243 @@ class StockAdjustment(TenantScopedModel):
             Part.objects.filter(pk=self.part_id).update(
                 current_stock=models.F("current_stock") + self.quantity_change
             )
+
+
+class StockOpnameSequence(TenantScopedModel):
+    """Mirrors PurchaseOrderSequence / PurchaseReturnSequence exactly."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    last_sequence = models.PositiveIntegerField(default=0, verbose_name="Nomor Urut Terakhir")
+
+    class Meta:
+        verbose_name        = "Stock Opname Sequence"
+        verbose_name_plural  = "Stock Opname Sequences"
+        unique_together      = [("organization",)]
+
+    def __str__(self):
+        return f"{self.organization}: {self.last_sequence}"
+
+    @classmethod
+    def next_number(cls, organization):
+        seq, _ = cls.objects.select_for_update().get_or_create(
+            organization=organization, defaults={"last_sequence": 0},
+        )
+        seq.last_sequence += 1
+        seq.save(update_fields=["last_sequence"])
+        return seq.last_sequence
+
+
+class StockOpnameSession(TenantScopedModel):
+    """
+    Sprint 7, Task 7.3 — a real, guided physical stock count.
+
+    Deliberately SCOPED, not organization-wide by default — Chris and
+    Made's own confirmed call: start_session(part_ids=[...]) counts
+    only a caller-chosen subset (e.g. "today's Bulanan parts"),
+    matching the whole point of the Task 7.1 reorder-cadence tiers —
+    forcing a full-catalog recount every time would defeat them.
+
+    system_stock_at_time (on StockOpnameLineItem, below) is frozen
+    per-line at session START, not at completion — an unrelated stock
+    movement mid-session (a work order consuming a part while the
+    count is still in progress) must never corrupt the variance this
+    session is measuring. Same "capture once, don't recompute from a
+    shifting database" discipline as GoodsReceived's own amount and
+    PurchaseReturned's own debit_account_code.
+    """
+    class Status(models.TextChoices):
+        DRAFT     = "DRAFT", "Draft"
+        COMPLETED = "COMPLETED", "Selesai"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor Opname")
+    sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.DRAFT, verbose_name="Status",
+    )
+    completed_at = models.DateTimeField(null=True, blank=True, verbose_name="Waktu Selesai")
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)  # real, evolving status — like PurchaseOrder, unlike a frozen document
+
+    class Meta:
+        verbose_name        = "Stock Opname Session"
+        verbose_name_plural  = "Stock Opname Sessions"
+        ordering             = ["-created_at"]
+        unique_together      = [("organization", "number")]
+
+    def __str__(self):
+        return self.number
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        if creating and not self.number:
+            self.sequence_number = StockOpnameSequence.next_number(self.organization)
+            self.number = f"SO/{self.sequence_number:05d}"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def start_session(cls, *, organization, part_ids, created_by=None):
+        """
+        The one real entry point. part_ids must be non-empty — an
+        opname covering zero parts isn't a real session.
+
+        system_stock_at_time is captured from each Part's CURRENT
+        current_stock, right now, inside this same transaction — the
+        point-in-time snapshot the whole variance calculation is
+        measured against.
+        """
+        if not part_ids:
+            raise ValueError("Stock Opname harus mencakup minimal satu part.")
+
+        with transaction.atomic():
+            session = cls.objects.create(organization=organization, created_by=created_by)
+            parts = list(Part.objects.filter(organization=organization, id__in=part_ids))
+            found_ids = {str(p.id) for p in parts}
+            missing = {str(pid) for pid in part_ids} - found_ids
+            if missing:
+                raise ValueError(f"Part tidak ditemukan: {', '.join(sorted(missing))}")
+
+            StockOpnameLineItem.objects.bulk_create([
+                StockOpnameLineItem(
+                    organization=organization, session=session, part=part,
+                    system_stock_at_time=part.current_stock,
+                )
+                for part in parts
+            ])
+        return session
+
+    def complete(self):
+        """
+        Computes variance per line, corrects Part.current_stock via a
+        real StockAdjustment per part with a nonzero variance (same
+        proven F()-based mechanism PurchaseReturnLineItem already
+        uses), and — ONLY if the netted totals aren't both zero —
+        publishes StockOpnameCompleted. A session where every counted
+        part matched exactly is a real, valid outcome:
+        Part.current_stock needed no correction, and nothing gets
+        posted to the ledger — not an empty balanced entry, no entry
+        at all.
+
+        Requires every line in THIS session to have a real
+        physical_count already recorded — a partially-counted session
+        cannot be completed, since an uncounted line has no honest
+        variance to measure (genuinely unknown, not "zero").
+
+        Valuation basis for the event's Rupiah totals is
+        Part.unit_price — the same basis
+        apps.inventory.reports.stock_summary() already uses for every
+        other Inventory-adjacent figure in this system (Roadmap Open
+        Decision #5's known, accepted gap against the ledger's true
+        cost basis — not a new, third valuation basis introduced here).
+        """
+        if self.status == self.Status.COMPLETED:
+            raise ValueError("Sesi Stock Opname ini sudah diselesaikan.")
+
+        lines = list(self.line_items.select_related("part"))
+        uncounted = [line for line in lines if line.physical_count is None]
+        if uncounted:
+            raise ValueError(
+                f"{len(uncounted)} part dalam sesi ini belum dihitung — "
+                f"semua part harus dihitung sebelum sesi diselesaikan."
+            )
+
+        with transaction.atomic():
+            shortage_amount = Decimal("0")
+            surplus_amount  = Decimal("0")
+
+            for line in lines:
+                variance_qty = line.physical_count - line.system_stock_at_time
+                if variance_qty == 0:
+                    continue
+
+                variance_value = abs(variance_qty) * line.part.unit_price
+                if variance_qty < 0:
+                    shortage_amount += variance_value
+                else:
+                    surplus_amount += variance_value
+
+                StockAdjustment.objects.create(
+                    organization=self.organization, part=line.part,
+                    quantity_change=variance_qty, reason="correction",
+                    notes=(
+                        f"Stock Opname {self.number} — sistem: "
+                        f"{line.system_stock_at_time}, fisik: {line.physical_count}"
+                    ),
+                    created_by=self.created_by,
+                )
+
+            self.status = self.Status.COMPLETED
+            self.completed_at = timezone.now()
+            self.save(update_fields=["status", "completed_at", "updated_at"])
+
+            if shortage_amount > 0 or surplus_amount > 0:
+                from apps.core.events.bus import default_bus
+                from apps.inventory.events import StockOpnameCompleted
+                default_bus.publish(StockOpnameCompleted(
+                    organization_id=self.organization.id,
+                    stock_opname_session_id=self.id,
+                    shortage_amount=shortage_amount,
+                    surplus_amount=surplus_amount,
+                    line_item_count=len(lines),
+                ))
+
+        return self
+
+
+class StockOpnameLineItem(TenantScopedModel):
+    """
+    One part being counted in one StockOpnameSession.
+    system_stock_at_time is a frozen snapshot (see StockOpnameSession
+    docstring); physical_count starts null — genuinely uncounted, not
+    defaulted to 0, since 0 would be indistinguishable from "we
+    counted it and found nothing."
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        StockOpnameSession, on_delete=models.CASCADE, related_name="line_items",
+        verbose_name="Sesi Stock Opname",
+    )
+    part = models.ForeignKey(
+        Part, on_delete=models.PROTECT, related_name="stock_opname_lines",
+        verbose_name="Part",
+    )
+    system_stock_at_time = models.DecimalField(
+        max_digits=10, decimal_places=2, verbose_name="Stok Sistem Saat Mulai",
+    )
+    physical_count = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Hasil Hitung Fisik",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name        = "Stock Opname Line Item"
+        verbose_name_plural  = "Stock Opname Line Items"
+        ordering             = ["created_at"]
+        unique_together      = [("session", "part")]
+
+    def __str__(self):
+        return f"{self.part.name} — {self.session.number}"
+
+    def _resolve_organization(self):
+        return self.session.organization
+
+    @property
+    def variance(self):
+        if self.physical_count is None:
+            return None
+        return self.physical_count - self.system_stock_at_time
+
+    def record_count(self, physical_count):
+        """
+        The one real mutation point for entering a count — used by
+        the PATCH endpoint. Blocked once the parent session is
+        already COMPLETED, same "frozen once real" discipline as
+        every other finalized document in this codebase.
+        """
+        if self.session.status == StockOpnameSession.Status.COMPLETED:
+            raise ValueError("Sesi Stock Opname ini sudah diselesaikan — hasil hitung tidak bisa diubah.")
+        self.physical_count = physical_count
+        self.save(update_fields=["physical_count", "updated_at"])
