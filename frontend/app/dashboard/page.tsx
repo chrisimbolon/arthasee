@@ -2,12 +2,12 @@
 // =============================================================================
 // === frontend/app/dashboard/page.tsx ===
 // =============================================================================
-import { accountingApi, DashboardFinancialSummaryResponse } from "@/lib/api/accounting";
+import { accountingApi, DashboardFinancialSummaryResponse, ProfitLossComparisonResponse, ReportDelta } from "@/lib/api/accounting";
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { ActiveJob, activeJobsApi, dashboardApi, DashboardSummary } from "@/lib/api/workorders";
 import {
   AlertTriangle, Car, CheckCircle2, Clock, Landmark, Layers,
-  Loader2, Users, Wallet, Wrench,
+  Loader2, TrendingDown, TrendingUp, Users, Wallet, Wrench,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -25,6 +25,27 @@ function toNumber(value: string | number): number {
 
 function formatRupiah(value: string | number): string {
   return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(toNumber(value));
+}
+
+// Sprint 7, Task 7.4 — one reusable delta caption for the Net Profit
+// card's three sub-metrics (Revenue, Gross Profit, Net Income).
+// change_pct is null when the PRIOR period was exactly zero (see
+// reports.py's own profit_and_loss_comparison() docstring) — falls
+// back to showing the raw Rupiah change instead of a percentage in
+// that case, never a fabricated/undefined number.
+function DeltaCaption({ delta }: { delta: ReportDelta }) {
+  const changeNum = toNumber(delta.change);
+  const pct = delta.change_pct === null ? null : toNumber(delta.change_pct);
+  const positive = changeNum >= 0;
+  const Icon = positive ? TrendingUp : TrendingDown;
+  const color = positive ? "var(--workshop)" : "var(--danger)";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 600, color }}>
+      <Icon size={12} />
+      {pct === null ? formatRupiah(Math.abs(changeNum)) : `${Math.abs(pct).toFixed(1)}%`}
+      <span style={{ color: "var(--steel)", fontWeight: 400 }}>vs 90 hari sebelumnya</span>
+    </span>
+  );
 }
 
 export default function DashboardOverviewPage() {
@@ -58,6 +79,16 @@ export default function DashboardOverviewPage() {
   const [financialSummary, setFinancialSummary] = useState<DashboardFinancialSummaryResponse | null>(null);
   const [financialSummaryLoading, setFinancialSummaryLoading] = useState(true);  
 
+  // Sprint 7, Task 7.4 — Chris and Made's own confirmed call: no new
+  // calculation engine, reuses profit_and_loss_comparison() exactly
+  // as-is (already live since Phase 5, Task 5.5), the dashboard card
+  // just passes explicit since/as_of 90 days apart rather than the
+  // endpoint gaining a new "quarterly" preset param. Own fetch, own
+  // loading state — a real point-in-time comparison, not tied to the
+  // operational `period` toggle below.
+  const [netProfit, setNetProfit] = useState<ProfitLossComparisonResponse | null>(null);
+  const [netProfitLoading, setNetProfitLoading] = useState(true);
+
   useEffect(() => {
     Promise.all([customersApi.list(), vehiclesApi.list(), vehiclesApi.list({ dueForService: true })])
       .then(([c, v, due]) => { setCustomers(c); setVehicles(v); setDueVehicles(due); })
@@ -85,6 +116,27 @@ export default function DashboardOverviewPage() {
       .then(setFinancialSummary)
       .finally(() => setFinancialSummaryLoading(false));
   }, []);  
+
+  useEffect(() => {
+    // Local date components, deliberately NOT toISOString().slice(0,10)
+    // — that method converts to UTC first, which can silently shift
+    // the computed date by one day depending on time-of-day and
+    // timezone (this shop is UTC+7). Low-stakes for a 90-day window,
+    // but cheap to get right rather than risk it.
+    const toISO = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+    const today = new Date();
+    const ninetyDaysAgo = new Date(today);
+    ninetyDaysAgo.setDate(today.getDate() - 90);
+
+    accountingApi.profitLossComparison(toISO(ninetyDaysAgo), toISO(today))
+      .then(setNetProfit)
+      .finally(() => setNetProfitLoading(false));
+  }, []);
 
   if (loading) {
     return <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)" }}><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Memuat…</div>;
@@ -189,6 +241,47 @@ export default function DashboardOverviewPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Sprint 7, Task 7.4 — Made and Chris's own confirmed
+          placement: alongside the existing Dashboard Financial
+          Summary cards from Phase 5, not the Laporan Keuangan
+          reports page. gross_profit_note is surfaced here too — the
+          same caveat Task 4.1's own roadmap note required stay
+          visible in the UI wherever gross_profit appears, not
+          dropped just because this is a compact dashboard card. */}
+      {!netProfitLoading && netProfit && (
+        <div className="card" style={{ marginBottom: 32 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+            <TrendingUp size={18} style={{ color: "var(--workshop)" }} />
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--steel)", textTransform: "uppercase" }}>Laba Bersih (90 Hari Terakhir)</span>
+          </div>
+          <div
+            className="mono"
+            style={{ fontSize: 32, fontWeight: 600, marginBottom: 4, color: toNumber(netProfit.current.net_income) < 0 ? "var(--danger)" : "var(--ink)" }}
+          >
+            {formatRupiah(netProfit.current.net_income)}
+          </div>
+          <DeltaCaption delta={netProfit.net_income_delta} />
+          <p style={{ fontSize: 11, color: "var(--steel-lt)", marginTop: 8, marginBottom: 18 }}>{netProfit.current.gross_profit_note}</p>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
+            <div>
+              <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Pendapatan</div>
+              <div className="mono" style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>{formatRupiah(netProfit.current.total_revenue)}</div>
+              <DeltaCaption delta={netProfit.revenue_delta} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Laba Kotor</div>
+              <div className="mono" style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>{formatRupiah(netProfit.current.gross_profit)}</div>
+              <DeltaCaption delta={netProfit.gross_profit_delta} />
+            </div>
+          </div>
+
+          <Link href="/dashboard/accounting/reports" style={{ display: "inline-block", fontSize: 12, color: "var(--rust)", marginTop: 16 }}>
+            Lihat laporan lengkap →
+          </Link>
+        </div>
       )}
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
