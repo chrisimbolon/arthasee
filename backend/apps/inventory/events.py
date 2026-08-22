@@ -30,6 +30,13 @@ reach the ledger. Not wired here because no live API endpoint
 creating PartUsage directly has been confirmed to exist in
 production — only direct-ORM test setup in apps.invoicing.tests.
 Needs a direct answer before Sprint 2 is considered complete.
+
+--- Sprint 7, Task 7.3: StockOpnameCompleted (added here) ---
+UNLIKE PartConsumed above, this event IS published from directly
+inside this app — StockOpnameSession.complete(), in this same app's
+models.py — since a Stock Opname session's whole lifecycle (start,
+record counts, complete) genuinely lives in apps.inventory, not
+borrowed from another app's trigger point the way PartConsumed is.
 """
 import uuid
 from dataclasses import dataclass, field
@@ -63,3 +70,41 @@ class PartConsumed(DomainEvent):
     unit_price_at_time: Decimal
     amount: Decimal
     event_type: str = field(init=False, default="PartConsumed", kw_only=True)
+
+
+@dataclass(frozen=True)
+class StockOpnameCompleted(DomainEvent):
+    """
+    Fired once per completed StockOpnameSession — a real physical
+    count reconciliation, not a per-part event. Sprint 7, Task 7.3.
+    Chris and Made's own confirmed call: ONE session, ONE netted
+    posting — never one journal entry per counted part.
+
+    shortage_amount / surplus_amount are Rupiah totals, already
+    netted across every counted part in this session and frozen at
+    completion time inside StockOpnameSession.complete()'s own
+    transaction (Roadmap Principle #9) — valued at Part.unit_price,
+    the same basis apps.inventory.reports.stock_summary() already
+    uses for every other Inventory-adjacent figure in this system
+    (see Roadmap Open Decision #5 for the known, accepted gap against
+    the ledger's true cost basis — deliberately not a new, third
+    valuation basis introduced just for this event).
+
+    Posting rule (Roadmap v2.5): a SINGLE JournalEntry, up to 4 lines
+    — Dr Inventory Shrinkage (5004) / Cr Inventory (1301) for
+    shortage_amount, Dr Inventory (1301) / Cr Inventory Opname
+    Surplus (4004) for surplus_amount. posting_engine.py's own
+    _lines() helper drops whichever pair is zero — a shortage-only
+    session naturally collapses to 2 lines, a surplus-only session to
+    the other 2, a session with both to all 4.
+
+    This event is deliberately never published if BOTH totals are
+    zero (every counted part matched exactly) — see
+    StockOpnameSession.complete()'s own guard. A zero-variance
+    session is a real, valid outcome, not a gap.
+    """
+    stock_opname_session_id: uuid.UUID
+    shortage_amount: Decimal
+    surplus_amount: Decimal
+    line_item_count: int
+    event_type: str = field(init=False, default="StockOpnameCompleted", kw_only=True)
