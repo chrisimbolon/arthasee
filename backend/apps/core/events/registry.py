@@ -41,6 +41,26 @@ real type objects), and converts each payload string value back to
 its real type only where the field's declared type says it should be
 one of the types DjangoJSONEncoder is known to stringify. A field
 genuinely meant to stay a string is never touched.
+
+--- 2026-08-22: registry completed to cover every real event type ---
+Originally shipped covering only the 4 event types that had actually
+FAILED back on 2026-08-09 (PartConsumed, WorkOrderCompleted,
+InvoiceIssued, PaymentReceived) — deliberately not guessed beyond
+that without verifying each event class's real import path first.
+
+A second, real production incident (2026-08-22, StockOpnameCompleted
+failing on missing COA accounts 4004/5004) surfaced 4 MORE failed
+event types this registry had never covered: GoodsReceived,
+SupplierInvoiceReceived, SupplierPaymentMade, and StockOpnameCompleted
+itself — replay_failed_events raised KeyError trying to reconstruct
+them. Rather than guess at their import paths in the moment, they're
+sourced from apps.accounting.posting_engine.py's own real, applied
+module-level imports — the one place in this codebase that already
+imports every single event type the whole system's posting engine
+handles, verified rather than assumed. PurchaseReturned is included
+too, for the same reason, even though it hasn't failed yet — this
+registry's whole job is to never be caught short again the way it
+was on both 08-09 and 08-22.
 """
 from __future__ import annotations
 
@@ -64,19 +84,19 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
     (e.g. the fixed COA blueprint) rather than scanning every domain
     app's events.py for DomainEvent subclasses at runtime.
 
-    Deliberately covers only the event types actually seen FAILED so
-    far — PartConsumed, WorkOrderCompleted, InvoiceIssued,
-    PaymentReceived — rather than guessing at every event class's
-    exact import path across every domain app without having
-    verified each one directly. Raises a clear, actionable error for
-    anything not yet registered, rather than silently mis-mapping —
-    extending this for a future failure in a different domain is a
+    Covers every event type apps.accounting.posting_engine.py itself
+    handles — sourced directly from that file's own real, applied
+    module-level imports, not guessed. Raises a clear, actionable
+    error for anything not yet registered, rather than silently
+    mis-mapping — extending this for a genuinely new event type is a
     one-line addition once that event class's real file is confirmed
-    the same way these four were.
+    the same way every entry below was.
     """
-    from apps.inventory.events import PartConsumed
+    from apps.inventory.events import PartConsumed, StockOpnameCompleted
     from apps.invoicing.events import InvoiceIssued
-    from apps.payments.events import PaymentReceived
+    from apps.payments.events import PaymentReceived, SupplierPaymentMade
+    from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
+                                        SupplierInvoiceReceived)
     from apps.workorders.events import WorkOrderCompleted
 
     registry: dict[str, type[DomainEvent]] = {
@@ -84,6 +104,11 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
         "WorkOrderCompleted": WorkOrderCompleted,
         "InvoiceIssued": InvoiceIssued,
         "PaymentReceived": PaymentReceived,
+        "GoodsReceived": GoodsReceived,
+        "SupplierInvoiceReceived": SupplierInvoiceReceived,
+        "SupplierPaymentMade": SupplierPaymentMade,
+        "PurchaseReturned": PurchaseReturned,
+        "StockOpnameCompleted": StockOpnameCompleted,
     }
     try:
         return registry[event_type]
