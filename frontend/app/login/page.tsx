@@ -37,11 +37,11 @@ export default function LoginPage() {
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              marginBottom: 36,
+              marginBottom: 0,
             }}
           >
             <Image
-              src="/Logo-teks.png"
+              src="/Logo-teks-dark.png"
               alt="Arthasee"
               width={150}
               height={40}
