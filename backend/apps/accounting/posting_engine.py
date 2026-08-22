@@ -21,7 +21,7 @@ incidental reach into another domain.
 """
 from decimal import Decimal
 
-from apps.inventory.events import PartConsumed
+from apps.inventory.events import PartConsumed, StockOpnameCompleted
 from apps.invoicing.events import InvoiceIssued
 from apps.payments.events import PaymentReceived, SupplierPaymentMade
 from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
@@ -50,6 +50,13 @@ def _lines(*entries):
     POSITIVE, not merely set; a $0 credit line satisfies neither
     branch of that constraint and would raise IntegrityError if
     passed through to JournalEntry.post() as-is.
+
+    Sprint 7, Task 7.3 also leans on this directly for
+    StockOpnameCompleted's own single-entry, up-to-4-line shape — a
+    shortage-only session naturally collapses to 2 lines, a
+    surplus-only session to the other 2, a session with both to all
+    4, entirely via this same existing filter. No new mechanism
+    needed for that event's "netted, not per-part" posting shape.
     """
     return [e for e in entries if e["amount"] > Decimal("0")]
 
@@ -148,6 +155,25 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": "2001",                                   "side": "debit",  "amount": event.amount},
                 {"account_code": cash_or_bank_account_code(event.method),  "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, StockOpnameCompleted):
+        # ONE JournalEntry, up to 4 lines — Chris and Made's own
+        # confirmed call (Sprint 7, Task 7.3), not one entry per
+        # counted part and not two separate entries for shortage vs
+        # surplus. _lines() drops whichever pair is zero: a
+        # shortage-only session collapses to 2 lines, a surplus-only
+        # session to the other 2, a session with both to all 4 — the
+        # existing filter does this for free, no special-casing
+        # needed here beyond listing all 4 candidate lines.
+        return {
+            "memo": f"Stock opname completed — session {event.stock_opname_session_id}",
+            "lines": _lines(
+                {"account_code": "5004", "side": "debit",  "amount": event.shortage_amount},
+                {"account_code": "1301", "side": "credit", "amount": event.shortage_amount},
+                {"account_code": "1301", "side": "debit",  "amount": event.surplus_amount},
+                {"account_code": "4004", "side": "credit", "amount": event.surplus_amount},
             ),
         }
 

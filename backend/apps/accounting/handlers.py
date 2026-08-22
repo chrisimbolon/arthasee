@@ -10,7 +10,8 @@ Two handlers, two bounded concerns — matching EventHandler's own
   - AccountingEventHandler posts NEW economic facts (PartConsumed,
     WorkOrderCompleted, InvoiceIssued, PaymentReceived, and — Sprint
     3 — GoodsReceived, SupplierInvoiceReceived, SupplierPaymentMade,
-    and — Retur Pembelian v1 — PurchaseReturned) via
+    and — Retur Pembelian v1 — PurchaseReturned, and — Sprint 7,
+    Task 7.3 — StockOpnameCompleted) via
     posting_engine.py/journal_generator.py.
   - CancellationEventHandler reverses PREVIOUSLY posted facts
     (InvoiceCancelled, InvoiceRefunded) via cancellations.py — routed
@@ -23,6 +24,12 @@ posting at the account level — architecturally it's a genuinely NEW
 posting rule living in posting_engine.py (same as GoodsReceived
 itself), not a reversal-of-a-specific-prior-entry the way
 InvoiceCancelled/InvoiceRefunded are. Same category, same handler.
+
+StockOpnameCompleted is the same story — it's a NEW posting rule
+(the netted result of a physical count), not a reversal of any prior
+specific journal entry, even though its whole purpose is correcting
+the books. Same category as GoodsReceived/PurchaseReturned, same
+handler.
 
 No purchasing-domain CANCELLATION events exist yet — "un-receive
 goods entirely" or "cancel a supplier invoice" were never scoped;
@@ -40,7 +47,7 @@ class AccountingEventHandler(EventHandler):
     handles = (
         "PartConsumed", "WorkOrderCompleted", "InvoiceIssued", "PaymentReceived",
         "GoodsReceived", "SupplierInvoiceReceived", "SupplierPaymentMade",
-        "PurchaseReturned",
+        "PurchaseReturned", "StockOpnameCompleted",
     )
 
     def handle(self, event: DomainEvent) -> None:
