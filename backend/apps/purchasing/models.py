@@ -367,6 +367,20 @@ class GoodsReceivedNote(TenantScopedModel):
         warning — that's the normal partial-delivery case this whole
         feature exists to track, and is what drives the PO's own
         status recompute below.
+
+        Price variance — deliberately a WARNING, not a third hard
+        block: if the entered unit_cost differs from the PO line's
+        own unit_cost (the price agreed/expected at order time),
+        that's surfaced back to the caller via a transient
+        `price_variance_warnings` list attribute set on the returned
+        GRN instance — never persisted, no new DB column. Made is
+        both the one who creates the PO and the one who records the
+        receipt in this shop; a hard block or approval-token system
+        would be real friction solving a multi-employee fraud
+        scenario that doesn't exist here yet. Same "flag it, don't
+        block it" instinct already proven elsewhere in this codebase
+        — PartUsageSerializer's own negative-stock warning,
+        ManualJournalListCreateView's own control-account warning.
         """
         if purchase_order.status not in (PurchaseOrder.Status.ORDERED, PurchaseOrder.Status.PARTIALLY_RECEIVED):
             raise ValueError(
@@ -384,9 +398,11 @@ class GoodsReceivedNote(TenantScopedModel):
                 reference=reference, notes=notes, received_by=received_by,
             )
             line_items = []
+            price_variance_warnings = []
             for line in lines:
                 po_line = line["purchase_order_line_item"]
                 quantity = line["quantity"]
+                entered_unit_cost = line["unit_cost"]
 
                 if po_line.purchase_order_id != purchase_order.id:
                     raise ValueError(
@@ -400,11 +416,16 @@ class GoodsReceivedNote(TenantScopedModel):
                         f"diminta: {quantity}). Ubah jumlah PO terlebih dahulu jika memang "
                         f"perlu menerima lebih banyak."
                     )
+                if entered_unit_cost != po_line.unit_cost:
+                    price_variance_warnings.append(
+                        f"Harga Beli '{po_line.part.name}' (Rp{entered_unit_cost:,.0f}) berbeda "
+                        f"dari PO {purchase_order.number} (Rp{po_line.unit_cost:,.0f})."
+                    )
 
                 line_items.append(GoodsReceivedNoteLineItem.objects.create(
                     organization=organization, goods_received_note=grn,
                     purchase_order_line_item=po_line, part=po_line.part,
-                    quantity=quantity, unit_cost=line["unit_cost"],
+                    quantity=quantity, unit_cost=entered_unit_cost,
                 ))
                 # Each GoodsReceivedNoteLineItem.save() above already
                 # created its own StockAdjustment(reason="restock").
@@ -436,6 +457,7 @@ class GoodsReceivedNote(TenantScopedModel):
                 line_item_count=len(line_items),
             ))
 
+        grn.price_variance_warnings = price_variance_warnings
         return grn
 
 
