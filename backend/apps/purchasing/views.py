@@ -187,13 +187,15 @@ class GoodsReceivedNoteListCreateView(TenantScopedAPIView):
     POST /api/goods-received-notes/  — record a delivery against an
     existing Purchase Order
 
-    All real logic (the two hard-block guardrails, the PO status
-    recompute, the real StockAdjustment side effect per line, the
-    GoodsReceived event) lives in GoodsReceivedNote.receive() — this
-    view is thin, and its only real job beyond calling that method is
-    resolving `purchase_order` and every line's
-    `purchase_order_line_item` against the ACTING organization
-    specifically, never trusting the raw UUIDs a request supplies.
+    All real logic (the two hard-block guardrails, the price-variance
+    warning, the PO status recompute, the real StockAdjustment side
+    effect per line, the GoodsReceived event) lives in
+    GoodsReceivedNote.receive() — this view is thin, and its only
+    real job beyond calling that method is resolving `purchase_order`
+    and every line's `purchase_order_line_item` against the ACTING
+    organization specifically, never trusting the raw UUIDs a request
+    supplies, plus surfacing receive()'s own price_variance_warnings
+    attribute in the response.
     """
     model = GoodsReceivedNote
 
@@ -253,7 +255,16 @@ class GoodsReceivedNoteListCreateView(TenantScopedAPIView):
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
-            {"success": True, "goods_received_note": GoodsReceivedNoteSerializer(grn).data},
+            {
+                "success": True,
+                "goods_received_note": GoodsReceivedNoteSerializer(grn).data,
+                # Real, non-blocking price-variance warning — see
+                # GoodsReceivedNote.receive()'s own docstring. Empty
+                # list, never absent, when there's nothing to flag —
+                # same "warnings key always present" contract already
+                # used by apps.inventory.views.PartUsageListView.
+                "warnings": getattr(grn, "price_variance_warnings", []),
+            },
             status=status.HTTP_201_CREATED,
         )
 
