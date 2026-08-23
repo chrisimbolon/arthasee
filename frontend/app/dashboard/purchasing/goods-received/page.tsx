@@ -1,14 +1,16 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/purchasing/goods-received/page.tsx ===
-// Full rewrite — GRN creation is now driven by an existing,
-// receivable PurchaseOrder's own line items, not a free-form
-// supplier+part picker. That whole design assumption is gone: every
-// GRN must trace back to an authorized PO.
+// Real, non-blocking price-variance signal, layered exactly like the
+// HARIAN guard from Sprint 7: a LIVE client-side comparison as staff
+// types (immediate feedback, same instinct as Stock Opname's live
+// variance preview), plus the backend's own authoritative
+// price_variance_warnings — surfaced together, since either layer
+// alone can miss something the other catches.
 // =============================================================================
 import PurchasingSubNav from "@/components/purchasing/PurchasingSubNav";
 import { GoodsReceivedNote, goodsReceivedNotesApi, PurchaseOrder, purchaseOrdersApi } from "@/lib/api/purchasing";
-import { Loader2, Plus, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -17,8 +19,9 @@ function toNumber(value: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function formatRupiah(value: string): string {
-  return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(toNumber(value));
+function formatRupiah(value: string | number): string {
+  const n = typeof value === "string" ? toNumber(value) : value;
+  return new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n);
 }
 
 interface LineState {
@@ -37,6 +40,11 @@ function CreateGrnModal({
   const [lineInputs, setLineInputs] = useState<Record<string, LineState>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set only after a successful save that came back with real
+  // warnings — the modal stays open showing them instead of closing
+  // immediately, same "show a real confirm screen before dismissing"
+  // language Stock Opname's own "Sesi Selesai" screen already uses.
+  const [savedWithWarnings, setSavedWithWarnings] = useState<string[] | null>(null);
 
   const selectedPo = purchaseOrders.find((p) => p.id === poId) ?? null;
 
@@ -72,7 +80,7 @@ function CreateGrnModal({
     if (!selectedPo) return;
     setSaving(true); setError(null);
     try {
-      const grn = await goodsReceivedNotesApi.create({
+      const { grn, warnings } = await goodsReceivedNotesApi.create({
         purchase_order: selectedPo.id,
         reference: reference || undefined,
         notes: notes || undefined,
@@ -81,8 +89,14 @@ function CreateGrnModal({
           quantity: toNumber(input.quantity), unit_cost: toNumber(input.unit_cost),
         })),
       });
+      // The GRN is already saved at this point regardless of
+      // warnings — this is informational, never a rejection.
       onCreated(grn);
-      onClose();
+      if (warnings.length > 0) {
+        setSavedWithWarnings(warnings);
+      } else {
+        onClose();
+      }
     } catch (err) {
       // The backend's own error messages for both hard blocks
       // (over-receiving, unlisted item) are already precise —
@@ -93,6 +107,33 @@ function CreateGrnModal({
       setSaving(false);
     }
   };
+
+  if (savedWithWarnings) {
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+        <div className="card" style={{ width: 480, background: "var(--paper-3)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+            <CheckCircle2 size={20} style={{ color: "var(--workshop)" }} />
+            <h2 style={{ fontSize: 18, fontWeight: 700 }}>Penerimaan Tersimpan</h2>
+          </div>
+          <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 16 }}>
+            Barang sudah tercatat dan stok sudah diperbarui. Perhatikan hal berikut sebelum melanjutkan:
+          </p>
+          <div style={{ background: "var(--hazard-light)", borderRadius: 6, padding: 14, marginBottom: 20 }}>
+            {savedWithWarnings.map((w, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "var(--hazard-dark)", marginBottom: i < savedWithWarnings.length - 1 ? 8 : 0 }}>
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+                <span>{w}</span>
+              </div>
+            ))}
+          </div>
+          <button className="btn-rust" style={{ width: "100%", justifyContent: "center" }} onClick={onClose}>
+            Tutup
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
@@ -134,29 +175,48 @@ function CreateGrnModal({
               <div className="label" style={{ marginBottom: 10 }}>Item — Jumlah Diterima</div>
               {selectedPo.line_items.map((li) => {
                 const input = lineInputs[li.id] ?? { quantity: "", unit_cost: li.unit_cost };
+                // Live, client-side comparison — immediate feedback
+                // as staff types, before ever hitting Simpan. The
+                // backend's own price_variance_warnings (shown after
+                // save, above) is the authoritative fallback in case
+                // this client-side check is ever bypassed or missed.
+                const enteredCost = toNumber(input.unit_cost);
+                const poCost = toNumber(li.unit_cost);
+                const priceDiffers = input.unit_cost !== "" && enteredCost !== poCost;
                 return (
-                  <div key={li.id} style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10 }}>
-                    <div style={{ flex: 2 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>{li.part_name}</div>
-                      <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Sisa PO: {li.quantity_outstanding}</div>
+                  <div key={li.id} style={{ marginBottom: 14 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                      <div style={{ flex: 2 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>{li.part_name}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Sisa PO: {li.quantity_outstanding}</div>
+                      </div>
+                      <div style={{ width: 100 }}>
+                        <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Jumlah</div>
+                        <input
+                          className="input" type="number" min={0}
+                          value={input.quantity}
+                          onChange={(e) => updateLine(li.id, { quantity: e.target.value })}
+                          placeholder="0"
+                        />
+                      </div>
+                      <div style={{ width: 130 }}>
+                        <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>
+                          Harga Beli <span style={{ color: "var(--steel-lt)" }}>(PO: {formatRupiah(li.unit_cost)})</span>
+                        </div>
+                        <input
+                          className="input" type="number" min={0}
+                          style={priceDiffers ? { borderColor: "var(--hazard-dark)" } : undefined}
+                          value={input.unit_cost}
+                          onChange={(e) => updateLine(li.id, { unit_cost: e.target.value })}
+                        />
+                      </div>
                     </div>
-                    <div style={{ width: 100 }}>
-                      <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Jumlah</div>
-                      <input
-                        className="input" type="number" min={0}
-                        value={input.quantity}
-                        onChange={(e) => updateLine(li.id, { quantity: e.target.value })}
-                        placeholder="0"
-                      />
-                    </div>
-                    <div style={{ width: 130 }}>
-                      <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Harga Beli</div>
-                      <input
-                        className="input" type="number" min={0}
-                        value={input.unit_cost}
-                        onChange={(e) => updateLine(li.id, { unit_cost: e.target.value })}
-                      />
-                    </div>
+                    {priceDiffers && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--hazard-dark)", marginTop: 6 }}>
+                        <AlertTriangle size={12} />
+                        Berbeda dari harga PO ({formatRupiah(li.unit_cost)}) — akan tetap tersimpan, hanya sebagai catatan.
+                      </div>
+                    )}
                   </div>
                 );
               })}
