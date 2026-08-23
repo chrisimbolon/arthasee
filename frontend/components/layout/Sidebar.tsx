@@ -6,6 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
 import { Activity, Briefcase, Calculator, Calendar, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, ShoppingCart, TrendingUp, Users, Wrench } from "lucide-react";
 // import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -52,10 +53,32 @@ export default function Sidebar() {
 
   return (
     <aside style={{ width: 240, minHeight: "100vh", background: "var(--paper-3)", borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", padding: "22px 16px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px", marginBottom: 28 }}>
+        
+  
+        <div
+          style={{
+          display: "flex",
+          alignItems: "center",
+          padding: "0 8px",
+          marginBottom: 28,
+          }}
+        >
+        <Image
+            src="/Logo-teks-dark.png"
+            alt="Arthasee"
+    width={150}
+    height={40}
+    priority
+    style={{
+      width: "150px",
+      height: "auto",
+    }}
+  />
+</div>      
+      {/* <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px", marginBottom: 28 }}>
         <div style={{ width: 30, height: 30, background: "var(--ink)", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--paper)", fontFamily: "'Big Shoulders Display', sans-serif", fontWeight: 900, fontSize: 16, transform: "rotate(-2deg)" }}>A</div>
         <div className="display" style={{ fontSize: 18 }}>Arthasee</div>
-      </div>
+      </div> */}
 
       {orgName && (
         <div style={{ padding: "10px 12px", background: "var(--paper)", borderRadius: 6, marginBottom: 20 }}>
