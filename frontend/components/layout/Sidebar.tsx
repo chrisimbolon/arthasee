@@ -53,8 +53,6 @@ export default function Sidebar() {
 
   return (
     <aside style={{ width: 240, minHeight: "100vh", background: "var(--paper-3)", borderRight: "1px solid var(--line)", display: "flex", flexDirection: "column", padding: "22px 16px" }}>
-        
-  
         <div
           style={{
           display: "flex",
@@ -66,19 +64,15 @@ export default function Sidebar() {
         <Image
             src="/Logo-teks-dark.png"
             alt="Arthasee"
-    width={150}
-    height={40}
-    priority
-    style={{
-      width: "150px",
-      height: "auto",
-    }}
-  />
-</div>      
-      {/* <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px", marginBottom: 28 }}>
-        <div style={{ width: 30, height: 30, background: "var(--ink)", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--paper)", fontFamily: "'Big Shoulders Display', sans-serif", fontWeight: 900, fontSize: 16, transform: "rotate(-2deg)" }}>A</div>
-        <div className="display" style={{ fontSize: 18 }}>Arthasee</div>
-      </div> */}
+            width={150}
+            height={40}
+            priority
+            style={{
+              width: "150px",
+              height: "auto",
+            }}
+        />
+      </div>      
 
       {orgName && (
         <div style={{ padding: "10px 12px", background: "var(--paper)", borderRadius: 6, marginBottom: 20 }}>
