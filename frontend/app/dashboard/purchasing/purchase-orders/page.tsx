@@ -1,10 +1,21 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/purchasing/purchase-orders/page.tsx ===
+// Real gap, found via a screenshot review: the Part dropdown in
+// "Buat Purchase Order" showed only part.name — no category. Zero
+// ambiguity today (every part name is still unique), but the moment
+// two parts share a name across different vehicle brands (two
+// "Kanvas Rem" rows, Toyota vs Honda), this dropdown would show two
+// identical-looking options with no way to tell them apart. Fixed
+// proactively, reusing the exact same category-label logic already
+// proven on the Spare Parts & Fluids page's own CategoryCell —
+// duplicated here as a plain-string helper (an <option> can't render
+// JSX), same "small local helper, not a shared util" convention this
+// file already uses for toNumber()/formatRupiah().
 // =============================================================================
 import PurchasingSubNav from "@/components/purchasing/PurchasingSubNav";
 import { PurchaseOrder, purchaseOrdersApi, Supplier, suppliersApi } from "@/lib/api/purchasing";
-import { Part, partsApi } from "@/lib/api/service";
+import { FluidBrand, Part, partsApi, VehicleBrand, ViscosityGrade } from "@/lib/api/service";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
@@ -22,6 +33,41 @@ function statusPillType(status: PurchaseOrder["status"]): string {
   if (status === "CANCELLED") return "due";
   if (status === "FULLY_RECEIVED") return "ok";
   return "soon"; // DRAFT, ORDERED, PARTIALLY_RECEIVED
+}
+
+// Mirrors apps/inventory/models.py's TextChoices display labels
+// exactly — same source of truth as the Spare Parts & Fluids page's
+// own label maps (Sprint 7, Task 7.1/7.2).
+const VEHICLE_BRAND_LABELS: Record<Exclude<VehicleBrand, "">, string> = {
+  TOYOTA: "Toyota", HONDA: "Honda", DAIHATSU: "Daihatsu",
+  SUZUKI: "Suzuki", MITSUBISHI: "Mitsubishi",
+};
+const FLUID_BRAND_LABELS: Record<Exclude<FluidBrand, "">, string> = {
+  SHELL: "Shell", CASTROL: "Castrol", REPSOL: "Repsol",
+  FASTRON: "Fastron", PERTAMINA_MEDITRAN: "Pertamina Meditran",
+};
+const VISCOSITY_LABELS: Record<Exclude<ViscosityGrade, "">, string> = {
+  "10W-40": "10W-40", "5W-30": "5W-30",
+  SAE_90: "Oli 90 (SAE 90)", SAE_140: "Oli 140 (SAE 140)",
+};
+
+// Plain-string equivalent of the inventory page's CategoryCell — an
+// <option> can only render text, not JSX. Returns "" (no category
+// suffix at all) for an uncategorized part, matching the same
+// "honest blank, not a guessed default" state Task 7.1's own
+// migration backfill left existing parts in.
+function partCategoryLabel(part: Part): string {
+  if (part.item_type === "FLUID") {
+    const brand = part.fluid_brand ? FLUID_BRAND_LABELS[part.fluid_brand] : null;
+    const grade = part.viscosity_grade ? VISCOSITY_LABELS[part.viscosity_grade] : null;
+    return [brand, grade].filter(Boolean).join(" • ");
+  }
+  return part.vehicle_brand ? VEHICLE_BRAND_LABELS[part.vehicle_brand] : "";
+}
+
+function partOptionLabel(part: Part): string {
+  const category = partCategoryLabel(part);
+  return category ? `${part.name} — ${category}` : part.name;
 }
 
 interface LineInput {
@@ -114,7 +160,7 @@ function CreatePOModal({
                 {i === 0 && <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Part</div>}
                 <select className="input" value={line.part_id} onChange={(e) => updateLine(i, { part_id: e.target.value })}>
                   <option value="">Pilih part…</option>
-                  {parts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {parts.map((p) => <option key={p.id} value={p.id}>{partOptionLabel(p)}</option>)}
                 </select>
               </div>
               <div style={{ width: 90 }}>
