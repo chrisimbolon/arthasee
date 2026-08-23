@@ -417,9 +417,11 @@ class GoodsReceivedNote(TenantScopedModel):
                         f"perlu menerima lebih banyak."
                     )
                 if entered_unit_cost != po_line.unit_cost:
+                    entered_fmt = f"{entered_unit_cost:,.0f}".replace(",", ".")
+                    po_fmt = f"{po_line.unit_cost:,.0f}".replace(",", ".")
                     price_variance_warnings.append(
-                        f"Harga Beli '{po_line.part.name}' (Rp{entered_unit_cost:,.0f}) berbeda "
-                        f"dari PO {purchase_order.number} (Rp{po_line.unit_cost:,.0f})."
+                        f"Harga Beli '{po_line.part.name}' (Rp{entered_fmt}) berbeda "
+                        f"dari PO {purchase_order.number} (Rp{po_fmt})."
                     )
 
                 line_items.append(GoodsReceivedNoteLineItem.objects.create(
