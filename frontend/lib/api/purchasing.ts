@@ -211,15 +211,22 @@ export const goodsReceivedNotesApi = {
     const { data } = await api.get(`/api/goods-received-notes/${id}/`);
     return data.goods_received_note;
   },
+  // Return shape changed: now { grn, warnings } — matches
+  // partUsagesApi.create()'s own already-established { usage,
+  // warnings } shape exactly. warnings is a real, non-blocking
+  // price-variance signal from GoodsReceivedNote.receive() — see
+  // that method's own backend docstring. The GRN is ALREADY saved by
+  // the time this resolves; warnings are informational, not a
+  // rejection.
   async create(payload: {
     purchase_order: string;
     received_at?: string;
     reference?: string;
     notes?: string;
     lines: { purchase_order_line_item: string; quantity: number; unit_cost: number }[];
-  }): Promise<GoodsReceivedNote> {
+  }): Promise<{ grn: GoodsReceivedNote; warnings: string[] }> {
     const { data } = await api.post("/api/goods-received-notes/", payload);
-    return data.goods_received_note;
+    return { grn: data.goods_received_note, warnings: data.warnings ?? [] };
   },
 };
 
