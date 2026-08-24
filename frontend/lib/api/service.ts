@@ -115,6 +115,15 @@ export interface Part {
   unit:          string;
   current_stock: string;
   unit_price:    string;
+  // Real ledger-consistency fix, 24 Aug 2026 — "Last Cost," updated
+  // automatically every time this part is actually received via a
+  // real GRN (see the backend's own GoodsReceivedNoteLineItem.save()
+  // docstring). Read-only — system-derived only, never hand-typed;
+  // see PartSerializer's own read_only_fields for why. "0" is a real,
+  // honest state meaning "this part has never actually gone through
+  // a real GRN yet," not a guessed/zero cost — WorkOrderMaterialLine
+  // itself falls back to unit_price for exactly this case.
+  cost_price:    string;
   // Real per-part reorder threshold — replaces what used to be a
   // single hardcoded global "<=5" rule shared by every part. "0"
   // means no threshold configured; a part completely out of stock
@@ -162,8 +171,10 @@ export interface StockSummary {
   total_parts:              number;
   total_stock_value:        string;
   // Deliberately a string, not a boolean flag — states plainly which
-  // valuation basis this figure uses (retail/unit_price), since it's
-  // NOT the same basis as the ledger's own Inventory (1301) balance.
+  // valuation basis this figure uses. As of 24 Aug 2026, this is
+  // cost_price (matching Account 1301's own real GL basis on both
+  // sides), with an honest caveat about parts still at cost_price=0
+  // falling back to unit_price until their first real GRN.
   total_stock_value_basis:  string;
   out_of_stock_count:       number;
   low_stock_count:          number;
@@ -286,6 +297,8 @@ export const serviceRecordsApi = {
 // Sprint 7, Task 7.1 — shared payload shape for both create and
 // update, all taxonomy fields optional (matches the backend's own
 // blank=True fields — a part can be saved mid-categorization).
+// cost_price is deliberately NOT part of this payload — read-only,
+// system-derived, never sent by the client.
 export interface PartTaxonomyPayload {
   item_type?:       ItemType;
   vehicle_brand?:   VehicleBrand;
@@ -351,8 +364,7 @@ export const stockAdjustmentsApi = {
 // Sprint 7, Task 7.3 — deliberately flat routes ("stock-opname/",
 // not "inventory/stock-opname/") — confirmed against the real
 // backend apps/inventory/urls.py, matching every other route in
-// that file exactly. See that file's own comment for why this
-// specific detail mattered.
+// that file exactly.
 export const stockOpnameApi = {
   async list(): Promise<StockOpnameSession[]> {
     const { data } = await api.get("/api/stock-opname/");
