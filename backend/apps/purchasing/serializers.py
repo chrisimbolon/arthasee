@@ -7,7 +7,8 @@ from rest_framework import serializers
 
 from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
                      PurchaseOrder, PurchaseOrderLineItem, PurchaseReturn,
-                     PurchaseReturnLineItem, Supplier, SupplierInvoice)
+                     PurchaseReturnLineItem, Supplier, SupplierInvoice,
+                     SupplierPartCode)
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -19,18 +20,55 @@ class SupplierSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
+
+class SupplierPartCodeSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+
+    class Meta:
+        model  = SupplierPartCode
+        fields = ["id", "part", "supplier", "supplier_name", "supplier_sku", "created_at", "updated_at"]
+        read_only_fields = ["id", "supplier_name", "created_at", "updated_at"]
+
+
+class SupplierPartCodeSetSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/parts/<part_id>/supplier-codes/.
+    Same UUIDField-not-PrimaryKeyRelatedField reasoning as every
+    other Record serializer in this file — `supplier` is resolved
+    against the requesting user's own organization in the view.
+    """
+    supplier      = serializers.UUIDField()
+    supplier_sku  = serializers.CharField(max_length=100)
+
+    def validate_supplier_sku(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Kode part supplier tidak boleh kosong.")
+        return value
+
+
 class PurchaseOrderLineItemSerializer(serializers.ModelSerializer):
     part_name            = serializers.CharField(source="part.name", read_only=True)
+    # The supplier's own code for this part, if one is on file for
+    # THIS PO's specific supplier — looked up via SupplierPartCode,
+    # not stored on the line item itself. None when no code has been
+    # entered yet for this (part, supplier) pair.
+    supplier_sku          = serializers.SerializerMethodField()
     quantity_received     = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     quantity_outstanding  = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
 
     class Meta:
         model  = PurchaseOrderLineItem
         fields = [
-            "id", "part", "part_name", "quantity_ordered", "unit_cost",
+            "id", "part", "part_name", "supplier_sku", "quantity_ordered", "unit_cost",
             "quantity_received", "quantity_outstanding", "created_at",
         ]
         read_only_fields = fields  # output-only — writes go through PurchaseOrderRecordSerializer / the amend action
+
+    def get_supplier_sku(self, obj):
+        code = SupplierPartCode.objects.filter(
+            part_id=obj.part_id, supplier_id=obj.purchase_order.supplier_id,
+        ).first()
+        return code.supplier_sku if code else None
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
@@ -89,16 +127,25 @@ class PurchaseOrderAmendQuantitySerializer(serializers.Serializer):
     quantity_ordered = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
 
 class GoodsReceivedNoteLineItemSerializer(serializers.ModelSerializer):
-    part_name = serializers.CharField(source="part.name", read_only=True)
-    subtotal  = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    part_name    = serializers.CharField(source="part.name", read_only=True)
+    # Same lookup as PurchaseOrderLineItemSerializer's own
+    # supplier_sku, resolved against THIS GRN's own supplier.
+    supplier_sku = serializers.SerializerMethodField()
+    subtotal     = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
 
     class Meta:
         model  = GoodsReceivedNoteLineItem
         fields = [
-            "id", "part", "part_name", "purchase_order_line_item",
+            "id", "part", "part_name", "supplier_sku", "purchase_order_line_item",
             "quantity", "unit_cost", "subtotal", "created_at",
         ]
         read_only_fields = fields  # frozen — GRN and its lines are never edited, same as Invoice
+
+    def get_supplier_sku(self, obj):
+        code = SupplierPartCode.objects.filter(
+            part_id=obj.part_id, supplier_id=obj.goods_received_note.supplier_id,
+        ).first()
+        return code.supplier_sku if code else None
 
 
 class GoodsReceivedNoteSerializer(serializers.ModelSerializer):
