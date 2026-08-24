@@ -8,6 +8,28 @@ Real aggregation logic, separate from apps.inventory.views — same
 separation already proven by apps.accounting.reports and
 apps.analytics.growth: views stay thin, the actual queries live here
 where they can be tested directly.
+
+--- 24 Aug 2026: NILAI STOK valuation basis fixed to cost_price ---
+Real ledger-consistency fix, same incident as
+apps.workorders.models.WorkOrderMaterialLine.save() and
+apps.purchasing.models.GoodsReceivedNoteLineItem.save() — see either
+file's own docstring for the full story. total_stock_value now uses
+Part.cost_price (real GRN "Last Cost"), not Part.unit_price (selling
+price) — the SAME basis Account 1301 now actually posts at on BOTH
+sides (GoodsReceived debits at cost, PartConsumed now credits at
+cost too, after the WorkOrderMaterialLine fix).
+
+The disclaimer stays, deliberately reworded rather than removed
+outright — same "honest caveat over overclaiming" discipline this
+project already uses (gross_profit_note, projected_months_used).
+Perfect 1:1 reconciliation with 1301 still isn't guaranteed for every
+single part: a brand-new part with cost_price still at 0 (no real
+GRN received yet) falls back to unit_price via the SAME soft-fallback
+rule WorkOrderMaterialLine itself uses — so for that one part, this
+KPI and the ledger could still diverge until its first real GRN
+lands. Stating that plainly is more honest than declaring perfect
+reconciliation this KPI can't actually promise for every part, every
+time.
 """
 from decimal import Decimal
 
@@ -20,16 +42,13 @@ def stock_summary(organization):
     """
     Real counts and a real total stock value — for one organization.
 
-    total_stock_value uses Part.unit_price (retail/selling basis) —
-    the only current, per-part price that actually exists on the
-    model. This is a DIFFERENT basis than what genuinely posts to
-    the ledger's own Inventory account (1301), which mixes unit_price
-    via PartConsumed and unit_cost via GoodsReceived — see Roadmap
-    v2.3, Open Decision #5. This figure must never be read as
-    reconciling to the Trial Balance's own Inventory line; the
-    response carries an explicit `total_stock_value_basis` string for
-    exactly that reason, same discipline as the P&L's own
-    gross_profit_note.
+    total_stock_value uses Part.cost_price (real GRN "Last Cost"
+    basis) — the same basis Account 1301 now posts at on both sides,
+    after the 24 Aug 2026 ledger-consistency fix (see module
+    docstring). A part with no real GRN history yet (cost_price still
+    0) falls back to unit_price for this aggregate, same soft-
+    fallback rule WorkOrderMaterialLine itself uses — see
+    total_stock_value_basis's own honest caveat about this below.
 
     low_stock_count and out_of_stock_count are deliberately mutually
     exclusive (low_stock_count excludes anything already at or below
@@ -53,16 +72,24 @@ def stock_summary(organization):
     parts = Part.objects.filter(organization=organization)
     reorder_relevant = parts.exclude(reorder_cadence=Part.ReorderCadence.HARIAN)
 
-    total_value = parts.aggregate(
-        total=Sum(F("current_stock") * F("unit_price"))
-    )["total"] or Decimal("0")
+    # Real per-row fallback (cost_price if set, else unit_price) via
+    # a conditional expression — can't do this with a plain Sum(F()*F())
+    # the way the old unit_price-only version could, since the basis
+    # genuinely varies per row now. Small enough part count for this
+    # shop that a plain Python sum over the queryset is simpler and
+    # just as fast as building a Case/When expression for it.
+    total_value = sum(
+        (p.current_stock * (p.cost_price or p.unit_price) for p in parts),
+        Decimal("0"),
+    )
 
     return {
         "total_parts": parts.count(),
         "total_stock_value": total_value,
         "total_stock_value_basis": (
-            "Dihitung dari harga jual (unit_price) per part — bukan basis yang sama "
-            "dengan saldo akun Inventory (1301) di neraca saldo."
+            "Dihitung dari Harga Beli (HPP) per part — basis yang sama dengan akun "
+            "Inventory (1301) di neraca saldo. Part yang belum pernah menerima GRN "
+            "masih menggunakan harga jual sementara sampai GRN pertamanya tercatat."
         ),
         "out_of_stock_count": reorder_relevant.filter(current_stock__lte=0).count(),
         "low_stock_count": reorder_relevant.filter(
