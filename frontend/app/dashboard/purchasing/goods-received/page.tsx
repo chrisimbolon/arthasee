@@ -1,15 +1,17 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/purchasing/goods-received/page.tsx ===
-// Real, non-blocking price-variance signal, layered exactly like the
-// HARIAN guard from Sprint 7: a LIVE client-side comparison as staff
-// types (immediate feedback, same instinct as Stock Opname's live
-// variance preview), plus the backend's own authoritative
-// price_variance_warnings — surfaced together, since either layer
-// alone can miss something the other catches.
+// Adds inline supplier-code capture: when a PO line's part has no
+// code on file yet for THAT PO's supplier, a lightweight optional
+// input appears right on the receiving row — captures the code at
+// the exact moment staff have the vendor's surat jalan in hand
+// (Chris and Made's own confirmed call). Saved via a SEPARATE call
+// to supplierPartCodesApi.set() after the GRN itself saves — kept
+// out of the GRN creation payload entirely, so GRN creation stays
+// atomic and simple; code capture is a secondary, best-effort action.
 // =============================================================================
 import PurchasingSubNav from "@/components/purchasing/PurchasingSubNav";
-import { GoodsReceivedNote, goodsReceivedNotesApi, PurchaseOrder, purchaseOrdersApi } from "@/lib/api/purchasing";
+import { GoodsReceivedNote, goodsReceivedNotesApi, PurchaseOrder, purchaseOrdersApi, supplierPartCodesApi } from "@/lib/api/purchasing";
 import { AlertTriangle, CheckCircle2, Loader2, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
@@ -27,6 +29,7 @@ function formatRupiah(value: string | number): string {
 interface LineState {
   quantity: string;
   unit_cost: string;
+  supplier_sku_input: string;
 }
 
 function CreateGrnModal({
@@ -40,24 +43,15 @@ function CreateGrnModal({
   const [lineInputs, setLineInputs] = useState<Record<string, LineState>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Set only after a successful save that came back with real
-  // warnings — the modal stays open showing them instead of closing
-  // immediately, same "show a real confirm screen before dismissing"
-  // language Stock Opname's own "Sesi Selesai" screen already uses.
   const [savedWithWarnings, setSavedWithWarnings] = useState<string[] | null>(null);
 
   const selectedPo = purchaseOrders.find((p) => p.id === poId) ?? null;
 
-  // Re-seed line inputs whenever the selected PO changes — quantity
-  // starts empty (the user must deliberately say how much arrived),
-  // unit_cost is pre-filled from the PO's own expected cost as a
-  // sensible starting point, still fully editable since the real
-  // invoiced price can differ.
   useEffect(() => {
     if (!selectedPo) { setLineInputs({}); return; }
     const seeded: Record<string, LineState> = {};
     for (const li of selectedPo.line_items) {
-      seeded[li.id] = { quantity: "", unit_cost: li.unit_cost };
+      seeded[li.id] = { quantity: "", unit_cost: li.unit_cost, supplier_sku_input: "" };
     }
     setLineInputs(seeded);
   }, [poId]);
@@ -89,8 +83,24 @@ function CreateGrnModal({
           quantity: toNumber(input.quantity), unit_cost: toNumber(input.unit_cost),
         })),
       });
-      // The GRN is already saved at this point regardless of
-      // warnings — this is informational, never a rejection.
+
+      // Best-effort supplier-code capture — a real, secondary action,
+      // never allowed to block or fail the GRN itself (already saved
+      // by this point regardless). Fire-and-forget per line where
+      // staff actually typed a code.
+      const codesToSave = filledLines.filter(({ input }) => input.supplier_sku_input.trim());
+      await Promise.all(
+        codesToSave.map(({ li, input }) =>
+          supplierPartCodesApi.set(li.part, {
+            supplier: selectedPo.supplier, supplier_sku: input.supplier_sku_input.trim(),
+          }).catch(() => {
+            // Deliberately swallowed — a failed code save must never
+            // undo or block an already-successful GRN. Worst case,
+            // staff re-enters it next time from the Part edit modal.
+          })
+        )
+      );
+
       onCreated(grn);
       if (warnings.length > 0) {
         setSavedWithWarnings(warnings);
@@ -98,9 +108,6 @@ function CreateGrnModal({
         onClose();
       }
     } catch (err) {
-      // The backend's own error messages for both hard blocks
-      // (over-receiving, unlisted item) are already precise —
-      // surface them directly rather than a generic fallback.
       const data = (err as { response?: { data?: { message?: string } } })?.response?.data;
       setError(data?.message || "Gagal mencatat penerimaan barang.");
     } finally {
@@ -174,12 +181,7 @@ function CreateGrnModal({
 
               <div className="label" style={{ marginBottom: 10 }}>Item — Jumlah Diterima</div>
               {selectedPo.line_items.map((li) => {
-                const input = lineInputs[li.id] ?? { quantity: "", unit_cost: li.unit_cost };
-                // Live, client-side comparison — immediate feedback
-                // as staff types, before ever hitting Simpan. The
-                // backend's own price_variance_warnings (shown after
-                // save, above) is the authoritative fallback in case
-                // this client-side check is ever bypassed or missed.
+                const input = lineInputs[li.id] ?? { quantity: "", unit_cost: li.unit_cost, supplier_sku_input: "" };
                 const enteredCost = toNumber(input.unit_cost);
                 const poCost = toNumber(li.unit_cost);
                 const priceDiffers = input.unit_cost !== "" && enteredCost !== poCost;
@@ -217,6 +219,22 @@ function CreateGrnModal({
                         Berbeda dari harga PO ({formatRupiah(li.unit_cost)}) — akan tetap tersimpan, hanya sebagai catatan.
                       </div>
                     )}
+                    {/* Real, non-blocking inline capture — the backend
+                        doesn't tell us up front whether a code already
+                        exists for this (part, supplier); shown for
+                        every line, optional, and simply overwrites via
+                        SupplierPartCode.set_code()'s own idempotent
+                        upsert if one already exists. Cheap to show
+                        always rather than an extra round-trip just to
+                        decide whether to show it. */}
+                    <div style={{ marginTop: 8 }}>
+                      <input
+                        className="input" style={{ fontSize: 12.5, padding: "6px 10px" }}
+                        placeholder="Kode part supplier (opsional, mis. KNR-TOY-221)"
+                        value={input.supplier_sku_input}
+                        onChange={(e) => updateLine(li.id, { supplier_sku_input: e.target.value })}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -249,9 +267,6 @@ export default function GoodsReceivedNotesPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Only POs that can still genuinely receive something — a
-  // FULLY_RECEIVED, CANCELLED, or still-DRAFT (never sent) PO has no
-  // business showing up as a receivable option.
   const receivablePOs = purchaseOrders.filter((p) => p.status === "ORDERED" || p.status === "PARTIALLY_RECEIVED");
 
   return (
@@ -311,9 +326,6 @@ export default function GoodsReceivedNotesPage() {
           onClose={() => setShowCreate(false)}
           onCreated={(g) => {
             setGrns((prev) => [g, ...prev]);
-            // The PO just used may now be PARTIALLY_RECEIVED or
-            // FULLY_RECEIVED — refresh so the next time this modal
-            // opens, its receivable-PO list is honest.
             loadPurchaseOrders();
           }}
         />
