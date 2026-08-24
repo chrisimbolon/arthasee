@@ -20,6 +20,11 @@ export interface PurchaseOrderLineItem {
   id: string;
   part: string;
   part_name: string;
+  // The supplier's own code for this part, if one's on file for
+  // THIS PO's specific supplier — null when no code has been
+  // entered yet. See SupplierPartCode for the real (Part, Supplier)
+  // bridge this is looked up from.
+  supplier_sku: string | null;
   quantity_ordered: string;
   unit_cost: string;
   // Both computed live on the backend from real GRN lines tracing
@@ -53,6 +58,9 @@ export interface GoodsReceivedNoteLineItem {
   id: string;
   part: string;
   part_name: string;
+  // Same lookup as PurchaseOrderLineItem's own supplier_sku, resolved
+  // against THIS GRN's own supplier.
+  supplier_sku: string | null;
   // Real traceability — every GRN line must trace back to an
   // authorized PO line now.
   purchase_order_line_item: string;
@@ -149,6 +157,20 @@ export interface SupplierReliabilityResponse {
   suppliers: SupplierReliabilityRow[];
 }
 
+// Real (Part, Supplier) bridge — the same real part can have a
+// different code per supplier, confirmed by Made directly (and by
+// Chris's own visit to Arya Motor) — this shop genuinely buys from
+// more than one supplier for the same part.
+export interface SupplierPartCode {
+  id: string;
+  part: string;
+  supplier: string;
+  supplier_name: string;
+  supplier_sku: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export const suppliersApi = {
   async list(): Promise<Supplier[]> {
     const { data } = await api.get("/api/suppliers/");
@@ -211,13 +233,12 @@ export const goodsReceivedNotesApi = {
     const { data } = await api.get(`/api/goods-received-notes/${id}/`);
     return data.goods_received_note;
   },
-  // Return shape changed: now { grn, warnings } — matches
-  // partUsagesApi.create()'s own already-established { usage,
-  // warnings } shape exactly. warnings is a real, non-blocking
-  // price-variance signal from GoodsReceivedNote.receive() — see
-  // that method's own backend docstring. The GRN is ALREADY saved by
-  // the time this resolves; warnings are informational, not a
-  // rejection.
+  // Return shape: { grn, warnings } — matches partUsagesApi.create()'s
+  // own already-established { usage, warnings } shape exactly.
+  // warnings is a real, non-blocking price-variance signal from
+  // GoodsReceivedNote.receive() — see that method's own backend
+  // docstring. The GRN is ALREADY saved by the time this resolves;
+  // warnings are informational, not a rejection.
   async create(payload: {
     purchase_order: string;
     received_at?: string;
@@ -288,5 +309,22 @@ export const purchasingReportsApi = {
     } catch {
       return null;
     }
+  },
+};
+
+// Deliberately mounted under /api/parts/<part_id>/supplier-codes/,
+// not a "purchasing" URL prefix — see the backend view's own
+// docstring (SupplierPartCodeListCreateView, apps.purchasing.views,
+// mounted via apps.inventory.urls) for why: "everything about one
+// specific part" stays under one consistent URL namespace even
+// though the model's real domain home is apps.purchasing.
+export const supplierPartCodesApi = {
+  async list(partId: string): Promise<SupplierPartCode[]> {
+    const { data } = await api.get(`/api/parts/${partId}/supplier-codes/`);
+    return data.supplier_codes;
+  },
+  async set(partId: string, payload: { supplier: string; supplier_sku: string }): Promise<SupplierPartCode> {
+    const { data } = await api.post(`/api/parts/${partId}/supplier-codes/`, payload);
+    return data.supplier_code;
   },
 };
