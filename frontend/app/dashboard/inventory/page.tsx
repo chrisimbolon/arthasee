@@ -1,12 +1,12 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/inventory/page.tsx ===
-// Sprint 7, Task 7.2 base + Supplier Part Code addition (real
-// multi-supplier reality, confirmed by Made and by Chris's own visit
-// to Arya Motor — see SupplierPartCode's own backend docstring).
-// New: a "Kode Supplier" section inside PartFormModal, shown only
-// when editing an EXISTING part (a brand-new part has no id yet to
-// attach supplier codes to).
+// Sprint 7 base + real ledger-consistency margin visibility, 24 Aug
+// 2026 (Made's own real WhatsApp request, via Sansan's review).
+// "Harga Satuan" split into "Harga Beli (HPP)" and "Harga Jual",
+// plus a real Margin % column — the honest business need this was
+// actually for: catching a part accidentally priced below cost, not
+// just a cosmetic table change.
 // =============================================================================
 import {
   Supplier,
@@ -61,20 +61,6 @@ const CADENCE_LABELS: Record<Exclude<ReorderCadence, "">, string> = {
   BULANAN: "Bulanan", TIGA_BULANAN: "3 Bulanan",
 };
 
-// ── Sprint 7, Task 7.2: cadence tabs, including the real 6th tab for
-// parts that exist but haven't been categorized yet ────────────────
-
-type CadenceTabKey = "ALL" | "HARIAN" | "MINGGUAN" | "BULANAN" | "TIGA_BULANAN" | "UNSET";
-
-const CADENCE_TABS: { key: CadenceTabKey; label: string }[] = [
-  { key: "ALL", label: "Semua" },
-  { key: "HARIAN", label: "Harian" },
-  { key: "MINGGUAN", label: "Mingguan" },
-  { key: "BULANAN", label: "Bulanan" },
-  { key: "TIGA_BULANAN", label: "3 Bulanan" },
-  { key: "UNSET", label: "Belum Dikategorikan" },
-];
-
 // ── Sprint 7, Task 7.1's real behavioral rule, mirrored exactly on
 // the frontend: a HARIAN part is deliberately meant to sit at zero
 // stock (e.g. an expensive, on-demand sensor) — it must NEVER surface
@@ -91,6 +77,20 @@ function isLowStock(p: Part): boolean {
   const stockNum = toNumber(p.current_stock);
   const minNum = toNumber(p.minimum_stock);
   return stockNum > 0 && minNum > 0 && stockNum <= minNum;
+}
+
+// ── 24 Aug 2026: real margin visibility, Made's own stated need ───
+// Deliberately returns null when cost_price is 0 — that means "no
+// real GRN yet," not "free." Computing a margin against 0 would show
+// a fake 100%, actively misleading (looks like pure profit when the
+// real cost is genuinely unknown). null renders as "—" everywhere
+// this is used, same honest-blank discipline as Kategori/Frekuensi.
+
+function marginPercent(part: Part): number | null {
+  const cost = toNumber(part.cost_price);
+  const price = toNumber(part.unit_price);
+  if (cost <= 0 || price <= 0) return null;
+  return ((price - cost) / price) * 100;
 }
 
 // ── Supplier Part Code section — real multi-supplier reality.
@@ -131,11 +131,6 @@ function SupplierCodesSection({ part }: { part: Part }) {
     }
   };
 
-  // Suppliers that don't already have a code on file — avoids the
-  // dropdown offering a supplier twice; re-entering a code for an
-  // already-listed supplier uses set_code()'s own idempotent
-  // upsert on the backend anyway, but keeping the picker clean here
-  // avoids implying "add" would create a duplicate.
   const availableSuppliers = suppliers.filter((s) => !codes.some((c) => c.supplier === s.id));
 
   return (
@@ -206,10 +201,6 @@ function PartFormModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Switching item type must clear whichever brand fields belong to
-  // the OTHER type — otherwise a leftover fluid_brand from a prior
-  // selection would still be sent alongside item_type=SPARE_PART and
-  // trip Part.clean()'s mutual-exclusivity validation on the backend.
   const handleItemTypeChange = (value: ItemType) => {
     setForm((prev) => ({
       ...prev,
@@ -246,6 +237,12 @@ function PartFormModal({
     }
   };
 
+  // 24 Aug 2026 — real, read-only context shown right next to where
+  // Made sets the selling price, so he can actually see current cost
+  // while deciding a sensible margin. cost_price is system-derived
+  // (see Part's own backend docstring) — never an input here.
+  const editMargin = isEdit && editingPart ? marginPercent(editingPart) : null;
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
       <div className="card" style={{ width: 460, maxHeight: "88vh", overflowY: "auto", background: "var(--paper-3)" }}>
@@ -274,15 +271,36 @@ function PartFormModal({
               </select>
             </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-            <div>
-              <label className="label">Harga Satuan (Rp)</label>
-              <input className="input" type="number" min={0} value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} placeholder="0" />
+          <div style={{ marginBottom: 6 }}>
+            <label className="label">Harga Jual (Rp)</label>
+            <input className="input" type="number" min={0} value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} placeholder="0" />
+          </div>
+          {isEdit && editingPart && (
+            <div style={{ fontSize: 12, color: "var(--steel)", marginBottom: 14 }}>
+              {toNumber(editingPart.cost_price) > 0 ? (
+                <>
+                  Harga Beli (HPP) saat ini: <strong className="mono">{formatRupiah(editingPart.cost_price)}</strong>
+                  {editMargin !== null && (
+                    <span style={{ color: editMargin < 0 ? "var(--danger)" : "var(--steel)" }}>
+                      {" "}— margin {editMargin.toFixed(1)}%
+                      {editMargin < 0 && " (JUAL DI BAWAH HARGA BELI)"}
+                    </span>
+                  )}
+                  {" "}(dari GRN terakhir, tidak bisa diubah manual)
+                </>
+              ) : (
+                "Belum ada data HPP — part ini belum pernah menerima GRN."
+              )}
             </div>
-            <div>
-              <label className="label">Stok Minimum</label>
-              <input className="input" type="number" min={0} value={form.minimum_stock} onChange={(e) => setForm({ ...form, minimum_stock: e.target.value })} placeholder="0" />
-            </div>
+          )}
+          {!isEdit && (
+            <p style={{ fontSize: 12, color: "var(--steel-lt)", marginBottom: 14 }}>
+              Harga Beli (HPP) akan terisi otomatis setelah part ini menerima GRN pertamanya.
+            </p>
+          )}
+          <div style={{ marginBottom: 14 }}>
+            <label className="label">Stok Minimum</label>
+            <input className="input" type="number" min={0} value={form.minimum_stock} onChange={(e) => setForm({ ...form, minimum_stock: e.target.value })} placeholder="0" />
           </div>
 
           <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14, marginBottom: 14 }}>
@@ -526,17 +544,22 @@ export default function InventoryPage() {
   const [parts, setParts] = useState<Part[]>([]);
   const [summary, setSummary] = useState<StockSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<CadenceTabKey>("ALL");
+  const [activeTab, setActiveTab] = useState<"ALL" | "HARIAN" | "MINGGUAN" | "BULANAN" | "TIGA_BULANAN" | "UNSET">("ALL");
   const [lowStockOnly, setLowStockOnly] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingPart, setEditingPart] = useState<Part | null>(null);
   const [adjustingPart, setAdjustingPart] = useState<Part | null>(null);
   const [historyPart, setHistoryPart] = useState<Part | null>(null);
 
-  // Fetched ONCE, unfiltered — both the cadence tabs and the "Stok
-  // Menipis" toggle are applied client-side below. See the file-level
-  // comment for why this replaces the original page's per-toggle
-  // server refetch.
+  const CADENCE_TABS: { key: typeof activeTab; label: string }[] = [
+    { key: "ALL", label: "Semua" },
+    { key: "HARIAN", label: "Harian" },
+    { key: "MINGGUAN", label: "Mingguan" },
+    { key: "BULANAN", label: "Bulanan" },
+    { key: "TIGA_BULANAN", label: "3 Bulanan" },
+    { key: "UNSET", label: "Belum Dikategorikan" },
+  ];
+
   const loadAll = () => {
     setLoading(true);
     partsApi.list().then(setParts).finally(() => setLoading(false));
@@ -572,13 +595,6 @@ export default function InventoryPage() {
             className="btn-ghost"
             style={{ display: "flex", alignItems: "center", gap: 6 }}
             onClick={() => {
-              // Sprint 7, Task 7.3 — Chris and Made's own confirmed
-              // call: passes the currently active cadence tab as a
-              // scope hint, since a real physical count naturally
-              // matches whichever cadence group staff is already
-              // looking at. ALL/UNSET aren't real cadences, so no
-              // hint is passed for those — the next page lets staff
-              // select freely from the full catalog instead.
               const cadenceHint = activeTab !== "ALL" && activeTab !== "UNSET" ? `?cadence=${activeTab}` : "";
               router.push(`/dashboard/inventory/stock-opname${cadenceHint}`);
             }}
@@ -614,20 +630,23 @@ export default function InventoryPage() {
         </button>
       </div>
 
-      <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+      <div className="card" style={{ padding: 0, overflow: "auto" }}>
         {loading ? (
           <div style={{ padding: 40, textAlign: "center", color: "var(--steel)" }}><Loader2 size={18} style={{ animation: "spin 1s linear infinite" }} /></div>
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Nama</th><th>SKU</th><th>Kategori</th><th>Frekuensi</th><th>Stok</th><th>Stok Min.</th><th>Harga Satuan</th><th></th></tr>
+              <tr>
+                <th>Nama</th><th>SKU</th><th>Kategori</th><th>Frekuensi</th><th>Stok</th><th>Stok Min.</th>
+                <th>Harga Beli (HPP)</th><th>Harga Jual</th><th>Margin</th><th></th>
+              </tr>
             </thead>
             <tbody>
               {visibleParts.map((p) => {
-                // Mirrors the backend's own HARIAN-aware logic exactly
-                // — see isOutOfStock()/isLowStock() above.
                 const isOut = isOutOfStock(p);
                 const isLow = isLowStock(p);
+                const margin = marginPercent(p);
+                const hasCost = toNumber(p.cost_price) > 0;
                 return (
                   <tr key={p.id}>
                     <td style={{ display: "flex", alignItems: "center", gap: 8 }}><Package size={14} style={{ color: "var(--steel)" }} />{p.name}</td>
@@ -642,7 +661,13 @@ export default function InventoryPage() {
                       {isLow && <span className="pill due" style={{ marginLeft: 8, fontSize: 11 }}>Menipis</span>}
                     </td>
                     <td className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{toNumber(p.minimum_stock) > 0 ? `${p.minimum_stock} ${p.unit}` : "—"}</td>
+                    <td className="mono" style={{ color: hasCost ? undefined : "var(--steel-lt)" }}>
+                      {hasCost ? formatRupiah(p.cost_price) : "—"}
+                    </td>
                     <td className="mono">{formatRupiah(p.unit_price)}</td>
+                    <td className="mono" style={{ color: margin === null ? "var(--steel-lt)" : margin < 0 ? "var(--danger)" : "var(--workshop)" }}>
+                      {margin === null ? "—" : `${margin.toFixed(1)}%`}
+                    </td>
                     <td>
                       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                         <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 8px" }} onClick={() => setEditingPart(p)} title="Ubah Part">
@@ -660,7 +685,7 @@ export default function InventoryPage() {
                 );
               })}
               {visibleParts.length === 0 && (
-                <tr><td colSpan={8} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>
+                <tr><td colSpan={10} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>
                   {lowStockOnly ? "Tidak ada part dengan stok menipis di kategori ini" : "Tidak ada part di kategori ini"}
                 </td></tr>
               )}
