@@ -14,8 +14,27 @@ Accounting only ever listens to events published FROM Purchasing,
 never reaches directly into its models. A report built purely from
 Purchasing's own data belongs in Purchasing's own reports module,
 not Accounting's.
+
+--- Real bug fixed: UTC-vs-local date extraction ---
+Found via a genuinely flaky-looking test failure that turned out not
+to be flaky at all — it reliably failed whenever run between roughly
+00:00 and 07:00 WIB (Batam's own timezone, UTC+7). Root cause:
+`g.received_at.date()` extracted the UTC calendar date directly from
+an aware datetime, not the LOCAL one — at 03:05 WIB, UTC is still
+20:05 the PREVIOUS day, silently rolling a real "today" delivery back
+to "yesterday" for comparison purposes. Since expected_date/since/
+as_of are all plain, timezone-naive dates entered by staff as real
+LOCAL calendar dates (via a date picker, no timezone attached), the
+correct comparison requires converting received_at to local time
+FIRST via timezone.localtime() — not comparing a UTC date against a
+local one. This is a real, live correctness bug in production, not
+just a test artifact: any GRN genuinely received in that early-
+morning window would have been misjudged the same way for a real
+shop owner checking this report, not just inside a test.
 """
 from decimal import Decimal
+
+from django.utils import timezone
 
 from .models import PurchaseOrder, PurchaseReturn, Supplier
 
@@ -36,11 +55,13 @@ def supplier_reliability(organization, *, since, as_of) -> dict:
     means nothing to judge against). "Delivered on" is the LATEST
     GRN's own received_at among every GRN against that PO — the date
     everything ordered actually finished arriving, not the date of
-    the first partial delivery. Verified by hand against a mixed
-    scenario (no-date PO, still-open PO, on-time PO, and a partial-
-    then-late PO) before being written here — the partial case
-    specifically confirms the LATEST delivery is what's judged, not
-    the first.
+    the first partial delivery — converted to LOCAL time before
+    extracting the date, matching since/as_of/expected_date's own
+    plain-local-date semantics (see module docstring for the real
+    bug this fixes). Verified by hand against a mixed scenario (no-
+    date PO, still-open PO, on-time PO, and a partial-then-late PO)
+    before being written here — the partial case specifically
+    confirms the LATEST delivery is what's judged, not the first.
 
     Return rate is total returned value against total received
     value, traced GRN -> PurchaseOrder -> Supplier. Division-by-zero
@@ -77,7 +98,14 @@ def supplier_reliability(organization, *, since, as_of) -> dict:
             if po.status != PurchaseOrder.Status.FULLY_RECEIVED or po.expected_date is None:
                 continue  # can't judge an open PO, or one with no promised date
 
-            last_delivery = max(g.received_at.date() for g in grns)
+            # timezone.localtime() converts the aware UTC datetime to
+            # the project's real configured local timezone BEFORE
+            # extracting the calendar date — see module docstring for
+            # the real bug this fixes. A naive `.date()` call here
+            # would extract the UTC date instead, silently rolling a
+            # real local "today" delivery back to "yesterday" for any
+            # GRN received between roughly 00:00-07:00 WIB.
+            last_delivery = max(timezone.localtime(g.received_at).date() for g in grns)
             total_pos_judged += 1
             if last_delivery <= po.expected_date:
                 on_time_pos += 1
