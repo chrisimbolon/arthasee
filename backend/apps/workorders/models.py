@@ -59,6 +59,27 @@ Design locked in with Chris/Made:
     computed on read from real timestamps already captured
     elsewhere, never stored, same discipline as
     Vehicle.is_due_for_service.
+
+--- WorkOrderMaterialLine.save() (bottom of this file): real ledger-
+consistency fix, 24 Aug 2026 ---
+Real bug found live: GoodsReceived debits Account 1301 at real cost
+(the GRN's own unit_cost), but this method was defaulting
+unit_price_at_time to Part.unit_price — the SELLING price — meaning
+PartConsumed credited the SAME account at a completely different
+basis. 1301's own real GL balance was silently internally
+inconsistent the whole time this system has been live: debited at
+cost, credited at retail. Now defaults to Part.cost_price instead —
+see apps.inventory.models.Part's own updated docstring for the other
+half of this fix (GoodsReceivedNoteLineItem.save() is what actually
+keeps cost_price current). Falls back to unit_price only when
+cost_price is genuinely 0 (a brand-new part with no real GRN history
+yet) — Made's own confirmed "soft fallback": a mechanic must never be
+blocked mid-job by a part that hasn't been formally received yet.
+This directly changes COGS/Gross Profit/Net Income going forward —
+flagged explicitly, not a quiet side effect — cost is typically lower
+than selling price, so this shift is the economically CORRECT
+direction, but it's a real, visible number change on Made's own
+dashboard and P&L, not just an inventory-table fix.
 """
 import uuid
 from datetime import date, timedelta
@@ -877,7 +898,18 @@ class WorkOrderMaterialLine(TenantScopedModel):
     def save(self, *args, **kwargs):
         creating = self._state.adding
         if creating and not self.unit_price_at_time:
-            self.unit_price_at_time = self.part.unit_price
+            # Real ledger-consistency fix, 24 Aug 2026 — see this
+            # class's own docstring for the full incident. Defaults
+            # to Part.cost_price (real GRN cost, "Last Cost") instead
+            # of Part.unit_price (selling price) — this field's own
+            # value is what PartConsumed.amount uses to credit
+            # Account 1301, and GoodsReceived already debits that
+            # same account at real cost. Falls back to unit_price
+            # ONLY when cost_price is genuinely 0 (`or` catches both
+            # None and Decimal("0")) — a brand-new part with no real
+            # GRN history yet must never block a mechanic mid-job
+            # (Made's own confirmed "soft fallback").
+            self.unit_price_at_time = self.part.cost_price or self.part.unit_price
         super().save(*args, **kwargs)
         if creating:
             Part.objects.filter(pk=self.part_id).update(
