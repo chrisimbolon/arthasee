@@ -1,29 +1,18 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/inventory/page.tsx ===
-// Sprint 7, Task 7.2 — "Inventaris" -> "Spare Parts & Fluids".
-// Real changes on top of the existing page:
-//   1. Item taxonomy (item_type, vehicle_brand / fluid_brand +
-//      viscosity_grade) and reorder_cadence added to PartFormModal —
-//      the only way Made can actually categorize a part through the UI.
-//   2. Six-tab cadence filter: Semua | Harian | Mingguan | Bulanan |
-//      3 Bulanan | Belum Dikategorikan — the last tab exists so real,
-//      pre-existing parts (Busi, Filter) never silently vanish after
-//      the Sprint 7 migration left their cadence honestly blank.
-//   3. "Stok Menipis" toggle now COMBINES with the active cadence tab
-//      rather than replacing it — both filters, plus the whole parts
-//      list, are fetched ONCE and filtered entirely client-side. This
-//      is a deliberate change from the original page's per-toggle
-//      server refetch: simpler, more responsive, one source of truth
-//      for what's currently on screen.
-//   4. Real bug fix: row rendering computed isOut/isLow independently
-//      from the backend, with zero HARIAN awareness — the same class
-//      of bug already fixed twice on the backend (PartListView,
-//      stock_summary()). A HARIAN part at zero stock would have shown
-//      a red "Habis" pill here even after both backend fixes. Fixed
-//      via isOutOfStock()/isLowStock() helpers that mirror the
-//      backend's own logic exactly.
+// Sprint 7, Task 7.2 base + Supplier Part Code addition (real
+// multi-supplier reality, confirmed by Made and by Chris's own visit
+// to Arya Motor — see SupplierPartCode's own backend docstring).
+// New: a "Kode Supplier" section inside PartFormModal, shown only
+// when editing an EXISTING part (a brand-new part has no id yet to
+// attach supplier codes to).
 // =============================================================================
+import {
+  Supplier,
+  SupplierPartCode, supplierPartCodesApi,
+  suppliersApi,
+} from "@/lib/api/purchasing";
 import {
   FluidBrand, ItemType, Part, partsApi, ReorderCadence, StockAdjustment,
   stockAdjustmentsApi, StockMovement, StockSummary, VehicleBrand, ViscosityGrade,
@@ -102,6 +91,94 @@ function isLowStock(p: Part): boolean {
   const stockNum = toNumber(p.current_stock);
   const minNum = toNumber(p.minimum_stock);
   return stockNum > 0 && minNum > 0 && stockNum <= minNum;
+}
+
+// ── Supplier Part Code section — real multi-supplier reality.
+// Only rendered when editing an EXISTING part (a brand-new part has
+// no id yet to attach codes to). Self-contained: fetches its own
+// suppliers list and existing codes, doesn't rely on the parent page
+// having fetched either. ─────────────────────────────────────────
+
+function SupplierCodesSection({ part }: { part: Part }) {
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [codes, setCodes] = useState<SupplierPartCode[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newSupplierId, setNewSupplierId] = useState("");
+  const [newSku, setNewSku] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    Promise.all([suppliersApi.list(), supplierPartCodesApi.list(part.id)])
+      .then(([s, c]) => { setSuppliers(s); setCodes(c); })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); }, [part.id]);
+
+  const handleAdd = async () => {
+    if (!newSupplierId || !newSku.trim()) return;
+    setSaving(true); setError(null);
+    try {
+      await supplierPartCodesApi.set(part.id, { supplier: newSupplierId, supplier_sku: newSku.trim() });
+      setNewSupplierId(""); setNewSku("");
+      load();
+    } catch {
+      setError("Gagal menyimpan kode supplier.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Suppliers that don't already have a code on file — avoids the
+  // dropdown offering a supplier twice; re-entering a code for an
+  // already-listed supplier uses set_code()'s own idempotent
+  // upsert on the backend anyway, but keeping the picker clean here
+  // avoids implying "add" would create a duplicate.
+  const availableSuppliers = suppliers.filter((s) => !codes.some((c) => c.supplier === s.id));
+
+  return (
+    <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14, marginBottom: 20 }}>
+      <label className="label">Kode Supplier</label>
+      <p style={{ fontSize: 12, color: "var(--steel)", marginBottom: 10 }}>
+        Kode/SKU part ini menurut masing-masing supplier — membantu mencocokkan dengan surat jalan saat menerima barang.
+      </p>
+      {loading ? (
+        <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} />
+      ) : (
+        <>
+          {codes.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              {codes.map((c) => (
+                <div key={c.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 0", borderBottom: "1px solid var(--line)" }}>
+                  <span>{c.supplier_name}</span>
+                  <span className="mono" style={{ color: "var(--steel)" }}>{c.supplier_sku}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {error && <div style={{ fontSize: 12, color: "var(--danger)", marginBottom: 8 }}>{error}</div>}
+          {availableSuppliers.length > 0 ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <select className="input" style={{ flex: 1 }} value={newSupplierId} onChange={(e) => setNewSupplierId(e.target.value)}>
+                <option value="">Pilih supplier…</option>
+                {availableSuppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              <input className="input" style={{ flex: 1 }} placeholder="Kode part" value={newSku} onChange={(e) => setNewSku(e.target.value)} />
+              <button type="button" className="btn-ghost" disabled={!newSupplierId || !newSku.trim() || saving} onClick={handleAdd}>
+                {saving ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Tambah"}
+              </button>
+            </div>
+          ) : suppliers.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--steel-lt)" }}>Belum ada supplier tercatat.</div>
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--steel-lt)" }}>Semua supplier sudah memiliki kode untuk part ini.</div>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 // ── Create/Edit part — one shared form, not two near-duplicates ───
@@ -250,7 +327,7 @@ function PartFormModal({
             </div>
           )}
 
-          <div style={{ marginBottom: 20 }}>
+          <div style={{ marginBottom: 14 }}>
             <label className="label">Frekuensi Pengecekan <span style={{ textTransform: "none", fontWeight: 400 }}>(opsional)</span></label>
             <select className="input" value={form.reorder_cadence} onChange={(e) => setForm({ ...form, reorder_cadence: e.target.value as ReorderCadence })}>
               <option value="">Belum dipilih</option>
@@ -264,6 +341,8 @@ function PartFormModal({
                 : "Menentukan tab kategori tempat part ini muncul di halaman Spare Parts & Fluids."}
             </p>
           </div>
+
+          {isEdit && editingPart && <SupplierCodesSection part={editingPart} />}
 
           <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 14 }}>
             {isEdit
@@ -279,7 +358,7 @@ function PartFormModal({
   );
 }
 
-// ── Stock adjustment — unchanged from the original page ──────────
+// ── Stock adjustment — unchanged from Task 7.2 ────────────────────
 
 function StockAdjustmentModal({ part, onClose, onAdjusted }: {
   part: Part; onClose: () => void; onAdjusted: (p: Part) => void;
@@ -346,7 +425,7 @@ function StockAdjustmentModal({ part, onClose, onAdjusted }: {
   );
 }
 
-// ── Movement history — unchanged from the original page ───────────
+// ── Movement history — unchanged from Task 7.2 ─────────────────────
 
 function MovementHistoryModal({ part, onClose }: { part: Part; onClose: () => void }) {
   const [movements, setMovements] = useState<StockMovement[] | null>(null);
@@ -392,7 +471,7 @@ function MovementHistoryModal({ part, onClose }: { part: Part; onClose: () => vo
   );
 }
 
-// ── Stock summary row — unchanged from the original page ──────────
+// ── Stock summary row — unchanged from Task 7.2 ────────────────────
 
 function StockSummaryRow({ data }: { data: StockSummary | null }) {
   if (!data) {
