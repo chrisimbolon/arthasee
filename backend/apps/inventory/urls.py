@@ -1,3 +1,4 @@
+from apps.purchasing.views import SupplierPartCodeListCreateView
 from django.urls import path
 
 from .views import (PartDetailView, PartListView, PartMovementHistoryView,
@@ -21,6 +22,14 @@ urlpatterns = [
          StockAdjustmentListView.as_view(), name="stock-adjustment-list"),
     path("parts/<uuid:part_id>/movements/",
          PartMovementHistoryView.as_view(), name="part-movement-history"),
+
+    # Real model lives in apps.purchasing (SupplierPartCode) — this
+    # view is imported cross-app deliberately, mounted here so
+    # "everything about one specific part" stays under one consistent
+    # URL namespace. See SupplierPartCodeListCreateView's own
+    # docstring for the full reasoning.
+    path("parts/<uuid:part_id>/supplier-codes/",
+         SupplierPartCodeListCreateView.as_view(), name="part-supplier-code-list-create"),
 
     path("service-records/<uuid:service_record_id>/part-usages/",
          PartUsageListView.as_view(), name="part-usage-list"),
