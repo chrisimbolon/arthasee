@@ -5,8 +5,10 @@
 Sprint 3 — model-layer tests (Stage 1) plus real event/posting proof
 (Stage 2). No HTTP endpoints exist yet — that's a later stage.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from datetime import timezone as dt_timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 from apps.accounting.models import Account
 from apps.authentication.models import CustomUser
@@ -1231,6 +1233,47 @@ class SupplierReliabilityReportTests(PurchasingModelTestBase):
         self.assertEqual(row["total_pos_judged"], 1)
         self.assertEqual(row["on_time_pos"], 0)
         self.assertEqual(row["on_time_rate"], Decimal("0"))
+
+def test_late_po_judged_correctly_even_at_early_morning_wib(self):
+    """
+    Real bug, found live: `g.received_at.date()` used to extract the
+    UTC calendar date directly, not the local (WIB) one. At any time
+    between roughly 00:00-07:00 WIB, UTC is still the PREVIOUS day —
+    silently rolling a real "today" delivery back to "yesterday" for
+    comparison purposes, which could misjudge a genuinely LATE
+    delivery as on-time. A normal test can't reproduce this by
+    accident (it depends on real wall-clock time when the suite
+    happens to run) — this fakes `timezone.now()` to the exact real
+    trigger window (03:05 WIB / 20:05 UTC the day before) so the bug
+    is provably fixed, not just "didn't reproduce this time."
+    """
+    # 03:05 WIB, 24 Aug 2026 == 20:05 UTC, 23 Aug 2026.
+    fake_now_utc = datetime(2026, 8, 23, 20, 5, 0, tzinfo=dt_timezone.utc)
+
+    with patch("django.utils.timezone.now", return_value=fake_now_utc):
+        # expected_date is a real LOCAL calendar date a staff member
+        # would have entered — "yesterday" relative to LOCAL today
+        # (24 Aug WIB), i.e. 23 Aug. Before the fix, received_at's
+        # UTC date (also 23 Aug, per the mocked clock above) would
+        # collide with this and wrongly count as on-time.
+        po = self._create_po(expected_date=date(2026, 8, 23))
+        GoodsReceivedNote.receive(
+            organization=self.org, purchase_order=po,
+            lines=[{
+                "purchase_order_line_item": po.line_items.first(),
+                "quantity": Decimal("10.00"), "unit_cost": Decimal("45000.00"),
+            }],
+        )
+
+    data = reports.supplier_reliability(self.org, since=date(2026, 1, 1), as_of=date(2026, 8, 24))
+    row = data["suppliers"][0]
+    self.assertEqual(row["total_pos_judged"], 1)
+    # The real delivery happened at 03:05 on 24 Aug LOCAL time — one
+    # full day after the 23 Aug expected_date — so this must be
+    # judged LATE, regardless of what UTC calendar date the same
+    # instant happens to fall on.
+    self.assertEqual(row["on_time_pos"], 0)
+    self.assertEqual(row["on_time_rate"], Decimal("0"))
 
     def test_po_with_no_expected_date_excluded_from_judgment_but_counts_value(self):
         po = self._create_po(expected_date=None)
