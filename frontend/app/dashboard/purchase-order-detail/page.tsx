@@ -3,6 +3,14 @@
 // === frontend/app/dashboard/purchase-order-detail/page.tsx ===
 // Flat top-level page, matching goods-received-detail's own real
 // convention — reached via ?id=, no persistent sub-nav.
+//
+// Added: a "Kode Supplier" column — the vendor's own code for each
+// part, shown alongside the internal part name so staff/Made can
+// confirm they're ordering the right thing before the goods even
+// arrive (Chris and Made's own confirmed call: show on both POs and
+// GRNs, not just at receiving time). Sourced from the backend's own
+// PurchaseOrderLineItemSerializer.supplier_sku lookup — null shown
+// as "—", same convention as every other optional field in this table.
 // =============================================================================
 import { PurchaseOrder, PurchaseOrderLineItem, purchaseOrdersApi } from "@/lib/api/purchasing";
 import { ArrowLeft, Loader2, Pencil, X, XCircle } from "lucide-react";
@@ -194,12 +202,13 @@ export default function PurchaseOrderDetailPage() {
 
         <table className="data-table">
           <thead>
-            <tr><th>Part</th><th>Dipesan</th><th>Diterima</th><th>Sisa</th><th>Harga Beli</th><th></th></tr>
+            <tr><th>Part</th><th>Kode Supplier</th><th>Dipesan</th><th>Diterima</th><th>Sisa</th><th>Harga Beli</th><th></th></tr>
           </thead>
           <tbody>
             {po.line_items.map((li) => (
               <tr key={li.id}>
                 <td>{li.part_name}</td>
+                <td className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{li.supplier_sku || "—"}</td>
                 <td className="mono">{li.quantity_ordered}</td>
                 <td className="mono">{li.quantity_received}</td>
                 <td className="mono">{li.quantity_outstanding}</td>
