@@ -475,6 +475,16 @@ class GoodsReceivedNoteLineItem(TenantScopedModel):
     that field is explicitly documented as the SELLING price;
     conflating it with what was actually PAID to the supplier would
     be a real, silent accounting error.
+
+    Also updates Part.cost_price on every creation — Made's own
+    confirmed "Last Cost" call: the most recent real GRN unit_cost
+    simply overwrites whatever was there before, no running Weighted
+    Average Cost math. This is the real fix for a genuine ledger
+    inconsistency found live, 24 Aug 2026: GoodsReceived debits
+    Account 1301 at real cost, but PartConsumed was crediting the
+    SAME account at Part.unit_price (selling price) — see
+    apps.workorders.models.WorkOrderMaterialLine's own updated
+    docstring for the other half of this fix.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     goods_received_note = models.ForeignKey(
@@ -527,6 +537,13 @@ class GoodsReceivedNoteLineItem(TenantScopedModel):
                 reason="restock",
                 notes=f"GRN {self.goods_received_note.number}",
             )
+            # Real ledger-consistency fix — "Last Cost," Made's own
+            # confirmed call. A plain overwrite, not F()-based — this
+            # isn't an increment, it's "the most recent real cost IS
+            # now this value," full stop. See this class's own
+            # docstring for the full incident this closes.
+            from apps.inventory.models import Part
+            Part.objects.filter(pk=self.part_id).update(cost_price=self.unit_cost)
 
 
 class SupplierInvoiceSequence(TenantScopedModel):
