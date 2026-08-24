@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from . import reports
 from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
                      PurchaseOrder, PurchaseOrderLineItem, PurchaseReturn,
-                     Supplier, SupplierInvoice)
+                     Supplier, SupplierInvoice, SupplierPartCode)
 from .serializers import (GoodsReceivedNoteRecordSerializer,
                           GoodsReceivedNoteSerializer,
                           PurchaseOrderAmendQuantitySerializer,
@@ -26,7 +26,9 @@ from .serializers import (GoodsReceivedNoteRecordSerializer,
                           PurchaseReturnRecordSerializer,
                           PurchaseReturnSerializer,
                           SupplierInvoiceRecordSerializer,
-                          SupplierInvoiceSerializer, SupplierSerializer)
+                          SupplierInvoiceSerializer,
+                          SupplierPartCodeSerializer,
+                          SupplierPartCodeSetSerializer, SupplierSerializer)
 
 
 class SupplierListCreateView(TenantScopedAPIView):
@@ -459,3 +461,55 @@ class SupplierReliabilityView(TenantScopedAPIView):
 
         data = reports.supplier_reliability(organization, since=since, as_of=as_of)
         return Response({"success": True, **data})
+
+
+class SupplierPartCodeListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/parts/<part_id>/supplier-codes/  — every supplier code
+         on file for this part
+    POST /api/parts/<part_id>/supplier-codes/  — set (create or
+         update) one supplier's own code for this part
+
+    Deliberately defined here, in apps.purchasing (SupplierPartCode's
+    real domain home — a bridge between Part and Supplier, and
+    Supplier is a purchasing concept), but MOUNTED under
+    apps.inventory.urls, not this app's own urls.py — "everything
+    about one specific part" stays under one consistent URL
+    namespace even though the model lives in a different domain app.
+    Mirrors PurchaseOrderLineItem's own reach into apps.inventory.Part
+    in the opposite direction — cross-app reach for URL wiring is
+    already an established pattern in this codebase.
+    """
+    model = SupplierPartCode
+
+    def get(self, request, part_id):
+        codes = self.get_queryset().filter(part_id=part_id).select_related("supplier")
+        return Response({"success": True, "supplier_codes": SupplierPartCodeSerializer(codes, many=True).data})
+
+    def post(self, request, part_id):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        part = Part.objects.filter(organization=organization, pk=part_id).first()
+        if part is None:
+            return Response({"success": False, "message": "Part tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        input_serializer = SupplierPartCodeSetSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        supplier = Supplier.objects.filter(organization=organization, pk=data["supplier"]).first()
+        if supplier is None:
+            return Response({"success": False, "message": "Supplier tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        code = SupplierPartCode.set_code(
+            organization=organization, part=part, supplier=supplier, supplier_sku=data["supplier_sku"],
+        )
+        return Response(
+            {"success": True, "supplier_code": SupplierPartCodeSerializer(code).data},
+            status=status.HTTP_201_CREATED,
+        )
