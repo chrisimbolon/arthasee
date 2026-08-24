@@ -27,12 +27,32 @@ different restocking behavior per part class — an expensive,
 low-turnover sensor is deliberately kept at zero stock and bought
 same-day (HARIAN), while oli/kain/lampu get checked monthly.
 
---- Sprint 7, Task 7.3: guided Stock Opname (bottom of this file) ---
+--- Sprint 7, guided Stock Opname (bottom of this file) ---
 StockOpnameSequence / StockOpnameSession / StockOpnameLineItem — a
 real, guided physical stock count. See StockOpnameSession's own
 docstring for the scoped-session design and the complete() method's
 own docstring for how a variance becomes both a real stock correction
 AND a real, netted GL posting.
+
+--- cost_price (added here): real ledger-consistency fix ---
+Real bug found live, 24 Aug 2026: GoodsReceived debits Account 1301
+at real cost (GRN's own unit_cost), but PartConsumed was crediting
+the SAME account using Part.unit_price — the SELLING price. 1301's
+own real GL balance was silently internally inconsistent the whole
+time this system has been live. cost_price is the fix's foundation:
+one real, system-maintained "last cost" field on Part itself,
+updated automatically by GoodsReceivedNoteLineItem.save() every time
+stock is received (see that file's own updated docstring), and
+consumed by WorkOrderMaterialLine.save() instead of unit_price (see
+that file's own updated docstring) — closing the loop so both the
+debit AND the credit side of 1301 finally use the same real basis.
+
+Made's own confirmed call: "Last Cost," not a full Weighted Average
+Cost engine — simple, predictable, no WAC math running on every
+partial GRN. Read-only from the API's own PartSerializer — same
+"system-derived, never manually entered" treatment already given to
+current_stock, since a hand-typed cost_price would immediately
+diverge from the real GRN history this whole fix depends on.
 """
 import uuid
 from decimal import Decimal
@@ -108,6 +128,25 @@ class Part(TenantScopedModel):
     unit_price = models.DecimalField(
         max_digits=12, decimal_places=2, default=0, verbose_name="Harga Satuan",
         help_text="Harga jual per satuan saat ini — perubahan di sini tidak mengubah riwayat pemakaian yang sudah tercatat.",
+    )
+    # Real ledger-consistency fix — see module docstring above for
+    # the full incident this closes. "Last cost," Made's own
+    # confirmed call: overwritten with the most recent
+    # GoodsReceivedNoteLineItem.unit_cost every time this part is
+    # actually received (see that model's own save()) — never a
+    # running Weighted Average Cost. default=0 means "no real GRN
+    # history yet for this part" — WorkOrderMaterialLine.save() treats
+    # 0 the same as null and falls back to unit_price in that case
+    # (Made's own confirmed "soft fallback," so a brand-new part can
+    # still be consumed on a job before its first official GRN,
+    # rather than blocking a mechanic mid-job). Read-only via the API
+    # — see PartSerializer — same "system-derived, never hand-typed"
+    # treatment as current_stock, since a manually-entered value here
+    # would immediately drift from the real GRN history this field
+    # exists to reflect.
+    cost_price = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0, verbose_name="Harga Beli (HPP)",
+        help_text="Harga pokok (cost) terakhir dari GRN — diperbarui otomatis, tidak bisa diisi manual. 0 berarti part ini belum pernah menerima GRN.",
     )
     # Real per-part reorder threshold. Replaces what used to be a
     # single hardcoded global rule (PartListView.LOW_STOCK_THRESHOLD

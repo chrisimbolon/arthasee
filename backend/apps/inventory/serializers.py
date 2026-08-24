@@ -26,20 +26,26 @@ class PartSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Part
         fields = [
-            "id", "name", "sku", "unit", "current_stock", "unit_price", "minimum_stock",
+            "id", "name", "sku", "unit", "current_stock", "unit_price", "cost_price", "minimum_stock",
             "item_type", "vehicle_brand", "fluid_brand", "viscosity_grade", "reorder_cadence",
             "created_at", "updated_at",
         ]
         # current_stock is intentionally NOT writable here — it only
         # ever changes through PartUsage or StockAdjustment, both of
         # which go through the atomic F() update in models.py.
-        # minimum_stock, unlike current_stock, IS writable — same
-        # treatment as unit_price, since both are values a shop owner
-        # sets and adjusts directly, not derived from stock movement.
-        # The Sprint 7 taxonomy fields (item_type, vehicle_brand,
-        # fluid_brand, viscosity_grade, reorder_cadence) are also
-        # writable, same treatment.
-        read_only_fields = ["id", "current_stock", "created_at", "updated_at"]
+        # cost_price is ALSO read-only — real ledger-consistency fix,
+        # 24 Aug 2026: this field is exclusively system-maintained by
+        # GoodsReceivedNoteLineItem.save()'s own "Last Cost" logic. A
+        # manually-entered value here would immediately drift from
+        # the real GRN history this field exists to reflect, and
+        # would silently break the whole point of the fix (GL
+        # consistency between GoodsReceived's debit and PartConsumed's
+        # credit on Account 1301). unit_price, unlike current_stock
+        # and cost_price, IS writable — a value a shop owner sets and
+        # adjusts directly, not derived from stock movement.
+        # minimum_stock and the Sprint 7 taxonomy fields are also
+        # writable, same treatment as unit_price.
+        read_only_fields = ["id", "current_stock", "cost_price", "created_at", "updated_at"]
 
     def validate(self, data):
         """
