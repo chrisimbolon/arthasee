@@ -519,7 +519,7 @@ function StockSummaryRow({ data }: { data: StockSummary | null }) {
           <div className="mono" style={{ fontSize: 22, fontWeight: 700, color: "var(--danger)" }}>{data.out_of_stock_count}</div>
         </div>
       </div>
-      <div style={{ fontSize: 11.5, color: "var(--steel-lt)", marginTop: 8 }}>{data.total_stock_value_basis}</div>
+      <div style={{ fontSize: 13, color: "var(--ink-soft)", marginTop: 8 }}>{data.total_stock_value_basis}</div>
     </div>
   );
 }
