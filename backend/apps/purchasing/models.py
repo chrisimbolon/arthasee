@@ -744,7 +744,6 @@ class PurchaseReturn(TenantScopedModel):
         super().save(*args, **kwargs)
 
     @classmethod
-    @classmethod
     def create_return(
         cls, *, organization, goods_received_note, lines,
         return_date=None, reason="", created_by=None,
@@ -851,9 +850,7 @@ class PurchaseReturnLineItem(TenantScopedModel):
     Creating one atomically DECREASES Part.current_stock via a real
     StockAdjustment(reason="purchase_return") — reusing the exact
     stock-math mechanism already proven for GoodsReceivedNoteLineItem,
-    just moving stock the other direction. Needs a new REASON_CHOICES
-    entry on StockAdjustment — see the companion patch for
-    apps/inventory/models.py.
+    just moving stock the other direction.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     purchase_return = models.ForeignKey(
@@ -905,3 +902,57 @@ class PurchaseReturnLineItem(TenantScopedModel):
                     f"GRN {self.goods_received_note_line_item.goods_received_note.number}"
                 ),
             )
+
+
+class SupplierPartCode(TenantScopedModel):
+    """
+    One supplier's own SKU/code for one Part — real multi-supplier
+    reality, confirmed directly by Made and by Chris's own visit to
+    Arya Motor, not assumed. A single Part.supplier_sku field would
+    have silently discarded which supplier a code belonged to the
+    moment a second supplier's code was ever entered.
+
+    organization is set explicitly wherever this is created (the
+    Part edit modal's own supplier-code section, or the GRN screen's
+    inline capture) — same pattern as every other TenantScopedModel
+    here that doesn't derive org from a single obvious parent
+    relation.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    part = models.ForeignKey(
+        "inventory.Part", on_delete=models.CASCADE, related_name="supplier_codes",
+        verbose_name="Part",
+    )
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.CASCADE, related_name="part_codes",
+        verbose_name="Supplier",
+    )
+    supplier_sku = models.CharField(max_length=100, verbose_name="Kode Part Supplier")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name        = "Supplier Part Code"
+        verbose_name_plural  = "Supplier Part Codes"
+        unique_together      = [("part", "supplier")]
+        ordering             = ["supplier__name"]
+
+    def __str__(self):
+        return f"{self.part.name} @ {self.supplier.name}: {self.supplier_sku}"
+
+    @classmethod
+    def set_code(cls, *, organization, part, supplier, supplier_sku):
+        """
+        The one real entry point — used by both the Part edit modal's
+        own supplier-code section and the GRN screen's inline
+        capture, so there's one real place this upsert logic lives,
+        not two independent copies that could drift. Idempotent by
+        the real unique_together constraint — a second call for the
+        same (part, supplier) updates the existing code rather than
+        erroring or creating a duplicate.
+        """
+        obj, _ = cls.objects.update_or_create(
+            organization=organization, part=part, supplier=supplier,
+            defaults={"supplier_sku": supplier_sku},
+        )
+        return obj
