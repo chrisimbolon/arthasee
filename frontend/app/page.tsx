@@ -891,18 +891,18 @@ export default function RootPage() {
               </p>
 
               {/* Customer */}
-              <div className="mt-4 flex items-center gap-3">
+              <div className="mt-5 flex items-center gap-4">
 
-                <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full bg-[#D9471F] font-['Montserrat'] text-[12px] font-bold text-white">
+                <div className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-full bg-[#D9471F] font-['Montserrat'] text-[13px] font-bold text-white">
                   AM
                 </div>
 
                 <div>
-                  <div className="font-['Montserrat'] text-[10px] font-bold uppercase leading-none text-[#17181A]">
+                  <div className="font-['Montserrat'] text-[13px] font-bold uppercase leading-none text-[#17181A]">
                     I MADE SUDARTA
                   </div>
 
-                  <div className="mt-1 font-mono text-[8px] text-[#777777]">
+                  <div className="mt-2 font-mono text-[12px] text-[#777777]">
                     CV. Arya Motor · Batam
                   </div>
                 </div>
