@@ -689,7 +689,7 @@ export default function RootPage() {
             <div className="text-white">
 
               {/* Kicker */}
-              <div className="mb-2 font-mono text-[12px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
+              <div className="mb-2 font-mono text-[16px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
                 WHY CHOOSE US
               </div>
 
