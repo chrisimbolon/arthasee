@@ -792,7 +792,7 @@ export default function RootPage() {
               <div className="absolute left-[51px] top-[24px] h-[73px] w-[170px] bg-[#096B3B]" />
 
               {/* Kicker */}
-              <div className="relative mb-2 font-mono text-[12px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
+              <div className="relative mb-2 font-mono text-[16px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
                 ABOUT US
               </div>
 
