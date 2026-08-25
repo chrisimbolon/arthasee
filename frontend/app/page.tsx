@@ -790,17 +790,7 @@ export default function RootPage() {
         </div>
       </section>
 
-      <section id="pilot">
-        <div className="wrap">
-          <div className="pilot">
-            <div className="pilot-mark">AM</div>
-            <div>
-              <blockquote>&quot;Pelanggan itu aset kami. Tanpa pelanggan dan sistem yang mengurus mereka, gudang dan montir sebanyak apa pun tidak ada gunanya.&quot;</blockquote>
-              <cite>— I Made Sudarta, CV. Arya Motor, Batam</cite>
-            </div>
-          </div>
-        </div>
-      </section>
+
 
       <section className="final-cta">
         <div className="wrap">
