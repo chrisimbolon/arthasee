@@ -790,7 +790,47 @@ export default function RootPage() {
         </div>
       </section>
 
+        {/* CTA Banner */}
+        <section
+          id="contact"
+          className="relative h-[303px] w-full overflow-hidden bg-[#000000]"
+        >
+          {/* Background image */}
+          <div
+            className="absolute inset-0 bg-cover bg-center"
+            style={{
+              backgroundImage: "url('/cta/cta-banner.webp')",
+            }}
+          />
 
+          {/* Dark overlay */}
+          <div className="absolute inset-0 bg-black/80" />
+
+          {/* CTA Content */}
+          <div className="relative mx-auto flex h-full w-full max-w-[1440px] items-center justify-center px-[120px]">
+            <div className="flex flex-col items-center text-center">
+
+              {/* Heading */}
+              <h2 className="font-['Montserrat'] text-[28px] font-bold uppercase leading-none text-white">
+                COBA DI BENGKEL ANDA
+              </h2>
+
+              {/* Supporting text */}
+              <p className="mt-2 text-[11px] font-medium text-white/70">
+                Gratis Untuk Mulai. Tidak Perlu Kartu Kredit.
+              </p>
+
+              {/* CTA */}
+              <Link
+                href="/register"
+                className="mt-4 inline-flex h-[34px] items-center justify-center rounded-[3px] bg-[#096B3B] px-5 text-[10px] font-semibold uppercase tracking-[0.02em] text-white transition-colors hover:bg-[#075C32]"
+              >
+                UJI COBA GRATIS
+              </Link>
+
+            </div>
+          </div>
+        </section>
 
       <section className="final-cta">
         <div className="wrap">
