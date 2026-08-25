@@ -887,7 +887,7 @@ export default function RootPage() {
               <p className="mt-3 max-w-[850px] text-[13px] leading-[1.55] text-[#444444]">
                 &quot;Pelanggan itu aset kami. Tanpa pelanggan dan sistem yang
                 mengurus mereka, gudang dan montir sebanyak apa pun tidak ada
-                gunanya.&quot;
+                gunanya.Arthasee mewujudkan impian saya untuk pelanggan dengan sistem yang handal &quot;
               </p>
 
               {/* Customer */}
