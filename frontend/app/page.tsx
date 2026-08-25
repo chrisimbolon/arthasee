@@ -884,10 +884,10 @@ export default function RootPage() {
               </div>
 
               {/* Quote */}
-              <p className="mt-3 max-w-[850px] text-[13px] leading-[1.55] text-[#444444]">
+              <p className="mt-3 max-w-[950px] text-[17px] font-medium leading-[1.6] text-[#444444] md:text-[18px] lg:text-[20px]">
                 &quot;Pelanggan itu aset kami. Tanpa pelanggan dan sistem yang
                 mengurus mereka, gudang dan montir sebanyak apa pun tidak ada
-                gunanya.Arthasee mewujudkan impian saya untuk pelanggan dengan sistem yang handal &quot;
+                gunanya. Arthasee mewujudkan impian saya untuk pelanggan dengan sistem yang handal &quot;
               </p>
 
               {/* Customer */}
