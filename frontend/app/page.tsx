@@ -37,6 +37,52 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
+function CarIcon({ inverted = false }: { inverted?: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 48 40"
+      className={`h-[31px] w-[37px] ${inverted ? "text-white" : "text-[#17181A]"}`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M8 25.5h32" />
+      <path d="M10.5 25.5 13 17h22l4.5 8.5" />
+      <path d="M16 17v-4h16v4" />
+      <path d="M12 25.5v5h5v-5M31 25.5v5h5v-5" />
+      <circle cx="17" cy="25.5" r="2.3" />
+      <circle cx="31" cy="25.5" r="2.3" />
+      <path d="M20 17h8" />
+      <path d="M6 21h4M38 21h4" />
+    </svg>
+  );
+}
+
+function FeatureList({ dark }: { dark: boolean }) {
+  const features = [
+    "Oil Change & Filter",
+    "Tire Rotation",
+    "Brake Inspection",
+    "Engine Diagnostics",
+  ];
+
+  return (
+    <ul className={`mt-3 w-full space-y-[5px] text-left ${dark ? "text-white/75" : "text-[#5B5B5B]"}`}>
+      {features.map((feature) => (
+        <li key={feature} className="flex items-center gap-1.5 font-mono text-[6.5px] leading-none">
+          <span className="font-bold text-[#096B3B]">✓</span>
+          <span>{feature}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+
+
 export default function RootPage() {
   const { user, loading } = useAuth();
   const router = useRouter();
@@ -913,6 +959,130 @@ export default function RootPage() {
 
           </div>
         </section>
+
+        {/* Pricing Section */}
+        <section
+          id="pricing"
+          className="relative overflow-hidden bg-[#F9F9F9] px-6 py-[80px] md:px-[60px] lg:px-[120px]"
+        >
+          <div className="mx-auto w-full max-w-[1200px]">
+            {/* Pricing Header */}
+            <div className="relative mb-[42px] min-h-[78px]">
+              {/* Decorative heading */}
+              <div className="pointer-events-none absolute left-0 top-[-6px] select-none font-['Montserrat'] text-[52px] font-bold italic uppercase leading-none tracking-[-0.04em] text-transparent [-webkit-text-stroke:1px_#E6E6E6]">
+                PRICING
+              </div>
+
+              <div className="relative mx-auto max-w-[420px] text-center">
+                <div className="mb-1 font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-[#096B3B]">
+                  PRICING
+                </div>
+                <h2 className="font-['Montserrat'] text-[26px] font-bold uppercase leading-[0.98] tracking-[-0.02em] text-[#17181A] md:text-[28px]">
+                  PACKAGES FOR ALL
+                  <br />
+                  TYPES OF CARS
+                </h2>
+              </div>
+            </div>
+
+            {/* Pricing Cards */}
+            <div className="mx-auto grid max-w-[850px] grid-cols-1 items-stretch gap-4 md:grid-cols-3">
+              {/* Starter */}
+              <article className="flex min-h-[280px] flex-col rounded-[5px] border border-[#E6E6E6] bg-white px-4 py-5 shadow-[0_5px_16px_rgba(0,0,0,0.05)] transition-transform duration-200 hover:-translate-y-1">
+                <div className="flex flex-1 flex-col items-center text-center">
+                  <CarIcon />
+                  <div className="mt-3 font-['Montserrat'] text-[9px] font-bold uppercase tracking-[0.02em] text-[#17181A]">
+                    STARTER
+                  </div>
+
+                  <div className="mt-2 flex items-baseline justify-center gap-1">
+                    <span className="font-['Montserrat'] text-[19px] font-bold leading-none text-[#17181A]">
+                      Gratis
+                    </span>
+                  </div>
+
+                  <div className="mt-1 font-mono text-[6px] uppercase tracking-[0.03em] text-[#8A8A8A]">
+                    PER CAR PER MONTH
+                  </div>
+
+                  <FeatureList dark={false} />
+                </div>
+
+                <Link
+                  href="/register"
+                  className="mt-4 inline-flex h-[30px] w-full items-center justify-center rounded-[2px] bg-[#17181A] px-3 font-['Montserrat'] text-[8px] font-semibold uppercase text-white transition-colors hover:bg-[#096B3B]"
+                >
+                  GET STARTED
+                </Link>
+              </article>
+
+              {/* Professional — highlighted */}
+              <article className="relative flex min-h-[300px] -translate-y-1 flex-col rounded-[5px] bg-[#111111] px-4 py-5 shadow-[0_10px_24px_rgba(0,0,0,0.20)] transition-transform duration-200 hover:-translate-y-2">
+                <div className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 rounded-[2px] bg-[#096B3B] px-2 py-[3px] font-mono text-[6px] font-semibold uppercase tracking-[0.06em] text-white">
+                  MOST POPULAR
+                </div>
+
+                <div className="flex flex-1 flex-col items-center text-center">
+                  <CarIcon inverted />
+                  <div className="mt-3 font-['Montserrat'] text-[9px] font-bold uppercase tracking-[0.02em] text-white">
+                    PROFESSIONAL
+                  </div>
+
+                  <div className="mt-2 flex items-baseline justify-center gap-1">
+                    <span className="font-['Montserrat'] text-[19px] font-bold leading-none text-[#096B3B]">
+                      Rp124.000
+                    </span>
+                    <span className="font-mono text-[6px] text-[#777777]">IDR</span>
+                  </div>
+
+                  <div className="mt-1 font-mono text-[6px] uppercase tracking-[0.03em] text-[#777777]">
+                    PER CAR PER MONTH
+                  </div>
+
+                  <FeatureList dark />
+                </div>
+
+                <Link
+                  href="/register"
+                  className="mt-4 inline-flex h-[30px] w-full items-center justify-center rounded-[2px] bg-[#55D96B] px-3 font-['Montserrat'] text-[8px] font-semibold uppercase text-[#111111] transition-colors hover:bg-[#096B3B] hover:text-white"
+                >
+                  GET STARTED
+                </Link>
+              </article>
+
+              {/* Deluxe */}
+              <article className="flex min-h-[280px] flex-col rounded-[5px] border border-[#E6E6E6] bg-white px-4 py-5 shadow-[0_5px_16px_rgba(0,0,0,0.05)] transition-transform duration-200 hover:-translate-y-1">
+                <div className="flex flex-1 flex-col items-center text-center">
+                  <CarIcon />
+                  <div className="mt-3 font-['Montserrat'] text-[9px] font-bold uppercase tracking-[0.02em] text-[#17181A]">
+                    DELUXE
+                  </div>
+
+                  <div className="mt-2 flex items-baseline justify-center gap-1">
+                    <span className="font-['Montserrat'] text-[19px] font-bold leading-none text-[#17181A]">
+                      Rp189.000
+                    </span>
+                    <span className="font-mono text-[6px] text-[#8A8A8A]">IDR</span>
+                  </div>
+
+                  <div className="mt-1 font-mono text-[6px] uppercase tracking-[0.03em] text-[#8A8A8A]">
+                    PER CAR PER MONTH
+                  </div>
+
+                  <FeatureList dark={false} />
+                </div>
+
+                <Link
+                  href="/register"
+                  className="mt-4 inline-flex h-[30px] w-full items-center justify-center rounded-[2px] bg-[#17181A] px-3 font-['Montserrat'] text-[8px] font-semibold uppercase text-white transition-colors hover:bg-[#096B3B]"
+                >
+                  GET STARTED
+                </Link>
+              </article>
+            </div>
+          </div>
+        </section>
+
 
       <footer className="wrap">
         <div>© 2026 Arthasee. Dibuat di Batam.</div>
