@@ -799,7 +799,7 @@ export default function RootPage() {
           <div
             className="absolute inset-0 bg-cover bg-center"
             style={{
-              backgroundImage: "url('/cta/cta-banner.webp')",
+              backgroundImage: "url('/cta-banner/cta-banner.webp')",
             }}
           />
 
