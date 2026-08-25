@@ -809,13 +809,6 @@ export default function RootPage() {
                 yang mengurus mereka, gudang dan montir sebanyak apa pun
                 tidak ada gunanya."
               </p>
-
-              {/* Description */}
-              <p className="relative mt-5 max-w-[410px] text-[13px] leading-[1.6] text-[#6B6B6B]">
-                Pelanggan itu aset kami. Tanpa pelanggan dan sistem yang
-                mengurus mereka, gudang dan montir sebanyak apa pun tidak
-                ada gunanya.
-              </p>
             </div>
 
             {/* About Image */}
