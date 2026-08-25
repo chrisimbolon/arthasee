@@ -832,7 +832,87 @@ export default function RootPage() {
           </div>
         </section>
 
+        {/* Testimonials Section */}
+        <section
+          id="testimonials"
+          className="bg-[#111111] px-[120px] py-[80px]"
+        >
+          <div className="mx-auto w-full max-w-[1200px]">
 
+            {/* Header */}
+            <div className="relative mb-8">
+
+              <div>
+                <div className="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-[#096B3B]">
+                  TESTIMONIALS
+                </div>
+
+                <h2 className="font-['Montserrat'] text-[28px] font-bold uppercase leading-[0.95] tracking-[-0.02em] text-white">
+                  WHAT OUR CLIENTS
+                  <br />
+                  SAY ABOUT US
+                </h2>
+              </div>
+
+              {/* Navigation */}
+              <div className="absolute right-0 bottom-0 flex items-center gap-2">
+                <button
+                  type="button"
+                  aria-label="Previous testimonial"
+                  className="flex h-[28px] w-[28px] items-center justify-center rounded-[3px] bg-[#242424] text-[13px] text-white transition-colors hover:bg-[#096B3B]"
+                >
+                  ←
+                </button>
+
+                <button
+                  type="button"
+                  aria-label="Next testimonial"
+                  className="flex h-[28px] w-[28px] items-center justify-center rounded-[3px] bg-[#242424] text-[13px] text-white transition-colors hover:bg-[#096B3B]"
+                >
+                  →
+                </button>
+              </div>
+
+            </div>
+
+            {/* Testimonial */}
+            <article className="w-full rounded-[4px] bg-white p-5">
+
+              {/* Stars */}
+              <div className="text-[10px] tracking-[0.08em] text-[#F5A623]">
+                ★★★★★
+              </div>
+
+              {/* Quote */}
+              <p className="mt-3 max-w-[850px] text-[13px] leading-[1.55] text-[#444444]">
+                &quot;Pelanggan itu aset kami. Tanpa pelanggan dan sistem yang
+                mengurus mereka, gudang dan montir sebanyak apa pun tidak ada
+                gunanya.&quot;
+              </p>
+
+              {/* Customer */}
+              <div className="mt-4 flex items-center gap-3">
+
+                <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full bg-[#D9471F] font-['Montserrat'] text-[12px] font-bold text-white">
+                  AM
+                </div>
+
+                <div>
+                  <div className="font-['Montserrat'] text-[10px] font-bold uppercase leading-none text-[#17181A]">
+                    I MADE SUDARTA
+                  </div>
+
+                  <div className="mt-1 font-mono text-[8px] text-[#777777]">
+                    CV. Arya Motor · Batam
+                  </div>
+                </div>
+
+              </div>
+
+            </article>
+
+          </div>
+        </section>
 
       <footer className="wrap">
         <div>© 2026 Arthasee. Dibuat di Batam.</div>
