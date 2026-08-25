@@ -381,22 +381,22 @@ export default function RootPage() {
       </div>
 
       {/* Heading */}
-<h1 className="w-[635px] max-w-full font-['Montserrat'] text-[56px] font-bold italic uppercase leading-none tracking-[0] text-white">
-  <span className="block whitespace-nowrap">
-    SISTEM MANAJEMEN
-  </span>
-  <span className="block whitespace-nowrap">
-    BENGKEL TERINTEGRASI
-  </span>
-</h1>        
+        <h1 className="w-[635px] max-w-full font-['Montserrat'] text-[56px] font-bold italic uppercase leading-none tracking-[0] text-white">
+          <span className="block whitespace-nowrap">
+            SISTEM MANAJEMEN
+          </span>
+          <span className="block whitespace-nowrap">
+            BENGKEL TERINTEGRASI
+          </span>
+        </h1>        
 
-{/* Description */}
-<p className="mt-8 max-w-[610px] text-[18px] leading-[1.65] text-white/80">
-  Arthasee menyimpan data pelanggan, riwayat kendaraan,
-  dan catatan servis bengkel Anda di satu tempat — lalu
-  memberi tahu unit mana yang sudah waktunya servis lagi.
-  Sesederhana itu, dan sudah bisa dipakai hari ini.
-</p>
+        {/* Description */}
+        <p className="mt-8 max-w-[610px] text-[18px] leading-[1.65] text-white/80">
+          Arthasee menyimpan data pelanggan, riwayat kendaraan,
+          dan catatan servis bengkel Anda di satu tempat — lalu
+          memberi tahu unit mana yang sudah waktunya servis lagi.
+          Sesederhana itu, dan sudah bisa dipakai hari ini.
+        </p>
 
       {/* Buttons */}
 {/* CTA Buttons */}
@@ -832,16 +832,7 @@ export default function RootPage() {
           </div>
         </section>
 
-      <section className="final-cta">
-        <div className="wrap">
-          <h2 className="display">Coba di bengkel Anda.</h2>
-          <p>Gratis untuk mulai. Tidak perlu kartu kredit.</p>
-          <div className="final-ctas">
-            <Link href="/register" className="btn-hero-rust">Mulai Gratis →</Link>
-            <a href="#" className="btn-hero-ghost">Hubungi Kami</a>
-          </div>
-        </div>
-      </section>
+
 
       <footer className="wrap">
         <div>© 2026 Arthasee. Dibuat di Batam.</div>
