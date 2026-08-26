@@ -469,6 +469,7 @@ function MovementHistoryModal({ part, onClose }: { part: Part; onClose: () => vo
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {movements.map((m, i) => {
               const qty = toNumber(m.quantity_change);
+              const hasCost = m.unit_cost !== null && m.unit_cost !== undefined && toNumber(String(m.unit_cost)) > 0;
               return (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "1px solid var(--line)", paddingBottom: 10 }}>
                   <div>
@@ -476,9 +477,22 @@ function MovementHistoryModal({ part, onClose }: { part: Part; onClose: () => vo
                     <div style={{ fontSize: 11.5, color: "var(--steel)" }}>{new Date(m.date).toLocaleString("id-ID")}</div>
                     {m.notes && <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 2 }}>{m.notes}</div>}
                   </div>
-                  <span className="mono" style={{ fontWeight: 700, flexShrink: 0, color: qty >= 0 ? "var(--workshop)" : "var(--danger)" }}>
-                    {qty >= 0 ? "+" : ""}{m.quantity_change}
-                  </span>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <span className="mono" style={{ fontWeight: 700, color: qty >= 0 ? "var(--workshop)" : "var(--danger)" }}>
+                      {qty >= 0 ? "+" : ""}{m.quantity_change}
+                    </span>
+                    {/* 26 Aug 2026 — real per-purchase price, when
+                        known. Only shown for a restock that actually
+                        traces back to a real GRN/Quick Purchase — a
+                        manual "Sesuaikan Stok" restock has no price
+                        to show, and correctly shows none, rather
+                        than a guessed or blank-looking number. */}
+                    {hasCost && (
+                      <div className="mono" style={{ fontSize: 11, color: "var(--steel)", marginTop: 2 }}>
+                        @ {formatRupiah(m.unit_cost as string | number)}
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -519,7 +533,7 @@ function StockSummaryRow({ data }: { data: StockSummary | null }) {
           <div className="mono" style={{ fontSize: 22, fontWeight: 700, color: "var(--danger)" }}>{data.out_of_stock_count}</div>
         </div>
       </div>
-      <div style={{ fontSize: 13, color: "var(--ink-soft)", marginTop: 8 }}>{data.total_stock_value_basis}</div>
+      <div style={{ fontSize: 11.5, color: "var(--steel-lt)", marginTop: 8 }}>{data.total_stock_value_basis}</div>
     </div>
   );
 }
