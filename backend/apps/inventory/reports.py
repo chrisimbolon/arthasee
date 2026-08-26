@@ -30,6 +30,33 @@ KPI and the ledger could still diverge until its first real GRN
 lands. Stating that plainly is more honest than declaring perfect
 reconciliation this KPI can't actually promise for every part, every
 time.
+
+--- 26 Aug 2026: movement_history() now surfaces real per-purchase
+price ---
+Real gap found live: Chris intentionally bought the same part
+(Kanvas Rem) at two different real prices (via two separate GRNs) to
+test how Arthasee handles a price change over time — and Movement
+History showed the real quantity trail but NO price trail at all,
+even though the real per-purchase price was never actually lost.
+Part.cost_price is a single, global "Last Cost" (Made's own confirmed
+design — NOT tracked per-supplier, NOT a running average) — the only
+way to see what was actually paid on any PARTICULAR past purchase is
+to look at that purchase's own real, immutable unit_cost, which
+already lives on GoodsReceivedNoteLineItem/QuickPurchaseLineItem and
+always has.
+
+StockAdjustment itself never stores unit_cost — only a plain notes
+string referencing its source document (see either line-item model's
+own save()). Rather than add a new FK/migration to fix this, this
+enrichment reads that already-real data directly: for a
+reason="restock" adjustment whose notes match the exact,
+system-generated "GRN {number}" or "Quick Purchase {number}" format
+those two models themselves always write, the matching line item's
+own real unit_cost is looked up and attached. A manual restock (via
+the plain "Sesuaikan Stok" UI, no GRN/QP origin at all) correctly
+shows unit_cost=None — an honest "we don't know the price for this
+one," matching reality, since that manual action never asks for a
+price at all.
 """
 from decimal import Decimal
 
@@ -108,9 +135,37 @@ def movement_history(part):
     real, avoidable source of off-by-one bugs for a feature that's
     genuinely more useful as an honest "here's what happened" than a
     reconstructed ledger.
+
+    Each restock row now also carries the real unit_cost it actually
+    happened at, when that's knowable — see module docstring for the
+    full 26 Aug 2026 reasoning. Import kept local to this function,
+    not module-level — apps.purchasing already imports FROM
+    apps.inventory (Part, StockAdjustment) in several places; keeping
+    this reach the other direction scoped to just the one function
+    that needs it avoids inviting a real circular-import question at
+    module load time.
     """
+    from apps.purchasing.models import (GoodsReceivedNoteLineItem,
+                                        QuickPurchaseLineItem)
+
     usages = PartUsage.objects.filter(part=part).select_related("service_record")
     adjustments = StockAdjustment.objects.filter(part=part).select_related("created_by")
+
+    # Keyed by the exact document number each restock's own notes
+    # field already, always contains — both "GRN {number}" and
+    # "Quick Purchase {number}" are fixed, system-generated formats
+    # written by GoodsReceivedNoteLineItem.save() /
+    # QuickPurchaseLineItem.save() themselves, never user-typed text,
+    # so matching against them here is a safe, reliable lookup, not
+    # fragile string-guessing at arbitrary input.
+    grn_costs = {
+        li.goods_received_note.number: li.unit_cost
+        for li in GoodsReceivedNoteLineItem.objects.filter(part=part).select_related("goods_received_note")
+    }
+    quick_purchase_costs = {
+        li.quick_purchase.number: li.unit_cost
+        for li in QuickPurchaseLineItem.objects.filter(part=part).select_related("quick_purchase")
+    }
 
     rows = []
     for u in usages:
@@ -121,8 +176,19 @@ def movement_history(part):
             "reason": "Dipakai pada servis",
             "service_record_id": str(u.service_record_id),
             "notes": "",
+            "unit_cost": None,
         })
     for a in adjustments:
+        unit_cost = None
+        if a.reason == "restock":
+            if a.notes.startswith("GRN "):
+                unit_cost = grn_costs.get(a.notes[len("GRN "):])
+            elif a.notes.startswith("Quick Purchase "):
+                unit_cost = quick_purchase_costs.get(a.notes[len("Quick Purchase "):])
+            # Anything else (a manual "Sesuaikan Stok" restock, no
+            # GRN/QP origin) correctly leaves unit_cost as None — that
+            # action never asks for a price, so there genuinely isn't
+            # one to show, and pretending otherwise would be dishonest.
         rows.append({
             "type": "adjustment",
             "date": a.created_at,
@@ -130,6 +196,7 @@ def movement_history(part):
             "reason": a.get_reason_display(),
             "service_record_id": None,
             "notes": a.notes,
+            "unit_cost": unit_cost,
             "created_by_name": a.created_by.full_name if a.created_by else None,
         })
 
