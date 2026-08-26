@@ -7,7 +7,8 @@ from rest_framework import serializers
 
 from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
                      PurchaseOrder, PurchaseOrderLineItem, PurchaseReturn,
-                     PurchaseReturnLineItem, Supplier, SupplierInvoice,
+                     PurchaseReturnLineItem, QuickPurchase,
+                     QuickPurchaseLineItem, Supplier, SupplierInvoice,
                      SupplierPartCode)
 
 
@@ -208,6 +209,16 @@ class SupplierInvoiceSerializer(serializers.ModelSerializer):
         fields = [
             "id", "number", "sequence_number", "supplier", "supplier_name",
             "supplier_invoice_number", "goods_received_notes", "amount",
+            # attachment: Made's own confirmed 25 Aug request — real
+            # file so the physical supplier invoice isn't lost. Read-
+            # only HERE (output) — the actual write path is a
+            # dedicated multipart upload endpoint (see
+            # SupplierInvoiceUploadAttachmentView in views.py), not
+            # this JSON serializer, since DRF's plain JSON body
+            # parsing can't carry a real file payload alongside the
+            # rest of a SupplierInvoiceRecordSerializer's fields in
+            # one request.
+            "attachment",
             "invoice_date", "due_date", "status", "notes", "created_by", "created_at",
         ]
         read_only_fields = fields
@@ -302,4 +313,59 @@ class PurchaseReturnRecordSerializer(serializers.Serializer):
     def validate_reason(self, value):
         if not value.strip():
             raise serializers.ValidationError("Alasan retur wajib diisi.")
+        return value
+
+
+class QuickPurchaseLineItemSerializer(serializers.ModelSerializer):
+    part_name = serializers.CharField(source="part.name", read_only=True)
+    subtotal  = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+
+    class Meta:
+        model  = QuickPurchaseLineItem
+        fields = ["id", "part", "part_name", "quantity", "unit_cost", "subtotal", "created_at"]
+        read_only_fields = fields  # frozen — same discipline as every other line-item serializer in this file
+
+
+class QuickPurchaseSerializer(serializers.ModelSerializer):
+    line_items      = QuickPurchaseLineItemSerializer(many=True, read_only=True)
+    total_cost      = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    supplier_name    = serializers.CharField(source="supplier.name", read_only=True)
+    payment_method_display = serializers.CharField(source="get_payment_method_display", read_only=True)
+    created_by_name  = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = QuickPurchase
+        fields = [
+            "id", "number", "sequence_number", "supplier", "supplier_name",
+            "payment_method", "payment_method_display", "purchased_at", "reference", "notes",
+            "line_items", "total_cost", "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = fields  # frozen document — same discipline as GoodsReceivedNote; no PATCH/PUT endpoint
+
+
+class QuickPurchaseLineItemInputSerializer(serializers.Serializer):
+    part       = serializers.UUIDField()
+    quantity   = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
+    unit_cost  = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+
+
+class QuickPurchaseRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/quick-purchases/. Multi-line, Made's
+    own confirmed call — one real receipt can cover several different
+    consumables bought on the same quick run. Same UUIDField-not-
+    PrimaryKeyRelatedField reasoning as every other Record serializer
+    in this file — `supplier` and every line's `part` get resolved
+    against the requesting user's own organization in the view.
+    """
+    supplier       = serializers.UUIDField()
+    payment_method = serializers.ChoiceField(choices=["cash", "bank"], required=False, default="cash")
+    purchased_at   = serializers.DateTimeField(required=False, allow_null=True)
+    reference      = serializers.CharField(required=False, allow_blank=True, default="")
+    notes          = serializers.CharField(required=False, allow_blank=True, default="")
+    lines          = QuickPurchaseLineItemInputSerializer(many=True)
+
+    def validate_lines(self, value):
+        if not value:
+            raise serializers.ValidationError("Quick Purchase harus memiliki minimal satu item.")
         return value
