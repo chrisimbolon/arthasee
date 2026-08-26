@@ -414,12 +414,6 @@ export default function RootPage() {
   <div className="relative mx-auto flex min-h-[calc(100vh-74px)] w-full max-w-[1440px] items-center px-[120px]">
     <div className="max-w-[650px]">
 
-      {/* Badge */}
-      <div className="mb-8 inline-flex items-center gap-3 rounded-full border border-black/10 bg-[#F8F7F3]/90 px-4 py-2">
-        <span className="h-2 w-2 rounded-full bg-[#C1401C]" />
-        <span className="text-black/30">·</span>
-      </div>
-
       {/* Heading */}
         <h1 className="w-[635px] max-w-full font-['Montserrat'] text-[56px] font-bold italic uppercase leading-none tracking-[0] text-white">
           <span className="block whitespace-nowrap">
