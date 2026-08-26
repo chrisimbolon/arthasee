@@ -421,9 +421,6 @@ export default function RootPage() {
           CRM BENGKEL
         </span>
         <span className="text-black/30">·</span>
-        <span className="font-mono text-[13px] font-medium tracking-[0.08em] text-[#2F4A3C]">
-          FASE 1
-        </span>
       </div>
 
       {/* Heading */}
