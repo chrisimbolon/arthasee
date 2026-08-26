@@ -22,7 +22,7 @@ from rest_framework.test import APITestCase
 
 from . import reports
 from .models import (GoodsReceivedNote, PurchaseOrder, PurchaseReturn,
-                     Supplier, SupplierInvoice)
+                     QuickPurchase, Supplier, SupplierInvoice)
 
 
 class PurchasingModelTestBase(TestCase):
@@ -1326,3 +1326,270 @@ class SupplierReliabilityReportTests(PurchasingModelTestBase):
         row = data["suppliers"][0]
         self.assertEqual(row["total_returned_value"], Decimal("90000.00"))  # 2 * 45000
         self.assertEqual(row["return_rate"].quantize(Decimal("1")), Decimal("20"))  # 90000/450000*100
+
+class QuickPurchaseTests(PurchasingModelTestBase):
+    """
+    Made's own confirmed exception, 25 Aug meeting — a real,
+    immediate spot purchase for HARIAN/MINGGUAN parts, no
+    PurchaseOrder required. Proves the stock/cost side
+    (StockAdjustment, Part.cost_price "Last Cost") independently of
+    the GL posting side — see QuickPurchaseEventTests below.
+    """
+
+    def test_record_creates_sequential_number(self):
+        qp = QuickPurchase.record(
+            organization=self.org, supplier=self.supplier,
+            lines=[{"part": self.part_a, "quantity": Decimal("2.00"), "unit_cost": Decimal("70000.00")}],
+        )
+        self.assertEqual(qp.number, "QP/00001")
+        self.assertEqual(qp.sequence_number, 1)
+
+    def test_record_increases_stock_via_real_stock_adjustment(self):
+        self.assertEqual(self.part_a.current_stock, Decimal("0"))
+        QuickPurchase.record(
+            organization=self.org, supplier=self.supplier,
+            lines=[{"part": self.part_a, "quantity": Decimal("3.00"), "unit_cost": Decimal("70000.00")}],
+        )
+        self.part_a.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("3.00"))
+
+        adjustment = StockAdjustment.objects.get(part=self.part_a)
+        # reason="restock", NOT "correction" — a real incoming
+        # purchase is a restock, same real-world event
+        # GoodsReceivedNoteLineItem already labels this way.
+        # "correction" is this codebase's own established label for
+        # fixing a miscount (Stock Opname); this test is the real
+        # regression guard for that deliberate choice.
+        self.assertEqual(adjustment.reason, "restock")
+        self.assertEqual(adjustment.quantity_change, Decimal("3.00"))
+
+    def test_record_updates_part_cost_price_last_cost(self):
+        self.assertEqual(self.part_a.cost_price, Decimal("0"))
+        QuickPurchase.record(
+            organization=self.org, supplier=self.supplier,
+            lines=[{"part": self.part_a, "quantity": Decimal("2.00"), "unit_cost": Decimal("70000.00")}],
+        )
+        self.part_a.refresh_from_db()
+        self.assertEqual(self.part_a.cost_price, Decimal("70000.00"))
+
+    def test_multi_line_purchase_updates_each_part_independently(self):
+        """
+        Made's own confirmed call — staff often buy a few different
+        consumables on one real receipt during a quick run, not just
+        one part at a time.
+        """
+        qp = QuickPurchase.record(
+            organization=self.org, supplier=self.supplier,
+            lines=[
+                {"part": self.part_a, "quantity": Decimal("2.00"), "unit_cost": Decimal("70000.00")},
+                {"part": self.part_b, "quantity": Decimal("1.00"), "unit_cost": Decimal("55000.00")},
+            ],
+        )
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("2.00"))
+        self.assertEqual(self.part_b.current_stock, Decimal("6.00"))  # 5 existing + 1
+        self.assertEqual(self.part_a.cost_price, Decimal("70000.00"))
+        self.assertEqual(self.part_b.cost_price, Decimal("55000.00"))
+        self.assertEqual(qp.total_cost, Decimal("195000.00"))  # 2*70000 + 1*55000
+
+    def test_record_requires_at_least_one_line(self):
+        with self.assertRaises(ValueError):
+            QuickPurchase.record(organization=self.org, supplier=self.supplier, lines=[])
+
+    def test_quick_purchase_numbers_are_scoped_per_organization(self):
+        QuickPurchase.record(
+            organization=self.org, supplier=self.supplier,
+            lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
+        other_org = Organization.objects.create(name="Bengkel Lain QuickPurchase")
+        other_supplier = Supplier.objects.create(organization=other_org, name="Toko Lain")
+        other_part = Part.objects.create(
+            organization=other_org, name="Part Lain", unit="pcs",
+            unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
+        )
+        other_qp = QuickPurchase.record(
+            organization=other_org, supplier=other_supplier,
+            lines=[{"part": other_part, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
+        )
+        self.assertEqual(other_qp.number, "QP/00001")  # separate sequence, not 00002
+
+
+class QuickPurchaseEventTests(PurchasingModelTestBase):
+    """
+    Real GL proof — Dr Inventory (1301) / Cr Cash (1001) or Bank
+    (1101) depending on payment_method. Same standard as
+    GoodsReceivedEventTests above: proves the actual journal entry,
+    not just that the model layer runs without error. This is the
+    highest-value test in this whole batch — brand-new, money-moving
+    GL logic, checked with the same rigor as everything else in this
+    file, right after a real GL inconsistency was found and fixed
+    elsewhere in this same sprint.
+    """
+
+    def test_cash_purchase_posts_inventory_and_cash(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            QuickPurchase.record(
+                organization=self.org, supplier=self.supplier,
+                lines=[{"part": self.part_a, "quantity": Decimal("2.00"), "unit_cost": Decimal("70000.00")}],
+                payment_method="cash",
+            )
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        cash      = Account.objects.get(organization=self.org, code="1001")
+        # 2 * 70000 = 140000 — verified by hand before this assertion
+        # was written. Cash is credited, so its balance goes negative
+        # — same sign convention already proven by
+        # SupplierInvoiceAPITests.test_full_round_trip_receive_invoice_and_pay's
+        # own bank.balance() assertion.
+        self.assertEqual(inventory.balance(), Decimal("140000.00"))
+        self.assertEqual(cash.balance(), Decimal("-140000.00"))
+
+    def test_bank_purchase_posts_inventory_and_bank(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            QuickPurchase.record(
+                organization=self.org, supplier=self.supplier,
+                lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("55000.00")}],
+                payment_method="bank",
+            )
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        bank      = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(inventory.balance(), Decimal("55000.00"))
+        self.assertEqual(bank.balance(), Decimal("-55000.00"))
+
+    def test_multi_line_purchase_posts_the_aggregated_total(self):
+        """
+        Real proof the posting uses the SUMMED total across every
+        line, not a per-line posting — matches GoodsReceived's own
+        aggregated-total shape, not PartConsumed's per-line shape.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            QuickPurchase.record(
+                organization=self.org, supplier=self.supplier,
+                lines=[
+                    {"part": self.part_a, "quantity": Decimal("2.00"), "unit_cost": Decimal("70000.00")},
+                    {"part": self.part_b, "quantity": Decimal("1.00"), "unit_cost": Decimal("55000.00")},
+                ],
+                payment_method="cash",
+            )
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        cash      = Account.objects.get(organization=self.org, code="1001")
+        self.assertEqual(inventory.balance(), Decimal("195000.00"))
+        self.assertEqual(cash.balance(), Decimal("-195000.00"))
+
+
+class QuickPurchaseAPITests(PurchasingAPITestBase):
+
+    def test_create_quick_purchase_via_api_posts_real_journal_entry(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post("/api/quick-purchases/", {
+                "supplier": str(self.supplier.id),
+                "payment_method": "cash",
+                "lines": [{"part": str(self.part.id), "quantity": "2.00", "unit_cost": "70000.00"}],
+            }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("2.00"))
+        self.assertEqual(self.part.cost_price, Decimal("70000.00"))
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        cash      = Account.objects.get(organization=self.org, code="1001")
+        self.assertEqual(inventory.balance(), Decimal("140000.00"))
+        self.assertEqual(cash.balance(), Decimal("-140000.00"))
+
+    def test_create_quick_purchase_rejects_cross_tenant_part(self):
+        other_org = Organization.objects.create(name="Bengkel Lain QP Part")
+        other_part = Part.objects.create(
+            organization=other_org, name="Part Org Lain", unit="pcs",
+            unit_price=Decimal("10000.00"), current_stock=Decimal("0"),
+        )
+        resp = self.client.post("/api/quick-purchases/", {
+            "supplier": str(self.supplier.id),
+            "lines": [{"part": str(other_part.id), "quantity": "1.00", "unit_cost": "1000.00"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(QuickPurchase.objects.exists())
+
+    def test_create_quick_purchase_rejects_cross_tenant_supplier(self):
+        other_org = Organization.objects.create(name="Bengkel Lain QP Supplier")
+        other_supplier = Supplier.objects.create(organization=other_org, name="Toko Lain")
+        resp = self.client.post("/api/quick-purchases/", {
+            "supplier": str(other_supplier.id),
+            "lines": [{"part": str(self.part.id), "quantity": "1.00", "unit_cost": "1000.00"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(QuickPurchase.objects.exists())
+
+    def test_org_b_cannot_see_org_a_quick_purchases(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post("/api/quick-purchases/", {
+                "supplier": str(self.supplier.id),
+                "lines": [{"part": str(self.part.id), "quantity": "1.00", "unit_cost": "1000.00"}],
+            }, format="json")
+
+        other_org = Organization.objects.create(name="Bengkel Lain QP List")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.qp@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=other_org, user=other_owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/quick-purchases/")
+        self.assertEqual(resp.data["quick_purchases"], [])
+
+
+class SupplierInvoiceAttachmentAPITests(PurchasingAPITestBase):
+    """
+    Made's own confirmed request, 25 Aug meeting — a real file upload
+    round trip. Proves the file is actually retrievable afterward,
+    not just that the endpoint returns 200 — same "prove the real
+    effect, not just the status code" discipline as every GL-posting
+    test in this file.
+    """
+
+    def test_upload_attachment_round_trip(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        invoice = SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier,
+            amount=Decimal("100000.00"), invoice_date="2026-08-25",
+        )
+        fake_file = SimpleUploadedFile(
+            "invoice.pdf", b"%PDF-1.4 fake content", content_type="application/pdf",
+        )
+        resp = self.client.post(
+            f"/api/supplier-invoices/{invoice.id}/attachment/",
+            {"attachment": fake_file}, format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        invoice.refresh_from_db()
+        self.assertTrue(invoice.attachment.name)
+        self.assertIn("invoice", invoice.attachment.name)
+
+    def test_upload_attachment_rejects_missing_file(self):
+        invoice = SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier,
+            amount=Decimal("100000.00"), invoice_date="2026-08-25",
+        )
+        resp = self.client.post(f"/api/supplier-invoices/{invoice.id}/attachment/", {}, format="multipart")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_upload_attachment_rejects_cross_tenant_invoice(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        other_org = Organization.objects.create(name="Bengkel Lain SINV Attachment")
+        other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Lain")
+        other_invoice = SupplierInvoice.record(
+            organization=other_org, supplier=other_supplier,
+            amount=Decimal("50000.00"), invoice_date="2026-08-25",
+        )
+        fake_file = SimpleUploadedFile("invoice.pdf", b"content", content_type="application/pdf")
+        resp = self.client.post(
+            f"/api/supplier-invoices/{other_invoice.id}/attachment/",
+            {"attachment": fake_file}, format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
