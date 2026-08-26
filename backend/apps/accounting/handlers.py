@@ -11,8 +11,9 @@ Two handlers, two bounded concerns — matching EventHandler's own
     WorkOrderCompleted, InvoiceIssued, PaymentReceived, and — Sprint
     3 — GoodsReceived, SupplierInvoiceReceived, SupplierPaymentMade,
     and — Retur Pembelian v1 — PurchaseReturned, and — Sprint 7,
-    Task 7.3 — StockOpnameCompleted) via
-    posting_engine.py/journal_generator.py.
+    Task 7.3 — StockOpnameCompleted, and — 25 Aug 2026, Made's own
+    confirmed HARIAN/MINGGUAN spot-purchase exception —
+    QuickPurchaseRecorded) via posting_engine.py/journal_generator.py.
   - CancellationEventHandler reverses PREVIOUSLY posted facts
     (InvoiceCancelled, InvoiceRefunded) via cancellations.py — routed
     by event_type, since the two reversal shapes are genuinely
@@ -47,7 +48,7 @@ class AccountingEventHandler(EventHandler):
     handles = (
         "PartConsumed", "WorkOrderCompleted", "InvoiceIssued", "PaymentReceived",
         "GoodsReceived", "SupplierInvoiceReceived", "SupplierPaymentMade",
-        "PurchaseReturned", "StockOpnameCompleted",
+        "PurchaseReturned", "StockOpnameCompleted", "QuickPurchaseRecorded",
     )
 
     def handle(self, event: DomainEvent) -> None:
