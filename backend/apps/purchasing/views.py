@@ -11,12 +11,14 @@ from datetime import date
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import Part
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
 from . import reports
 from .models import (GoodsReceivedNote, GoodsReceivedNoteLineItem,
                      PurchaseOrder, PurchaseOrderLineItem, PurchaseReturn,
-                     Supplier, SupplierInvoice, SupplierPartCode)
+                     QuickPurchase, Supplier, SupplierInvoice,
+                     SupplierPartCode)
 from .serializers import (GoodsReceivedNoteRecordSerializer,
                           GoodsReceivedNoteSerializer,
                           PurchaseOrderAmendQuantitySerializer,
@@ -25,6 +27,8 @@ from .serializers import (GoodsReceivedNoteRecordSerializer,
                           PurchaseOrderSerializer,
                           PurchaseReturnRecordSerializer,
                           PurchaseReturnSerializer,
+                          QuickPurchaseRecordSerializer,
+                          QuickPurchaseSerializer,
                           SupplierInvoiceRecordSerializer,
                           SupplierInvoiceSerializer,
                           SupplierPartCodeSerializer,
@@ -352,6 +356,39 @@ class SupplierInvoiceDetailView(TenantScopedAPIView):
         invoice = self.get_object(pk)
         return Response({"success": True, "supplier_invoice": SupplierInvoiceSerializer(invoice).data})
 
+
+class SupplierInvoiceUploadAttachmentView(TenantScopedAPIView):
+    """
+    POST /api/supplier-invoices/<id>/attachment/
+    Made's own confirmed request, 25 Aug meeting: a real file so the
+    physical supplier invoice isn't lost. A SEPARATE endpoint from
+    SupplierInvoiceRecordSerializer's own JSON creation flow —
+    multipart file data and a structured JSON body don't mix cleanly
+    in one request. Mirrors how apps.letters.IncomingLetter's own
+    file field already works: the attachment is just one more field
+    on the record, uploaded whenever it's actually ready, not
+    necessarily the exact same moment the invoice's own numbers were
+    entered.
+
+    Explicit parser_classes here — a real file-upload endpoint must
+    accept multipart/form-data regardless of whatever
+    TenantScopedAPIView's own default parsers elsewhere might be.
+    """
+    model = SupplierInvoice
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, pk):
+        invoice = self.get_object(pk)
+        file_obj = request.FILES.get("attachment")
+        if file_obj is None:
+            return Response(
+                {"success": False, "message": "File tidak ditemukan pada request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        invoice.attachment = file_obj
+        invoice.save(update_fields=["attachment"])
+        return Response({"success": True, "supplier_invoice": SupplierInvoiceSerializer(invoice).data})
+
 class PurchaseReturnListCreateView(TenantScopedAPIView):
     """
     GET  /api/purchase-returns/  — list
@@ -513,3 +550,86 @@ class SupplierPartCodeListCreateView(TenantScopedAPIView):
             {"success": True, "supplier_code": SupplierPartCodeSerializer(code).data},
             status=status.HTTP_201_CREATED,
         )
+
+
+class QuickPurchaseListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/quick-purchases/  — list
+    POST /api/quick-purchases/  — record a real, immediate spot
+    purchase (Made's own confirmed exception, 25 Aug meeting: HARIAN/
+    MINGGUAN parts skip PurchaseOrder -> GoodsReceivedNote entirely)
+
+    All real logic — the stock/cost side (StockAdjustment,
+    Part.cost_price "Last Cost") AND the GL posting side (Dr 1301 /
+    Cr 1001-or-1101, via QuickPurchaseRecorded) — lives in
+    QuickPurchase.record(). This view is thin, resolving `supplier`
+    and every line's `part` against the ACTING organization
+    specifically, same tenant-scoped-resolution discipline as every
+    other List/Create view in this file.
+    """
+    model = QuickPurchase
+
+    def get(self, request):
+        purchases = (
+            self.get_queryset()
+            .select_related("supplier", "created_by")
+            .prefetch_related("line_items__part")
+        )
+        return Response({"success": True, "quick_purchases": QuickPurchaseSerializer(purchases, many=True).data})
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = QuickPurchaseRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        supplier = Supplier.objects.filter(organization=organization, pk=data["supplier"]).first()
+        if supplier is None:
+            return Response(
+                {"success": False, "message": "Supplier tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        lines = []
+        for line in data["lines"]:
+            part = Part.objects.filter(organization=organization, pk=line["part"]).first()
+            if part is None:
+                return Response(
+                    {"success": False, "message": f"Part dengan id {line['part']} tidak ditemukan."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            lines.append({"part": part, "quantity": line["quantity"], "unit_cost": line["unit_cost"]})
+
+        try:
+            qp = QuickPurchase.record(
+                organization=organization, supplier=supplier, lines=lines,
+                payment_method=data.get("payment_method", QuickPurchase.PaymentMethod.CASH),
+                purchased_at=data.get("purchased_at"),
+                reference=data.get("reference", ""), notes=data.get("notes", ""),
+                created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "quick_purchase": QuickPurchaseSerializer(qp).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class QuickPurchaseDetailView(TenantScopedAPIView):
+    """
+    GET /api/quick-purchases/<id>/ — read-only. Frozen document, same
+    discipline as GoodsReceivedNote — no PATCH/PUT endpoint exists.
+    """
+    model = QuickPurchase
+
+    def get(self, request, pk):
+        qp = self.get_object(pk)
+        return Response({"success": True, "quick_purchase": QuickPurchaseSerializer(qp).data})
