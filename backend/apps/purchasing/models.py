@@ -601,6 +601,17 @@ class SupplierInvoice(TenantScopedModel):
         max_length=100, blank=True, verbose_name="Nomor Invoice Supplier",
         help_text="Nomor invoice asli dari supplier, jika ada.",
     )
+    # Made's own confirmed request, 25 Aug meeting: "invoice dari
+    # supplier perlu diupload agar data tidak hilang." Mirrors
+    # apps.letters.models.IncomingLetter.file exactly — same proven
+    # upload_to pattern, same nullable/optional treatment (a
+    # SupplierInvoice can still be recorded before the physical file
+    # is actually uploaded, same as IncomingLetter's own real-world
+    # flexibility).
+    attachment = models.FileField(
+        upload_to="supplier_invoices/%Y/%m/", null=True, blank=True,
+        verbose_name="File Invoice Supplier",
+    )
     amount       = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Jumlah")
     invoice_date = models.DateField(verbose_name="Tanggal Invoice")
     due_date     = models.DateField(null=True, blank=True, verbose_name="Jatuh Tempo")
@@ -973,3 +984,206 @@ class SupplierPartCode(TenantScopedModel):
             defaults={"supplier_sku": supplier_sku},
         )
         return obj
+
+
+class QuickPurchaseSequence(TenantScopedModel):
+    """Mirrors PurchaseOrderSequence / GoodsReceivedNoteSequence exactly."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    last_sequence = models.PositiveIntegerField(default=0, verbose_name="Nomor Urut Terakhir")
+
+    class Meta:
+        verbose_name        = "Quick Purchase Sequence"
+        verbose_name_plural  = "Quick Purchase Sequences"
+        unique_together      = [("organization",)]
+
+    def __str__(self):
+        return f"{self.organization}: {self.last_sequence}"
+
+    @classmethod
+    def next_number(cls, organization):
+        seq, _ = cls.objects.select_for_update().get_or_create(
+            organization=organization, defaults={"last_sequence": 0},
+        )
+        seq.last_sequence += 1
+        seq.save(update_fields=["last_sequence"])
+        return seq.last_sequence
+
+
+class QuickPurchase(TenantScopedModel):
+    """
+    Made's own confirmed exception, 25 Aug meeting: parts tagged
+    HARIAN/MINGGUAN reorder cadence skip PurchaseOrder ->
+    GoodsReceivedNote entirely — his own words, "harga sekedar
+    numpang lewat, tipe harian harus tetap terpotret dari inventory."
+    A real, immediate, over-the-counter spot purchase — paid on the
+    spot, Made's own confirmed COA mapping: Dr Inventory (1301) / Cr
+    Cash (1001) or Bank (1101), never Accounts Payable (2001), since
+    nothing about this specific kind of purchase is ever on credit.
+
+    Deliberately a SEPARATE model from PurchaseOrder/
+    GoodsReceivedNote, not a nullable-PO branch bolted onto
+    GoodsReceivedNote.receive() — that method's entire design (the
+    two hard-block guardrails, the PO status recompute, the price-
+    variance warning) is built around tracing back to an authorized
+    PO line, none of which applies to a genuinely different real-
+    world event. Reuses the SAME proven stock/cost mechanics
+    (StockAdjustment, Part.cost_price "Last Cost") via
+    QuickPurchaseLineItem.save() below, not a second, parallel
+    implementation of either — both real purchase paths must keep
+    cost_price equally trustworthy, regardless of which one a given
+    part actually came through.
+    """
+    class PaymentMethod(models.TextChoices):
+        CASH = "cash", "Tunai"
+        BANK = "bank", "Transfer Bank"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor")
+    sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, related_name="quick_purchases",
+        verbose_name="Dibeli Dari",
+    )
+    payment_method = models.CharField(
+        max_length=10, choices=PaymentMethod.choices, default=PaymentMethod.CASH,
+        verbose_name="Metode Pembayaran",
+    )
+    purchased_at = models.DateTimeField(verbose_name="Waktu Pembelian")
+    reference = models.CharField(
+        max_length=100, blank=True, verbose_name="Referensi",
+        help_text="Nomor nota/struk, jika ada.",
+    )
+    notes = models.TextField(blank=True, verbose_name="Catatan")
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Quick Purchase"
+        verbose_name_plural  = "Quick Purchases"
+        ordering             = ["-purchased_at"]
+        unique_together      = [("organization", "number")]
+
+    def __str__(self):
+        return self.number
+
+    @property
+    def total_cost(self):
+        # Computed on read from line items, never stored — same
+        # discipline as GoodsReceivedNote.total_cost.
+        return sum((li.subtotal for li in self.line_items.all()), Decimal("0"))
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        if creating and not self.number:
+            self.sequence_number = QuickPurchaseSequence.next_number(self.organization)
+            self.number = f"QP/{self.sequence_number:05d}"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def record(
+        cls, *, organization, supplier, lines,
+        payment_method=PaymentMethod.CASH, purchased_at=None, reference="", notes="", created_by=None,
+    ):
+        """
+        The one real entry point. `lines`:
+            [{"part": <Part>, "quantity": Decimal, "unit_cost": Decimal}, ...]
+
+        Multi-line, Made's own confirmed call — staff often buy a few
+        different consumables on one real receipt during a quick run,
+        not just one part at a time.
+
+        NOTE: the actual QuickPurchaseRecorded event this publishes
+        is pending real GL-posting wiring in apps.accounting — see
+        this file's own delivery notes. The stock/cost side (this
+        method + QuickPurchaseLineItem.save() below) is already
+        fully real and safe to use independently of that.
+        """
+        if not lines:
+            raise ValueError("Quick Purchase harus memiliki minimal satu item.")
+
+        with transaction.atomic():
+            qp = cls.objects.create(
+                organization=organization, supplier=supplier, payment_method=payment_method,
+                purchased_at=purchased_at or timezone.now(),
+                reference=reference, notes=notes, created_by=created_by,
+            )
+            line_items = [
+                QuickPurchaseLineItem.objects.create(
+                    organization=organization, quick_purchase=qp,
+                    part=line["part"], quantity=line["quantity"], unit_cost=line["unit_cost"],
+                )
+                for line in lines
+            ]
+            total_cost = sum((li.subtotal for li in line_items), Decimal("0"))
+
+            from apps.core.events.bus import default_bus
+            from apps.purchasing.events import QuickPurchaseRecorded
+            default_bus.publish(QuickPurchaseRecorded(
+                organization_id=organization.id,
+                quick_purchase_id=qp.id,
+                supplier_id=supplier.id,
+                payment_method=payment_method,
+                amount=total_cost,
+                line_item_count=len(line_items),
+            ))
+
+        return qp
+
+
+class QuickPurchaseLineItem(TenantScopedModel):
+    """
+    One part bought, in one quantity, at one real cost, on one
+    QuickPurchase. Creating one atomically increases
+    Part.current_stock via a real StockAdjustment AND updates
+    Part.cost_price ("Last Cost") — the SAME dual mechanism
+    GoodsReceivedNoteLineItem.save() already proves out, reused
+    deliberately rather than duplicated.
+
+    reason="restock", NOT "correction" — a real incoming purchase is
+    a restock, the same real-world event GoodsReceivedNoteLineItem
+    already labels this way. "correction" is this codebase's own
+    established label for fixing a miscount (Stock Opname) — using
+    it here would blur two genuinely different audit-trail meanings
+    together.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    quick_purchase = models.ForeignKey(
+        QuickPurchase, on_delete=models.CASCADE, related_name="line_items",
+        verbose_name="Quick Purchase",
+    )
+    part = models.ForeignKey(
+        "inventory.Part", on_delete=models.PROTECT, related_name="quick_purchase_line_items",
+        verbose_name="Part",
+    )
+    quantity  = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Jumlah")
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Harga Beli Satuan")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Quick Purchase Line Item"
+        verbose_name_plural  = "Quick Purchase Line Items"
+        ordering             = ["created_at"]
+
+    def __str__(self):
+        return f"{self.part.name} × {self.quantity} — QP {self.quick_purchase.number}"
+
+    def _resolve_organization(self):
+        return self.quick_purchase.organization
+
+    @property
+    def subtotal(self):
+        return self.quantity * self.unit_cost
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        super().save(*args, **kwargs)
+        if creating:
+            from apps.inventory.models import Part, StockAdjustment
+            StockAdjustment.objects.create(
+                organization=self.organization, part=self.part,
+                quantity_change=self.quantity, reason="restock",
+                notes=f"Quick Purchase {self.quick_purchase.number}",
+            )
+            Part.objects.filter(pk=self.part_id).update(cost_price=self.unit_cost)
