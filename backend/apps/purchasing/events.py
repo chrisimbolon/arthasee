@@ -83,3 +83,36 @@ class PurchaseReturned(DomainEvent):
     line_item_count: int
     debit_account_code: str
     event_type: str = field(init=False, default="PurchaseReturned", kw_only=True)
+
+
+@dataclass(frozen=True)
+class QuickPurchaseRecorded(DomainEvent):
+    """
+    Made's own confirmed exception, 25 Aug meeting — a real,
+    immediate, over-the-counter spot purchase for HARIAN/MINGGUAN
+    parts, paid on the spot: no PurchaseOrder, no GoodsReceivedNote.
+    His own words: "harga sekedar numpang lewat, tipe harian harus
+    tetap terpotret dari inventory."
+
+    payment_method is captured here, at creation time (see
+    QuickPurchase.record()), not re-derived later — same "capture
+    once, don't recompute from a shifting database" discipline
+    PurchaseReturned's own debit_account_code already established,
+    for the same reason: by the time this event is actually
+    processed (asynchronously, after commit), live state could
+    theoretically have moved on.
+
+    Posting rule, Made's own confirmed COA mapping: Dr Inventory
+    (1301) / Cr Cash (1001) or Bank (1101) depending on
+    payment_method — via the SAME cash_or_bank_account_code() helper
+    PaymentReceived/SupplierPaymentMade already use, not a second
+    copy of that mapping. Never Accounts Payable (2001) — this is
+    deliberately never a credit purchase; that's the entire point of
+    the "paid on the spot" real-world event this describes.
+    """
+    quick_purchase_id: uuid.UUID
+    supplier_id: uuid.UUID
+    payment_method: str  # "cash" or "bank" — QuickPurchase.PaymentMethod's own real values
+    amount: Decimal
+    line_item_count: int
+    event_type: str = field(init=False, default="QuickPurchaseRecorded", kw_only=True)
