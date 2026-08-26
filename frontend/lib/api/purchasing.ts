@@ -101,6 +101,12 @@ export interface SupplierInvoice {
   supplier_invoice_number: string;
   goods_received_notes: string[];
   amount: string;
+  // Made's own confirmed request, 25 Aug meeting — a real file so
+  // the physical supplier invoice isn't lost. null until uploaded
+  // via supplierInvoicesApi.uploadAttachment() — an invoice can be
+  // recorded before the file is actually ready, same as
+  // apps.letters's own IncomingLetter pattern this mirrors.
+  attachment: string | null;
   invoice_date: string;
   due_date: string | null;
   status: "UNPAID" | "PAID";
@@ -279,6 +285,16 @@ export const supplierInvoicesApi = {
   async pay(id: string, method: "cash" | "bank_transfer"): Promise<void> {
     await api.post(`/api/supplier-invoices/${id}/pay/`, { method });
   },
+  // Made's own confirmed request, 25 Aug meeting — real file upload,
+  // mirroring apps.letters's own IncomingLetter pattern exactly.
+  // Multipart, not JSON — axios sets the correct Content-Type
+  // automatically when the body is a real FormData instance.
+  async uploadAttachment(id: string, file: File): Promise<SupplierInvoice> {
+    const formData = new FormData();
+    formData.append("attachment", file);
+    const { data } = await api.post(`/api/supplier-invoices/${id}/attachment/`, formData);
+    return data.supplier_invoice;
+  },
 };
 
 export const purchaseReturnsApi = {
@@ -326,5 +342,62 @@ export const supplierPartCodesApi = {
   async set(partId: string, payload: { supplier: string; supplier_sku: string }): Promise<SupplierPartCode> {
     const { data } = await api.post(`/api/parts/${partId}/supplier-codes/`, payload);
     return data.supplier_code;
+  },
+};
+
+// ── Made's own confirmed exception, 25 Aug meeting — HARIAN/
+// MINGGUAN parts skip PurchaseOrder -> GoodsReceivedNote entirely:
+// a real, immediate, over-the-counter spot purchase, paid on the
+// spot. ──────────────────────────────────────────────────────────
+
+export type QuickPurchasePaymentMethod = "cash" | "bank";
+
+export interface QuickPurchaseLineItem {
+  id: string;
+  part: string;
+  part_name: string;
+  quantity: string;
+  unit_cost: string;
+  subtotal: string;
+  created_at: string;
+}
+
+export interface QuickPurchase {
+  id: string;
+  number: string;
+  sequence_number: number;
+  supplier: string;
+  supplier_name: string;
+  payment_method: QuickPurchasePaymentMethod;
+  payment_method_display: string;
+  purchased_at: string;
+  reference: string;
+  notes: string;
+  line_items: QuickPurchaseLineItem[];
+  total_cost: string;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export const quickPurchasesApi = {
+  async list(): Promise<QuickPurchase[]> {
+    const { data } = await api.get("/api/quick-purchases/");
+    return data.quick_purchases;
+  },
+  async get(id: string): Promise<QuickPurchase> {
+    const { data } = await api.get(`/api/quick-purchases/${id}/`);
+    return data.quick_purchase;
+  },
+  async create(payload: {
+    supplier: string;
+    payment_method?: QuickPurchasePaymentMethod;
+    purchased_at?: string;
+    reference?: string;
+    notes?: string;
+    lines: { part: string; quantity: number; unit_cost: number }[];
+  }): Promise<QuickPurchase> {
+    const { data } = await api.post("/api/quick-purchases/", payload);
+    return data.quick_purchase;
   },
 };
