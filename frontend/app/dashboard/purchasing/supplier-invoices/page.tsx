@@ -1,6 +1,14 @@
 "use client";
 // =============================================================================
 // === frontend/app/dashboard/purchasing/supplier-invoices/page.tsx ===
+// Adds a real file attachment — Made's own confirmed request, 25 Aug
+// meeting: "invoice dari supplier perlu diupload agar data tidak
+// hilang." Mirrors apps.letters's own IncomingLetter upload pattern
+// exactly (plain <input type="file"> -> FormData -> a dedicated
+// upload call), not a new convention. Upload lives as a per-row
+// action on THIS list page, not on the supplier-invoice-detail page
+// — kept scoped to a file this session has actually seen, rather
+// than guessing at that unseen page's structure.
 // =============================================================================
 import PurchasingSubNav from "@/components/purchasing/PurchasingSubNav";
 import {
@@ -8,7 +16,7 @@ import {
   SupplierInvoice, supplierInvoicesApi,
   suppliersApi,
 } from "@/lib/api/purchasing";
-import { Loader2, Plus, X } from "lucide-react";
+import { FileDown, Loader2, Plus, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -36,9 +44,6 @@ function CreateInvoiceModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Only GRNs from the chosen supplier that DON'T already have an
-  // invoice — the real, honest set of what this new invoice could
-  // legitimately cover.
   const eligibleGrns = grns.filter((g) => g.supplier === supplierId && !g.supplier_invoice);
   const selectedTotal = eligibleGrns
     .filter((g) => selectedGrnIds.has(g.id))
@@ -142,12 +147,63 @@ function CreateInvoiceModal({
   );
 }
 
+// Made's own confirmed request, 25 Aug meeting. Mirrors
+// apps/letters's own CreateIncomingLetterModal upload pattern
+// exactly — a plain file input, no extra chrome.
+function UploadAttachmentModal({
+  invoice, onClose, onUploaded,
+}: {
+  invoice: SupplierInvoice; onClose: () => void; onUploaded: (i: SupplierInvoice) => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!file) { setError("Pilih file terlebih dahulu."); return; }
+    setSaving(true); setError(null);
+    try {
+      const updated = await supplierInvoicesApi.uploadAttachment(invoice.id, file);
+      onUploaded(updated);
+      onClose();
+    } catch {
+      setError("Gagal mengunggah file.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+      <div className="card" style={{ width: 420, background: "var(--paper-3)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Unggah File Invoice</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", display: "flex" }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 18 }}>{invoice.number} — {invoice.supplier_name}</p>
+        {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 20 }}>
+            <label className="label">File (PDF/Gambar)</label>
+            <input className="input" type="file" accept="application/pdf,image/*" required onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          </div>
+          <button className="btn-rust" type="submit" disabled={saving} style={{ width: "100%", justifyContent: "center" }}>
+            {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Unggah"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function SupplierInvoicesPage() {
   const [invoices, setInvoices] = useState<SupplierInvoice[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [grns, setGrns] = useState<GoodsReceivedNote[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [uploadingInvoice, setUploadingInvoice] = useState<SupplierInvoice | null>(null);
 
   useEffect(() => {
     Promise.all([supplierInvoicesApi.list(), suppliersApi.list(), goodsReceivedNotesApi.list()])
@@ -173,7 +229,7 @@ export default function SupplierInvoicesPage() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Nomor</th><th>Supplier</th><th>Jumlah</th><th>Tanggal</th><th>Jatuh Tempo</th><th>Status</th></tr>
+              <tr><th>Nomor</th><th>Supplier</th><th>Jumlah</th><th>Tanggal</th><th>Jatuh Tempo</th><th>Status</th><th>File</th></tr>
             </thead>
             <tbody>
               {invoices.map((inv) => (
@@ -188,10 +244,21 @@ export default function SupplierInvoicesPage() {
                   <td style={{ fontSize: 13, color: "var(--steel)" }}>{new Date(inv.invoice_date).toLocaleDateString("id-ID")}</td>
                   <td style={{ fontSize: 13, color: "var(--steel)" }}>{inv.due_date ? new Date(inv.due_date).toLocaleDateString("id-ID") : "—"}</td>
                   <td><span className={`pill ${inv.status === "PAID" ? "ok" : "due"}`}>{inv.status === "PAID" ? "Lunas" : "Belum Dibayar"}</span></td>
+                  <td>
+                    {inv.attachment ? (
+                      <a href={inv.attachment} target="_blank" rel="noopener noreferrer" className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <FileDown size={12} /> Lihat
+                      </a>
+                    ) : (
+                      <button className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px", display: "inline-flex", alignItems: "center", gap: 4 }} onClick={() => setUploadingInvoice(inv)}>
+                        <Upload size={12} /> Unggah
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
               {invoices.length === 0 && (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>Belum ada invoice supplier tercatat</td></tr>
+                <tr><td colSpan={7} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>Belum ada invoice supplier tercatat</td></tr>
               )}
             </tbody>
           </table>
@@ -203,6 +270,13 @@ export default function SupplierInvoicesPage() {
           suppliers={suppliers} grns={grns}
           onClose={() => setShowCreate(false)}
           onCreated={(i) => setInvoices((prev) => [i, ...prev])}
+        />
+      )}
+      {uploadingInvoice && (
+        <UploadAttachmentModal
+          invoice={uploadingInvoice}
+          onClose={() => setUploadingInvoice(null)}
+          onUploaded={(updated) => setInvoices((prev) => prev.map((i) => (i.id === updated.id ? updated : i)))}
         />
       )}
     </div>
