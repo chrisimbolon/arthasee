@@ -9,6 +9,11 @@ const SUBNAV = [
   { href: "/dashboard/purchasing/suppliers",             label: "Supplier" },
   { href: "/dashboard/purchasing/purchase-orders",       label: "Purchase Order" },
   { href: "/dashboard/purchasing/goods-received",        label: "Penerimaan Barang" },
+  // Made's own confirmed exception, 25 Aug meeting — HARIAN/
+  // MINGGUAN parts skip PurchaseOrder -> GoodsReceivedNote entirely.
+  // Placed right after Penerimaan Barang — a real, lighter sibling
+  // to that receiving flow, not the formal PO-backed one.
+  { href: "/dashboard/purchasing/quick-purchases",       label: "Pembelian Cepat" },
   { href: "/dashboard/purchasing/supplier-invoices",     label: "Invoice Supplier" },
   { href: "/dashboard/purchasing/purchase-returns",      label: "Retur Pembelian" },
   { href: "/dashboard/purchasing/supplier-reliability",  label: "Reliabilitas Supplier" },
