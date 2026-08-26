@@ -25,6 +25,7 @@ from apps.inventory.events import PartConsumed, StockOpnameCompleted
 from apps.invoicing.events import InvoiceIssued
 from apps.payments.events import PaymentReceived, SupplierPaymentMade
 from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
+                                    QuickPurchaseRecorded,
                                     SupplierInvoiceReceived)
 from apps.workorders.events import WorkOrderCompleted
 
@@ -117,6 +118,23 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": "1301", "side": "debit",  "amount": event.amount},
                 {"account_code": "2010", "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, QuickPurchaseRecorded):
+        # Made's own confirmed exception, 25 Aug 2026 — a real,
+        # immediate spot purchase, paid on the spot: Dr Inventory
+        # (1301) same as GoodsReceived, but credits Cash/Bank
+        # directly rather than Accrued Inventory (2010) — there is
+        # no "unbilled" gap to track here, since nothing about this
+        # purchase is ever on credit. Same cash_or_bank_account_code()
+        # helper PaymentReceived/SupplierPaymentMade already use, not
+        # a second copy of that mapping.
+        return {
+            "memo": f"Quick purchase — {event.quick_purchase_id}",
+            "lines": _lines(
+                {"account_code": "1301",                                          "side": "debit",  "amount": event.amount},
+                {"account_code": cash_or_bank_account_code(event.payment_method), "side": "credit", "amount": event.amount},
             ),
         }
 
