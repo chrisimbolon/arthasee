@@ -202,7 +202,7 @@ export default function PurchaseOrderDetailPage() {
 
         <table className="data-table">
           <thead>
-            <tr><th>Part</th><th>Kode Supplier</th><th>Dipesan</th><th>Diterima</th><th>Sisa</th><th>Harga Beli</th><th></th></tr>
+            <tr><th>Part</th><th>Kode Supplier</th><th>Dipesan</th><th>Diterima</th><th>Sisa</th><th></th></tr>
           </thead>
           <tbody>
             {po.line_items.map((li) => (
@@ -212,7 +212,6 @@ export default function PurchaseOrderDetailPage() {
                 <td className="mono">{li.quantity_ordered}</td>
                 <td className="mono">{li.quantity_received}</td>
                 <td className="mono">{li.quantity_outstanding}</td>
-                <td className="mono">{formatRupiah(li.unit_cost)}</td>
                 <td>
                   <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 8px" }} onClick={() => setAmendingLine(li)} title="Ubah Jumlah Pesanan">
                     <Pencil size={13} />
