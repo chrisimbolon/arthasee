@@ -1076,7 +1076,7 @@ export default function RootPage() {
 
       <footer className="wrap">
         <div>© 2026 Arthasee. Dibuat di Batam.</div>
-        <div className="mono">Fase 1 — CRM Bengkel</div>
+        <div className="mono">Fase 1 — ERP Bengkel</div>
       </footer>
     </>
   );
