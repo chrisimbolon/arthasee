@@ -187,6 +187,12 @@ export interface StockMovement {
   reason:              string;
   service_record_id:   string | null;
   notes:               string;
+  // 26 Aug 2026 — real per-purchase price, when it's actually known
+  // (a GRN or Quick Purchase origin). null for a manual "Sesuaikan
+  // Stok" restock (no price was ever entered for it) or any non-
+  // restock movement — an honest gap, not a guessed number. See the
+  // backend's own movement_history() docstring for the full story.
+  unit_cost?:          string | number | null;
   created_by_name?:    string | null;
 }
 
