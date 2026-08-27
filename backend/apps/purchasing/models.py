@@ -391,6 +391,8 @@ class GoodsReceivedNote(TenantScopedModel):
             raise ValueError("Goods Received Note harus memiliki minimal satu item.")
 
         with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(organization, (received_at or timezone.now()).date())
             grn = cls.objects.create(
                 organization=organization, supplier=purchase_order.supplier,
                 purchase_order=purchase_order,
@@ -653,6 +655,8 @@ class SupplierInvoice(TenantScopedModel):
             raise ValueError("Jumlah invoice harus lebih dari nol.")
 
         with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(organization, invoice_date)
             invoice = cls.objects.create(
                 organization=organization, supplier=supplier, amount=amount,
                 invoice_date=invoice_date, supplier_invoice_number=supplier_invoice_number,
@@ -815,6 +819,8 @@ class PurchaseReturn(TenantScopedModel):
             raise ValueError("Retur Pembelian harus memiliki minimal satu item.")
 
         with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(organization, (return_date or timezone.now()).date())
             ret = cls.objects.create(
                 organization=organization, goods_received_note=goods_received_note,
                 return_classification=classification,
@@ -1104,6 +1110,8 @@ class QuickPurchase(TenantScopedModel):
             raise ValueError("Quick Purchase harus memiliki minimal satu item.")
 
         with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(organization, (purchased_at or timezone.now()).date())
             qp = cls.objects.create(
                 organization=organization, supplier=supplier, payment_method=payment_method,
                 purchased_at=purchased_at or timezone.now(),
