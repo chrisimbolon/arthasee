@@ -25,13 +25,13 @@ Usage:
     python manage.py seed_coa --organization <uuid>  # one specific Organization
 """
 from apps.accounting.coa import STANDARD_COA, seed_chart_of_accounts
-from apps.accounting.periods import ensure_current_year_period
+from apps.accounting.periods import ensure_current_month_period
 from apps.organizations.models import Organization
 from django.core.management.base import BaseCommand, CommandError
 
 
 class Command(BaseCommand):
-    help = "Seed the standard Chart of Accounts and a current-year Accounting Period for one Organization, or every active Organization."
+    help = "Seed the standard Chart of Accounts and a current-month Accounting Period for one Organization, or every active Organization."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -56,7 +56,7 @@ class Command(BaseCommand):
         for org in organizations:
             created_count = seed_chart_of_accounts(org)
             already_existed = len(STANDARD_COA) - created_count
-            period = ensure_current_year_period(org)
+            period = ensure_current_month_period(org)
 
             if options["verbosity"] >= 1:
                 self.stdout.write(self.style.SUCCESS(
