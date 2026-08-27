@@ -138,6 +138,12 @@ class GoodsReceivedNoteTests(PurchasingModelTestBase):
 
     def test_grn_numbers_are_scoped_per_organization(self):
         other_org = Organization.objects.create(name="Bengkel Lain Purchasing")
+        # Real requirement, 26 Aug 2026 — GoodsReceivedNote.receive()
+        # now hard-checks AccountingPeriod.assert_open_for_posting()
+        # synchronously, before writing anything. This bare other_org
+        # never had a COA/period at all — harmless before that check
+        # existed, a real, correct 400 now, so it needs seeding too.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
         other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Lain")
         other_part = Part.objects.create(
             organization=other_org, name="Part Lain", unit="pcs",
@@ -377,6 +383,9 @@ class SupplierInvoiceTests(PurchasingModelTestBase):
 
     def test_invoice_numbers_are_scoped_per_organization(self):
         other_org = Organization.objects.create(name="Bengkel Lain Purchasing Invoice")
+        # Same real requirement as the GRN fix above — SupplierInvoice.
+        # record() now hard-checks the period too.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
         other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Lain")
         SupplierInvoice.record(
             organization=self.org, supplier=self.supplier,
@@ -904,6 +913,10 @@ class SupplierInvoiceAPITests(PurchasingAPITestBase):
 
     def test_invoice_endpoint_rejects_cross_tenant_grn(self):
         other_org = Organization.objects.create(name="Bengkel Lain SINV GRN")
+        # Same real requirement — this test calls GoodsReceivedNote.
+        # receive() directly at the model layer for other_org, which
+        # now needs a real period to post into.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
         other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Org Lain")
         other_part = Part.objects.create(
             organization=other_org, name="Part Org Lain", unit="pcs",
@@ -1005,6 +1018,10 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
 
     def test_return_rejects_cross_tenant_grn(self):
         other_org = Organization.objects.create(name="Bengkel Lain Return")
+        # Same real requirement — GoodsReceivedNote.receive() is
+        # called directly at the model layer to set up this test's
+        # own other_grn fixture.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
         other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Lain")
         other_part = Part.objects.create(
             organization=other_org, name="Part Lain", unit="pcs",
@@ -1403,6 +1420,9 @@ class QuickPurchaseTests(PurchasingModelTestBase):
             lines=[{"part": self.part_a, "quantity": Decimal("1.00"), "unit_cost": Decimal("1000.00")}],
         )
         other_org = Organization.objects.create(name="Bengkel Lain QuickPurchase")
+        # Same real requirement — QuickPurchase.record() is called
+        # directly at the model layer for other_org here.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
         other_supplier = Supplier.objects.create(organization=other_org, name="Toko Lain")
         other_part = Part.objects.create(
             organization=other_org, name="Part Lain", unit="pcs",
@@ -1582,6 +1602,10 @@ class SupplierInvoiceAttachmentAPITests(PurchasingAPITestBase):
         from django.core.files.uploadedfile import SimpleUploadedFile
 
         other_org = Organization.objects.create(name="Bengkel Lain SINV Attachment")
+        # Same real requirement — SupplierInvoice.record() is called
+        # directly at the model layer to set up this test's own
+        # other_invoice fixture.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
         other_supplier = Supplier.objects.create(organization=other_org, name="Supplier Lain")
         other_invoice = SupplierInvoice.record(
             organization=other_org, supplier=other_supplier,
