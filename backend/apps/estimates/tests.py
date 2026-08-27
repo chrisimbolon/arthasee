@@ -9,6 +9,7 @@ from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
 from apps.workorders.models import (Mechanic, WorkOrder, WorkOrderJobLine,
                                     WorkOrderMaterialLine)
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase, APITransactionTestCase
@@ -20,6 +21,13 @@ class EstimateAPITestBase(APITestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Real requirement, 26 Aug 2026 — WorkOrder.close() and
+        # WorkOrderMaterialLine.save() now hard-check
+        # AccountingPeriod.assert_open_for_posting() synchronously,
+        # before writing anything. Estimate.approve() goes through
+        # WorkOrderMaterialLine.objects.create() directly, so this
+        # org needs a real seeded period, not just a COA.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.estimates@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
@@ -406,6 +414,11 @@ class EstimateRealTransactionTests(APITransactionTestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Same real requirement as EstimateAPITestBase's own setUp()
+        # above — not currently exercised by this class's own tests,
+        # but a real, needed guard against future ones that approve
+        # an Estimate through this fixture.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.esttransaction@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
