@@ -11,6 +11,7 @@ from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, Vehicle
 from apps.workorders.models import (Mechanic, WorkOrder, WorkOrderJobLine,
                                     WorkOrderStage)
+from django.core.management import call_command
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
@@ -31,6 +32,12 @@ class CustomersAPITestBase(APITestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Real requirement, 26 Aug 2026 — WorkOrder.close() now hard-
+        # checks AccountingPeriod.assert_open_for_posting()
+        # synchronously. _done_work_order_with_invoice() below calls
+        # wo.close() directly, so this org needs a real seeded
+        # period, not just a COA.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.customers@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
