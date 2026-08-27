@@ -37,6 +37,22 @@ from rest_framework.test import APITestCase
 from .models import Account, AccountingPeriod, JournalEntry, JournalLine
 
 
+def _seed_all_months(org, year):
+    """
+    Real test-suite helper, 26 Aug 2026 — many existing tests in this
+    file post to specific historical dates (Jan, June, etc.) that
+    predate the move from one yearly AccountingPeriod to real monthly
+    ones. seed_coa's own automatic period creation only ever creates
+    ONE period, for the CURRENT real month — these tests need every
+    month of the relevant year covered explicitly, matching what the
+    single old yearly period used to cover for free. Idempotent —
+    ensure_period_for_org() itself already is.
+    """
+    from apps.accounting.periods import ensure_period_for_org
+    for month in range(1, 13):
+        ensure_period_for_org(org, year, month)
+
+
 class SeedCoaTests(TestCase):
 
     def setUp(self):
@@ -211,6 +227,10 @@ class AccountBalanceTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        # This class's own tests post to hardcoded dates across
+        # several 2026 months (Jan, Aug) — see _seed_all_months' own
+        # docstring for why these need explicit coverage now.
+        _seed_all_months(self.org, 2026)
         self.cash = Account.objects.get(organization=self.org, code="1001")  # debit-normal
         self.ap = Account.objects.get(organization=self.org, code="2001")    # credit-normal
 
@@ -500,8 +520,8 @@ class AccountingPeriodLockTests(TestCase):
         self.wip       = Account.objects.get(organization=self.org, code="1302")
         self.inventory = Account.objects.get(organization=self.org, code="1301")
         # The one period seed_coa's own widened scope just created —
-        # see apps.accounting.periods.ensure_current_year_period().
-        self.period = AccountingPeriod.objects.get(organization=self.org)
+        # see apps.accounting.periods.ensure_current_month_period().
+        self.period = AccountingPeriod.objects.get(organization=self.org, year=date.today().year, month=date.today().month)
 
     def _post(self, source=JournalEntry.Source.DOMAIN_EVENT, posting_date=None):
         return JournalEntry.post(
@@ -514,16 +534,33 @@ class AccountingPeriodLockTests(TestCase):
             ],
         )
 
-    def test_seed_coa_creates_a_current_year_period(self):
+    def test_seed_coa_creates_a_current_month_period(self):
+        """
+        Renamed from test_seed_coa_creates_a_current_year_period, 26
+        Aug 2026 — Made's own confirmed requirement (monthly closing,
+        via his tax & accounting consultant) moved period seeding
+        from one yearly period to a real monthly one.
+        """
+        import calendar
         today = date.today()
-        self.assertEqual(self.period.start_date, date(today.year, 1, 1))
-        self.assertEqual(self.period.end_date, date(today.year, 12, 31))
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        self.assertEqual(self.period.year, today.year)
+        self.assertEqual(self.period.month, today.month)
+        self.assertEqual(self.period.start_date, date(today.year, today.month, 1))
+        self.assertEqual(self.period.end_date, date(today.year, today.month, last_day))
         self.assertFalse(self.period.is_closed)
         self.assertFalse(self.period.is_locked)
 
     def test_seed_coa_period_seeding_is_idempotent(self):
+        """
+        Updated 28 Aug 2026 — seed_coa now seeds every month of the
+        current year (see periods.py's own docstring for why), so a
+        second call must still land on exactly 12 real periods, not
+        24 — the real idempotency guarantee, just against the new
+        wider seeding shape.
+        """
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        self.assertEqual(AccountingPeriod.objects.filter(organization=self.org).count(), 1)
+        self.assertEqual(AccountingPeriod.objects.filter(organization=self.org).count(), 12)
 
     def test_posting_with_no_period_at_all_is_blocked(self):
         """
@@ -591,6 +628,11 @@ class FinancialReportingTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        # This class's own test_profit_and_loss_excludes_entries_outside_the_range
+        # posts to date.today().year's own January and June — see
+        # _seed_all_months' own docstring for why these need explicit
+        # coverage now.
+        _seed_all_months(self.org, date.today().year)
         self.cash    = Account.objects.get(organization=self.org, code="1001")
         self.ar      = Account.objects.get(organization=self.org, code="1201")
         self.revenue = Account.objects.get(organization=self.org, code="4001")
@@ -678,6 +720,11 @@ class AgingAPReportTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        # This class's own tests use date.today() - timedelta(days=N)
+        # for N up to 70 — can reach back into a prior real month
+        # depending on when the suite runs. Seeding the whole current
+        # real year covers this safely.
+        _seed_all_months(self.org, date.today().year)
         self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
 
     def test_aging_ap_buckets_by_due_date(self):
@@ -721,6 +768,9 @@ class CashConversionCycleTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        # This class's own test_ccc_matches_hand_verified_scenario
+        # posts to hardcoded January 2026 dates.
+        _seed_all_months(self.org, 2026)
         self.inventory = Account.objects.get(organization=self.org, code="1301")
         self.ap        = Account.objects.get(organization=self.org, code="2001")
         self.ar        = Account.objects.get(organization=self.org, code="1201")
@@ -776,6 +826,9 @@ class ProfitAndLossComparisonTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        # Both this class's own tests post to hardcoded January 2026
+        # dates.
+        _seed_all_months(self.org, 2026)
         self.ar      = Account.objects.get(organization=self.org, code="1201")
         self.revenue = Account.objects.get(organization=self.org, code="4001")
 
@@ -1121,7 +1174,7 @@ class ManualJournalAPITests(APITestCase):
         distinction — proven here for the first time through an
         actual endpoint, not just a direct JournalEntry.post() call.
         """
-        period = AccountingPeriod.objects.get(organization=self.org)
+        period = AccountingPeriod.objects.get(organization=self.org, year=date.today().year, month=date.today().month)
         period.is_locked = True
         period.save(update_fields=["is_locked"])
 
@@ -1132,7 +1185,7 @@ class ManualJournalAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
     def test_manual_journal_blocked_in_closed_period(self):
-        period = AccountingPeriod.objects.get(organization=self.org)
+        period = AccountingPeriod.objects.get(organization=self.org, year=date.today().year, month=date.today().month)
         period.is_closed = True
         period.save(update_fields=["is_closed"])
 
