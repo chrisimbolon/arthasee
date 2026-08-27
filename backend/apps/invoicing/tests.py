@@ -222,6 +222,11 @@ class InvoiceNumberingTests(InvoicingAPITestBase):
         self._create_invoice_for_new_visit("BP 0004 AA")  # org's 2nd invoice this test class
 
         other_org = Organization.objects.create(name="Bengkel Lain Invoicing", invoice_code="BL")
+        # Real requirement, 26 Aug 2026 — WorkOrder.close() now hard-
+        # checks AccountingPeriod.assert_open_for_posting()
+        # synchronously. This test closes a real WorkOrder for
+        # other_org below, so it needs a real seeded period too.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
         other_owner = CustomUser.objects.create_user(
             email="owner.otherinvoicing@test.id", password="pass12345!",
             full_name="Other Owner", role=CustomUser.Role.OWNER,
