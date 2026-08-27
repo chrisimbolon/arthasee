@@ -10,7 +10,7 @@
 // page, which is the whole point of putting it here. Rendered
 // immediately rather than gated behind the auth check, since a
 // public marketing page shouldn't block on a login lookup nobody
-// asked for.
+// asked for. MASIH MENGGUNAKAN INLINE CSS- warning
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import Image from "next/image";
