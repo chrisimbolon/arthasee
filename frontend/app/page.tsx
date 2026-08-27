@@ -11,17 +11,6 @@
 // immediately rather than gated behind the auth check, since a
 // public marketing page shouldn't block on a login lookup nobody
 // asked for.
-//
-// Styling: relies entirely on the shared tokens/classes already in
-// globals.css (--ink, --paper, --rust, .display, .mono, .btn-rust,
-// .btn-ghost, :focus-visible, @keyframes spin, etc.) rather than
-// redefining them — globals.css's own header comment says this page
-// and the app were always meant to share one token system, so this
-// keeps that true instead of drifting into two copies that could
-// silently diverge. The <style> block below only adds what's
-// genuinely unique to this page (hero, service-sticker signature,
-// section scaffolding, card grids) — nothing already covered
-// globally is repeated here.
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import Image from "next/image";
