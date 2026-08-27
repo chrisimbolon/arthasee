@@ -283,6 +283,10 @@ class SupplierPayment(TenantScopedModel):
         amount = supplier_invoice.amount
 
         with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(
+                supplier_invoice.organization, (paid_at or timezone.now()).date()
+            )
             payment = cls.objects.create(
                 organization=supplier_invoice.organization,
                 supplier_invoice=supplier_invoice,
