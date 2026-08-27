@@ -137,15 +137,9 @@ class Account(TenantScopedModel):
             ) from exc
 
 class AccountingPeriod(TenantScopedModel):
-    """
-    Schema only, for now — Phase 4, Task 4.3 (Fiscal Period Lock
-    Engine) is where an actual posting-time guard against
-    is_closed/is_locked periods gets wired into JournalEntry.post().
-    The column exists on JournalEntry already (see accounting_period
-    below, nullable) so that Phase 4 work is pure logic, not another
-    schema migration.
-    """
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    year       = models.PositiveIntegerField(verbose_name="Tahun")
+    month      = models.PositiveSmallIntegerField(verbose_name="Bulan")  # 1-12
     start_date = models.DateField(verbose_name="Tanggal Mulai")
     end_date   = models.DateField(verbose_name="Tanggal Selesai")
     is_closed  = models.BooleanField(default=False, verbose_name="Ditutup")
@@ -155,11 +149,16 @@ class AccountingPeriod(TenantScopedModel):
     class Meta:
         verbose_name        = "Accounting Period"
         verbose_name_plural  = "Accounting Periods"
-        ordering             = ["-start_date"]
+        ordering             = ["-year", "-month"]
+        unique_together      = [("organization", "year", "month")]
         constraints = [
             models.CheckConstraint(
                 check=models.Q(end_date__gt=models.F("start_date")),
                 name="accountingperiod_end_after_start",
+            ),
+            models.CheckConstraint(
+                check=models.Q(month__gte=1, month__lte=12),
+                name="accountingperiod_month_valid_range",
             ),
         ]
 
@@ -169,6 +168,40 @@ class AccountingPeriod(TenantScopedModel):
     @property
     def is_open_for_posting(self) -> bool:
         return not (self.is_closed or self.is_locked)
+
+    @classmethod
+    def assert_open_for_posting(cls, organization, posting_date):
+        """
+        Raises ValueError if `posting_date` falls outside every known
+        period, OR the period covering it is closed/locked. Callers
+        should catch ValueError and return it as a real 400 response,
+        same "raise a plain ValueError, let the view translate it"
+        discipline already used by every other real write-path guard in
+        this codebase (PurchaseOrder.cancel(), WorkOrder.close(), etc.).
+
+        Deliberately the SAME is_open_for_posting check JournalEntry.post()
+        itself already uses — a period locked (not closed) still blocks
+        real operational actions here, same as it already blocks
+        DOMAIN_EVENT-sourced postings there; only a MANUAL adjusting
+        journal is allowed through a merely-locked period, and none of
+        these operational write paths are ever that.
+        """
+        period = cls.objects.filter(
+            organization=organization,
+            start_date__lte=posting_date, end_date__gte=posting_date,
+        ).first()
+        if period is None:
+            raise ValueError(
+                f"Tidak ada periode akuntansi yang mencakup tanggal {posting_date} "
+                f"untuk organisasi '{organization.name}'."
+            )
+        if not period.is_open_for_posting:
+            state = "ditutup" if period.is_closed else "terkunci"
+            raise ValueError(
+                f"Periode akuntansi {period.start_date}–{period.end_date} sedang "
+                f"{state} — tidak bisa melakukan transaksi baru untuk tanggal ini."
+            )
+        return period    
 
 
 class JournalEntrySequence(TenantScopedModel):
