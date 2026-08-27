@@ -328,7 +328,7 @@ export default function RootPage() {
         footer {
           border-top: 1px solid var(--line); padding: 34px 0;
           display: flex; justify-content: space-between; align-items: center;
-          font-size: 13px; color: var(--steel); flex-wrap: wrap; gap: 12px;
+          font-size: 13px; color: var(--steel); flex-wrap: wrap; gap: 14px;
         }
       `}</style>
 
