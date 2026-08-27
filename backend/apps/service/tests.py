@@ -23,6 +23,12 @@ class ServiceAPITestBase(APITestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor")
+        # Real requirement, 26 Aug 2026 — WorkOrder.close() now hard-
+        # checks AccountingPeriod.assert_open_for_posting()
+        # synchronously. Several tests in this file close a real
+        # WorkOrder directly, so this org needs a real seeded period,
+        # not just a COA.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.service@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
