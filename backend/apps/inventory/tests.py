@@ -9,6 +9,7 @@ from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -28,6 +29,12 @@ class InventoryAPITestBase(APITestCase):
 
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Real requirement, 26 Aug 2026 — WorkOrder.close() now hard-
+        # checks AccountingPeriod.assert_open_for_posting()
+        # synchronously. PartUsageFrozenAfterInvoiceTests' own setUp()
+        # closes a real WorkOrder, so this org needs a real seeded
+        # period, not just a COA.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.owner = CustomUser.objects.create_user(
             email="owner.inventory@test.id", password="pass12345!",
             full_name="Made Owner", role=CustomUser.Role.OWNER,
@@ -921,10 +928,10 @@ class StockOpnameSessionTests(InventoryAPITestBase):
         """
         from apps.accounting.coa import seed_chart_of_accounts
         from apps.accounting.models import JournalEntry
-        from apps.accounting.periods import ensure_current_year_period
+        from apps.accounting.periods import ensure_current_month_period
 
         seed_chart_of_accounts(self.org)
-        ensure_current_year_period(self.org)
+        ensure_current_month_period(self.org)
 
         session_id = self._start().data["session"]["id"]
         self.client.patch(
