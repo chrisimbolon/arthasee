@@ -22,14 +22,6 @@
 // genuinely unique to this page (hero, service-sticker signature,
 // section scaffolding, card grids) — nothing already covered
 // globally is repeated here.
-//
-// One deliberate exception: .btn-hero-rust / .btn-hero-ghost are
-// NOT the same as globals.css's .btn-rust/.btn-ghost, on purpose —
-// this page's CTAs use slightly larger padding and a hover lift
-// that suit a marketing hero, and reusing the dashboard's exact
-// button class names for a visually different treatment would mean
-// two different button styles silently fighting over the same class name depending on load order.
-//  Renaming avoids that outright instead of relying on the cascade to sort it out.
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import Image from "next/image";
