@@ -366,6 +366,8 @@ class WorkOrder(TenantScopedModel):
             raise ValueError("Work order belum memiliki mekanik penanggung jawab — tidak bisa diselesaikan.")
 
         with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(self.organization, service_date or date.today())
             job_lines = list(self.job_lines.all())
             material_lines = list(self.material_lines.select_related("part").all())
 
@@ -897,20 +899,14 @@ class WorkOrderMaterialLine(TenantScopedModel):
 
     def save(self, *args, **kwargs):
         creating = self._state.adding
+        if creating:
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(self._resolve_organization(), date.today())
+            # AccountingPeriod.assert_open_for_posting(self.organization, date.today())
         if creating and not self.unit_price_at_time:
-            # Real ledger-consistency fix, 24 Aug 2026 — see this
-            # class's own docstring for the full incident. Defaults
-            # to Part.cost_price (real GRN cost, "Last Cost") instead
-            # of Part.unit_price (selling price) — this field's own
-            # value is what PartConsumed.amount uses to credit
-            # Account 1301, and GoodsReceived already debits that
-            # same account at real cost. Falls back to unit_price
-            # ONLY when cost_price is genuinely 0 (`or` catches both
-            # None and Decimal("0")) — a brand-new part with no real
-            # GRN history yet must never block a mechanic mid-job
-            # (Made's own confirmed "soft fallback").
             self.unit_price_at_time = self.part.cost_price or self.part.unit_price
         super().save(*args, **kwargs)
+        
         if creating:
             Part.objects.filter(pk=self.part_id).update(
                 current_stock=models.F("current_stock") - self.quantity
