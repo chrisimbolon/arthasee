@@ -1067,7 +1067,7 @@ export default function RootPage() {
 
       <footer className="wrap">
         <div>© 2026 Arthasee. Collaboration of Langit Strategi Indonesia and Kalanara Group</div>
-        <div className="mono">ERP Bengkel</div>
+        <div className="mono">ERP Bengkel full otomasi</div>
       </footer>
     </>
   );
