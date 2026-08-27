@@ -60,9 +60,9 @@ class RegisterView(APIView):
             # level — matches this codebase's own established
             # convention for cross-app dependencies.
             from apps.accounting.coa import seed_chart_of_accounts
-            from apps.accounting.periods import ensure_current_year_period
+            from apps.accounting.periods import ensure_current_month_period
             seed_chart_of_accounts(org)
-            ensure_current_year_period(org)
+            ensure_current_month_period(org)
 
         refresh = RefreshToken.for_user(user)
         return Response({
