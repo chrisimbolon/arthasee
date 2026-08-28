@@ -63,6 +63,14 @@ def _period_totals(organization, account_type, *, since, as_of):
     year-earnings computation — every account of a given type
     (REVENUE, COGS, EXPENSE), for a real date RANGE, not a
     cumulative-since-inception balance.
+
+    exclude_closing_entries=True, 28 Aug 2026 — real bug found live:
+    a closed period's own closing entry is dated inside that same
+    period's range. Without this, re-querying an already-closed
+    month's own P&L would sum the closing entry's reversing
+    debits/credits together with the real original activity,
+    netting Revenue/COGS/Expense back toward zero — see
+    Account.balance()'s own docstring for the full story.
     """
     accounts = Account.objects.filter(
         organization=organization, account_type=account_type, is_active=True,
@@ -70,7 +78,7 @@ def _period_totals(organization, account_type, *, since, as_of):
     rows = []
     total = Decimal("0")
     for account in accounts:
-        amount = account.balance(since=since, as_of=as_of)
+        amount = account.balance(since=since, as_of=as_of, exclude_closing_entries=True)
         rows.append({"code": account.code, "name": account.name, "amount": amount})
         total += amount
     return rows, total
@@ -276,9 +284,26 @@ def balance_sheet(organization, *, as_of=None) -> dict:
     total_equity_accounts = sum((r["balance"] for r in equity_rows), Decimal("0"))
 
     period_start = _current_period_start(organization, as_of)
-    _, total_revenue  = _period_totals(organization, Account.AccountType.REVENUE, since=period_start, as_of=as_of)
-    _, total_cogs     = _period_totals(organization, Account.AccountType.COGS,    since=period_start, as_of=as_of)
-    _, total_expenses = _period_totals(organization, Account.AccountType.EXPENSE, since=period_start, as_of=as_of)
+    period = AccountingPeriod.objects.filter(
+        organization=organization, start_date__lte=as_of, end_date__gte=as_of,
+    ).first()
+    if period is not None and period.is_closed:
+        # 28 Aug 2026 — real double-count found live: a closed
+        # period's own income already lives in 3101 via its real
+        # closing entry (see AccountingPeriod.close()'s own
+        # docstring). If as_of falls WITHIN that closed period's own
+        # range, re-deriving its P&L here AGAIN — even with
+        # _period_totals()'s own exclude_closing_entries fix, which
+        # only hides the closing entry itself, not the real activity
+        # it summarized — would double-count that same income
+        # alongside what 3101 already, correctly reflects. Nothing
+        # "unclosed" remains to show separately once the covering
+        # period has actually been closed.
+        total_revenue = total_cogs = total_expenses = Decimal("0")
+    else:
+        _, total_revenue  = _period_totals(organization, Account.AccountType.REVENUE, since=period_start, as_of=as_of)
+        _, total_cogs     = _period_totals(organization, Account.AccountType.COGS,    since=period_start, as_of=as_of)
+        _, total_expenses = _period_totals(organization, Account.AccountType.EXPENSE, since=period_start, as_of=as_of)
     current_year_earnings = total_revenue - total_cogs - total_expenses
 
     total_equity = total_equity_accounts + current_year_earnings

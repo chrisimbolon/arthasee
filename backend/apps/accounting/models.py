@@ -83,7 +83,7 @@ class Account(TenantScopedModel):
     def __str__(self):
         return f"{self.code} — {self.name}"
 
-    def balance(self, *, since=None, as_of=None) -> Decimal:
+    def balance(self, *, since=None, as_of=None, exclude_closing_entries=False) -> Decimal:
         """
         Computed on the fly from JournalLine, the real source of
         truth — no denormalized running total on this model. Unlike
@@ -102,12 +102,29 @@ class Account(TenantScopedModel):
         backward compatible: every existing caller across three
         sprints only ever passes as_of=, so since=None (the default)
         preserves today's exact behavior unchanged.
+
+        `exclude_closing_entries`, added 28 Aug 2026 — real bug
+        found live: a period's own closing entry is dated INSIDE
+        that same period's date range (deliberately, so
+        JournalEntry.post() resolves it into the right period). A
+        plain date-range balance() call for that range — exactly
+        what _period_totals() does — would sum the closing entry's
+        own reversing debits/credits together with the real original
+        activity, netting Revenue/COGS/Expense back toward zero.
+        Default False: Trial Balance and Balance Sheet's own
+        cumulative account balances correctly, deliberately DO want
+        to see the real, current, already-closed state (that IS what
+        closing the books means) — only a period-scoped report
+        asking "what really happened in this window" should exclude
+        the closing mechanism's own bookkeeping from the answer.
         """
         qs = JournalLine.objects.filter(account=self)
         if since is not None:
             qs = qs.filter(journal_entry__posting_date__gte=since)
         if as_of is not None:
             qs = qs.filter(journal_entry__posting_date__lte=as_of)
+        if exclude_closing_entries:
+            qs = qs.exclude(journal_entry__source=JournalEntry.Source.PERIOD_CLOSING)
         totals = qs.aggregate(debit=Sum("debit_amount"), credit=Sum("credit_amount"))
         debit  = totals["debit"] or Decimal("0")
         credit = totals["credit"] or Decimal("0")
@@ -144,6 +161,23 @@ class AccountingPeriod(TenantScopedModel):
     end_date   = models.DateField(verbose_name="Tanggal Selesai")
     is_closed  = models.BooleanField(default=False, verbose_name="Ditutup")
     is_locked  = models.BooleanField(default=False, verbose_name="Terkunci")
+    # 28 Aug 2026 — real month-end closing. closed_at is deliberately
+    # SEPARATE from is_closed: is_closed flips back to False on a
+    # reopen, but closed_at is set ONCE and never cleared — the real,
+    # permanent marker close() checks to enforce Chris's own confirmed
+    # hard guard ("block re-closing outright, even after a reopen").
+    # is_closed alone can't do this job, since a reopen would silently
+    # defeat it.
+    closed_at   = models.DateTimeField(null=True, blank=True, verbose_name="Waktu Ditutup")
+    closed_by   = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name="Ditutup Oleh",
+    )
+    reopened_at = models.DateTimeField(null=True, blank=True, verbose_name="Waktu Dibuka Kembali")
+    reopened_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name="Dibuka Kembali Oleh",
+    )    
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -203,6 +237,126 @@ class AccountingPeriod(TenantScopedModel):
             )
         return period    
 
+    def close(self, *, closed_by=None):
+        """
+        Real month-end close, Made's own confirmed requirement (25 Aug
+        meeting, via his tax & accounting consultant) — rolls this
+        period's own Revenue/COGS/Expense activity into Retained
+        Earnings (3101) via one real, balanced JournalEntry, then marks
+        the period closed.
+
+        Reuses reports._period_totals() directly — the EXACT SAME
+        numbers Made already saw on the P&L report for this period get
+        posted here, not a second, independently-derived calculation
+        that could quietly drift from what he reviewed before clicking
+        close.
+
+        Hard guard, Chris's own explicit sign-off, 28 Aug 2026: blocked
+        outright if this period has EVER been closed before, even after
+        a reopen. Checks closed_at, not is_closed — is_closed flips back
+        to False on reopen, but closed_at is a permanent marker (see its
+        own field comment). Re-closing risks double-counting the FIRST
+        closing entry's own lines, since profit_and_loss() reads by real
+        date range, not by resetting account balances to zero — a second
+        close on the same period would debit/credit accounts that
+        already correctly reflect the first closing entry sitting inside
+        that same range. Full close -> correct -> re-close support is a
+        real, separate design problem, deliberately deferred rather than
+        solved partially here.
+
+        Only Revenue/COGS/Expense accounts with a genuinely NONZERO
+        period balance get a line — same zero-filtering discipline
+        posting_engine.py's own _lines() already uses. A period with
+        real activity in only some of these three types still produces a
+        correct, balanced entry; a period with literally zero activity
+        across all three closes with NO journal entry at all, matching
+        the existing precedent set by WorkOrderCompleted's own "$0 ->
+        post nothing, the action still succeeds" behavior.
+
+        Posted with posting_date=self.end_date — always the LAST day of
+        this period's own real range, so JournalEntry.post()'s own
+        period-resolution always finds this exact period, and the
+        closing entry itself is correctly still open for posting (is_closed
+        is only set True AFTER the entry posts successfully, not before).
+        """
+        from apps.accounting.reports import _period_totals
+        from django.utils import timezone
+
+        if self.closed_at is not None:
+            raise ValueError(
+                "Periode ini sudah pernah ditutup sebelumnya — tidak bisa ditutup "
+                "ulang, bahkan setelah dibuka kembali. Diperlukan penanganan manual "
+                "untuk koreksi lebih lanjut."
+            )
+
+        revenue_rows, total_revenue = _period_totals(
+            self.organization, Account.AccountType.REVENUE, since=self.start_date, as_of=self.end_date,
+        )
+        cogs_rows, total_cogs = _period_totals(
+            self.organization, Account.AccountType.COGS, since=self.start_date, as_of=self.end_date,
+        )
+        expense_rows, total_expenses = _period_totals(
+            self.organization, Account.AccountType.EXPENSE, since=self.start_date, as_of=self.end_date,
+        )
+        net_income = total_revenue - total_cogs - total_expenses
+
+        lines = []
+        for row in revenue_rows:
+            if row["amount"] != Decimal("0"):
+                lines.append({"account": Account.resolve(self.organization, row["code"]), "debit": row["amount"]})
+        for row in cogs_rows + expense_rows:
+            if row["amount"] != Decimal("0"):
+                lines.append({"account": Account.resolve(self.organization, row["code"]), "credit": row["amount"]})
+
+        if net_income > Decimal("0"):
+            lines.append({"account": Account.resolve(self.organization, "3101"), "credit": net_income})
+        elif net_income < Decimal("0"):
+            lines.append({"account": Account.resolve(self.organization, "3101"), "debit": -net_income})
+        # net_income == 0 with real, offsetting revenue/cogs/expense activity:
+        # lines still balance on their own, no 3101 line needed at all.
+
+        closing_entry = None
+        with transaction.atomic():
+            if lines:
+                closing_entry = JournalEntry.post(
+                    organization=self.organization,
+                    posting_date=self.end_date,
+                    source=JournalEntry.Source.PERIOD_CLOSING,
+                    memo=f"Penutupan periode {self.start_date}–{self.end_date}",
+                    created_by=closed_by,
+                    lines=lines,
+                )
+            self.is_closed = True
+            self.closed_at = timezone.now()
+            self.closed_by = closed_by
+            self.save(update_fields=["is_closed", "closed_at", "closed_by"])
+
+        return closing_entry, net_income
+
+
+    def reopen(self, *, reopened_by=None):
+        """
+        Real, deliberately narrow action — flips is_closed back to False
+        so genuine corrections can be posted, matching Made's own
+        confirmed requirement ("heavily guarded, owner-only" — the
+        owner-only check itself lives in the view, same "authorization
+        belongs in the view, the write-path rule belongs in the model"
+        split ManualJournalListCreateView's own owner check already
+        uses).
+
+        closed_at is deliberately NEVER cleared here — see close()'s own
+        docstring for why that's the real, permanent guard against
+        re-closing this exact period.
+        """
+        from django.utils import timezone
+
+        if not self.is_closed:
+            raise ValueError("Periode ini sedang tidak dalam status tertutup.")
+
+        self.is_closed = False
+        self.reopened_at = timezone.now()
+        self.reopened_by = reopened_by
+        self.save(update_fields=["is_closed", "reopened_at", "reopened_by"])
 
 class JournalEntrySequence(TenantScopedModel):
     """
@@ -239,8 +393,19 @@ class JournalEntry(TenantScopedModel):
     always via JournalEntry.post() (see module docstring above).
     """
     class Source(models.TextChoices):
-        DOMAIN_EVENT = "DOMAIN_EVENT", "Event Domain"
-        MANUAL       = "MANUAL", "Jurnal Manual"
+        DOMAIN_EVENT   = "DOMAIN_EVENT", "Event Domain"
+        MANUAL         = "MANUAL", "Jurnal Manual"
+        # 28 Aug 2026 — real bug found live: a closing entry dated
+        # inside the very period it closes was originally posted as
+        # MANUAL, indistinguishable from a real adjusting journal.
+        # That meant re-querying that period's own P&L afterward
+        # silently zeroed out — the closing entry's own reversing
+        # debits to Revenue got summed together with the real
+        # original revenue in the SAME date-range query, netting to
+        # ~0. This distinct source lets reports.py's own
+        # _period_totals() tell the difference and exclude it, so a
+        # closed month's history stays intact and re-queryable.
+        PERIOD_CLOSING = "PERIOD_CLOSING", "Penutupan Periode"
 
     class Status(models.TextChoices):
         PENDING   = "PENDING", "Menunggu"
@@ -367,11 +532,15 @@ class JournalEntry(TenantScopedModel):
             # Locked blocks automatic (DOMAIN_EVENT) postings only —
             # a manual adjusting journal (Task 4.4) can still post
             # through a locked period, Chris's own explicit call.
-            # CLOSED, above, blocks everything unconditionally,
-            # including manual entries — a genuinely different,
-            # stronger state than locked, checked first and never
-            # bypassed by source.
-            if accounting_period.is_locked and source != cls.Source.MANUAL:
+            # PERIOD_CLOSING is allowed through the SAME exception,
+            # 28 Aug 2026 — Made's own real workflow is lock a
+            # period first (for review), THEN close it, so the
+            # closing entry itself must never be blocked by the very
+            # lock that precedes it. CLOSED, above, still blocks
+            # everything unconditionally, including both of these —
+            # a genuinely different, stronger state than locked,
+            # checked first and never bypassed by source.
+            if accounting_period.is_locked and source not in (cls.Source.MANUAL, cls.Source.PERIOD_CLOSING):
                 raise ValueError(
                     f"Periode akuntansi {accounting_period.start_date}–"
                     f"{accounting_period.end_date} sedang terkunci — hanya "
