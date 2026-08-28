@@ -189,6 +189,41 @@ export interface FailedPosting {
   created_at: string;
 }
 
+// 28 Aug 2026 — real month-end closing, Made's own confirmed
+// requirement via his tax & accounting consultant.
+
+export interface AccountingPeriod {
+  id: string;
+  year: number;
+  month: number;
+  start_date: string;
+  end_date: string;
+  is_closed: boolean;
+  is_locked: boolean;
+  is_open_for_posting: boolean;
+  closed_at: string | null;
+  closed_by: string | null;
+  closed_by_name: string | null;
+  reopened_at: string | null;
+  reopened_by: string | null;
+  reopened_by_name: string | null;
+  created_at: string;
+}
+
+export interface ClosePeriodResult {
+  success: boolean;
+  message?: string;
+  period?: AccountingPeriod;
+  net_income?: string | number;
+  closing_entry?: JournalEntryRow | null;
+}
+
+export interface ReopenPeriodResult {
+  success: boolean;
+  message?: string;
+  period?: AccountingPeriod;
+}
+
 // Shared between the Reports page (Trial Balance tab) and the Chart
 // of Accounts page — one real mapping, not two copies that could
 // drift. ACCOUNT_TYPE_ORDER matches the real COA blueprint's own
@@ -263,4 +298,30 @@ export const accountingApi = {
     getListOrNull<FailedPosting>("/api/accounting/failed-postings/", "failed_postings", {
       since: opts?.since, as_of: opts?.asOf,
     }),
+
+  periods: () => getListOrNull<AccountingPeriod>("/api/accounting/periods/", "periods", {}),
+
+  // Real WRITE actions — unlike every read above, a failure here
+  // must surface its REAL message to the user (e.g. "periode ini
+  // sudah pernah ditutup sebelumnya"), not silently collapse to
+  // null the way a missing-org 404 does for a read.
+  async closePeriod(id: string): Promise<ClosePeriodResult> {
+    try {
+      const { data } = await api.post(`/api/accounting/periods/${id}/close/`);
+      return data;
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      return { success: false, message: message || "Gagal menutup periode." };
+    }
+  },
+
+  async reopenPeriod(id: string): Promise<ReopenPeriodResult> {
+    try {
+      const { data } = await api.post(`/api/accounting/periods/${id}/reopen/`);
+      return data;
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      return { success: false, message: message || "Gagal membuka kembali periode." };
+    }
+  },
 };
