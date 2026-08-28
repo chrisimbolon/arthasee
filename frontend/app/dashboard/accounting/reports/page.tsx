@@ -4,11 +4,14 @@
 // =============================================================================
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
-  ACCOUNT_TYPE_LABELS, accountingApi, AgingBucket, AgingInvoiceRow,
+  ACCOUNT_TYPE_LABELS, accountingApi,
+  AccountingPeriod,
+  AgingBucket, AgingInvoiceRow,
   AgingReportResponse, BalanceSheetResponse, CashConversionCycleResponse, ProfitLossComparisonResponse,
   ProfitLossResponse, ReportDelta, ReportLine, TrialBalanceResponse,
 } from "@/lib/api/accounting";
-import { Loader2, TriangleAlert } from "lucide-react";
+import { Loader2, Lock, TriangleAlert, Unlock } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { ChangeEvent, useEffect, useState } from "react";
 // ── Shared helpers ──────────────────────────────────────────────
 // The one place that resolves the string|number Decimal ambiguity —
@@ -460,9 +463,278 @@ function AgingPanel({ type }: { type: "ar" | "ap" }) {
   );
 }
 
+// ── Period Control — 28 Aug 2026, Made's own confirmed requirement
+// via his tax & accounting consultant. Sansan's own 3-button
+// diagram: review the month (live P&L below), run Stock Opname /
+// adjusting journals if needed, then close. Reopening is
+// deliberately kept minimal and clearly flagged — owner-only is
+// enforced server-side; this UI just makes the stakes visible.
+// ────────────────────────────────────────────────────────────────
+
+const MONTH_NAMES_ID = [
+  "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+  "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+];
+
+function periodLabel(p: AccountingPeriod): string {
+  return `${MONTH_NAMES_ID[p.month - 1]} ${p.year}`;
+}
+
+function PeriodStatusPill({ period }: { period: AccountingPeriod }) {
+  if (period.is_closed) {
+    return <span className="pill due"><span className="dot" />Ditutup</span>;
+  }
+  if (period.is_locked) {
+    return <span className="pill soon"><span className="dot" />Terkunci</span>;
+  }
+  return <span className="pill ok"><span className="dot" />Terbuka</span>;
+}
+
+function ConfirmCloseModal({
+  period, onClose, onConfirmed,
+}: { period: AccountingPeriod; onClose: () => void; onConfirmed: (result: import("@/lib/api/accounting").ClosePeriodResult) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConfirm = async () => {
+    setSaving(true); setError(null);
+    const result = await accountingApi.closePeriod(period.id);
+    setSaving(false);
+    if (!result.success) {
+      setError(result.message || "Gagal menutup periode.");
+      return;
+    }
+    onConfirmed(result);
+    onClose();
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+      <div className="card" style={{ width: 460, background: "var(--paper-3)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Lock size={18} style={{ color: "var(--danger)" }} />
+          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Tutup Periode {periodLabel(period)}?</h2>
+        </div>
+        <p style={{ fontSize: 13.5, color: "var(--steel)", marginBottom: 14, lineHeight: 1.5 }}>
+          Pendapatan, HPP, dan Beban periode ini akan dipindahkan ke Laba Ditahan (3101) melalui satu jurnal penutup yang seimbang. Setelah ditutup, <strong>tidak ada transaksi baru</strong> yang bisa diposting ke tanggal dalam periode ini.
+        </p>
+        <p style={{ fontSize: 13, color: "var(--danger)", marginBottom: 18, lineHeight: 1.5 }}>
+          Periode yang sudah pernah ditutup tidak bisa ditutup ulang lagi, bahkan setelah dibuka kembali — pastikan semua data periode ini sudah benar sebelum melanjutkan.
+        </p>
+        {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="btn-ghost" onClick={onClose} disabled={saving} style={{ flex: 1, justifyContent: "center" }}>
+            Batal
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={saving}
+            style={{ flex: 1, justifyContent: "center", display: "flex", alignItems: "center", gap: 6, background: "var(--danger)", color: "#fff", border: "none", borderRadius: 6, padding: "10px 16px", fontWeight: 600, cursor: saving ? "default" : "pointer" }}
+          >
+            {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Ya, Tutup Periode Ini"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmReopenModal({
+  period, onClose, onConfirmed,
+}: { period: AccountingPeriod; onClose: () => void; onConfirmed: (result: import("@/lib/api/accounting").ReopenPeriodResult) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConfirm = async () => {
+    setSaving(true); setError(null);
+    const result = await accountingApi.reopenPeriod(period.id);
+    setSaving(false);
+    if (!result.success) {
+      setError(result.message || "Gagal membuka kembali periode.");
+      return;
+    }
+    onConfirmed(result);
+    onClose();
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+      <div className="card" style={{ width: 460, background: "var(--paper-3)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Unlock size={18} style={{ color: "var(--hazard-dark)" }} />
+          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Buka Kembali {periodLabel(period)}?</h2>
+        </div>
+        <p style={{ fontSize: 13.5, color: "var(--steel)", marginBottom: 18, lineHeight: 1.5 }}>
+          Periode ini akan bisa menerima transaksi baru lagi untuk keperluan koreksi. <strong>Periode ini tidak akan bisa ditutup lagi</strong> setelah ini — laporan akhir untuk bulan ini perlu ditangani secara manual jika ditutup kembali di kemudian hari.
+        </p>
+        {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="btn-ghost" onClick={onClose} disabled={saving} style={{ flex: 1, justifyContent: "center" }}>
+            Batal
+          </button>
+          <button className="btn-rust" onClick={handleConfirm} disabled={saving} style={{ flex: 1, justifyContent: "center" }}>
+            {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Ya, Buka Kembali"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PeriodReviewSummary({ period }: { period: AccountingPeriod }) {
+  const [data, setData] = useState<ProfitLossResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    accountingApi.profitLoss(period.start_date, period.end_date).then((res) => { setData(res); setLoading(false); });
+  }, [period.id]);
+
+  if (loading) return <div style={{ padding: 20, color: "var(--steel)", fontSize: 13 }}><Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /></div>;
+  if (!data) return null;
+
+  const netIncome = toNumber(data.net_income);
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 18 }}>
+      <div className="card" style={{ padding: 14 }}>
+        <div className="label" style={{ marginBottom: 6 }}>Pendapatan</div>
+        <div className="mono" style={{ fontSize: 17, fontWeight: 700 }}>{formatRupiah(data.total_revenue)}</div>
+      </div>
+      <div className="card" style={{ padding: 14 }}>
+        <div className="label" style={{ marginBottom: 6 }}>Laba Kotor</div>
+        <div className="mono" style={{ fontSize: 17, fontWeight: 700 }}>{formatRupiah(data.gross_profit)}</div>
+      </div>
+      <div className="card" style={{ padding: 14 }}>
+        <div className="label" style={{ marginBottom: 6 }}>Laba Bersih</div>
+        <div className="mono" style={{ fontSize: 17, fontWeight: 700, color: netIncome >= 0 ? "var(--workshop)" : "var(--danger)" }}>
+          {formatRupiah(data.net_income)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PeriodControlPanel() {
+  const router = useRouter();
+  const [periods, setPeriods] = useState<AccountingPeriod[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [closingPeriod, setClosingPeriod] = useState<AccountingPeriod | null>(null);
+  const [reopeningPeriod, setReopeningPeriod] = useState<AccountingPeriod | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    accountingApi.periods().then((res) => {
+      setPeriods(res);
+      setLoading(false);
+      // Default selection: the most recent still-open period —
+      // the one Made most likely actually wants to review/close
+      // right now, not whatever happens to sort first.
+      if (res && res.length > 0 && !selectedId) {
+        const firstOpen = res.find((p) => !p.is_closed);
+        setSelectedId((firstOpen ?? res[0]).id);
+      }
+    });
+  };
+
+  useEffect(() => { load(); }, []);
+
+  if (loading) return <LoadingState />;
+  if (!periods || periods.length === 0) return <EmptyState />;
+
+  const selected = periods.find((p) => p.id === selectedId) ?? periods[0];
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 20 }}>
+        {/* Period list — left rail */}
+        <div className="card" style={{ padding: 0, overflow: "hidden", alignSelf: "start" }}>
+          {periods.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setSelectedId(p.id)}
+              style={{
+                width: "100%", textAlign: "left", padding: "12px 14px", border: "none",
+                borderBottom: "1px solid var(--line)", cursor: "pointer",
+                background: p.id === selected.id ? "var(--paper-2)" : "transparent",
+                display: "flex", flexDirection: "column", gap: 6,
+              }}
+            >
+              <span style={{ fontSize: 13.5, fontWeight: p.id === selected.id ? 700 : 500 }}>{periodLabel(p)}</span>
+              <PeriodStatusPill period={p} />
+            </button>
+          ))}
+        </div>
+
+        {/* Selected period — review + actions */}
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <h2 style={{ fontSize: 19, fontWeight: 700 }}>{periodLabel(selected)}</h2>
+            <PeriodStatusPill period={selected} />
+          </div>
+
+          <PeriodReviewSummary key={selected.id} period={selected} />
+
+          {selected.is_closed ? (
+            <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+              <div style={{ fontSize: 13.5, color: "var(--steel)", marginBottom: 4 }}>
+                Ditutup {selected.closed_at ? new Date(selected.closed_at).toLocaleString("id-ID") : ""}
+                {selected.closed_by_name ? ` oleh ${selected.closed_by_name}` : ""}
+              </div>
+              {selected.reopened_at && (
+                <div style={{ fontSize: 12.5, color: "var(--hazard-dark)" }}>
+                  Sempat dibuka kembali {new Date(selected.reopened_at).toLocaleString("id-ID")}
+                  {selected.reopened_by_name ? ` oleh ${selected.reopened_by_name}` : ""} — periode ini tidak bisa ditutup ulang lagi.
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+              <button className="btn-ghost" onClick={() => router.push("/dashboard/inventory/stock-opname")}>
+                Mulai Stock Opname
+              </button>
+              <button className="btn-ghost" onClick={() => router.push("/dashboard/accounting/journal")}>
+                Input Jurnal Penyesuaian
+              </button>
+              <button
+                onClick={() => setClosingPeriod(selected)}
+                style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--danger)", color: "#fff", border: "none", borderRadius: 6, padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+              >
+                <Lock size={14} /> Tutup Periode
+              </button>
+            </div>
+          )}
+
+          {selected.is_closed && selected.closed_at && !selected.reopened_at && (
+            <button className="btn-ghost" onClick={() => setReopeningPeriod(selected)} style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--hazard-dark)" }}>
+              <Unlock size={14} /> Buka Kembali (hanya pemilik bengkel)
+            </button>
+          )}
+        </div>
+      </div>
+
+      {closingPeriod && (
+        <ConfirmCloseModal
+          period={closingPeriod}
+          onClose={() => setClosingPeriod(null)}
+          onConfirmed={() => load()}
+        />
+      )}
+      {reopeningPeriod && (
+        <ConfirmReopenModal
+          period={reopeningPeriod}
+          onClose={() => setReopeningPeriod(null)}
+          onConfirmed={() => load()}
+        />
+      )}
+    </div>
+  );
+}
+
 // ── Page shell ───────────────────────────────────────────────────
 
-type ReportTab = "trial-balance" | "profit-loss" | "balance-sheet" | "cash-conversion-cycle" | "aging-ar" | "aging-ap";
+type ReportTab = "trial-balance" | "profit-loss" | "balance-sheet" | "cash-conversion-cycle" | "aging-ar" | "aging-ap" | "period-control";
 
 const TABS: { id: ReportTab; label: string }[] = [
   { id: "trial-balance", label: "Neraca Saldo" },
@@ -471,6 +743,7 @@ const TABS: { id: ReportTab; label: string }[] = [
   { id: "cash-conversion-cycle", label: "Siklus Konversi Kas" },
   { id: "aging-ar",      label: "Piutang (AR)" },
   { id: "aging-ap",      label: "Utang (AP)" },
+  { id: "period-control", label: "Tutup Buku" },
 ];
 
 export default function AccountingReportsPage() {
@@ -503,6 +776,7 @@ export default function AccountingReportsPage() {
       {tab === "cash-conversion-cycle" && <CashConversionCyclePanel />}      
       {tab === "aging-ar" && <AgingPanel type="ar" />}
       {tab === "aging-ap" && <AgingPanel type="ap" />}
+      {tab === "period-control" && <PeriodControlPanel />}
     </div>
   );
 }
