@@ -312,3 +312,160 @@ class SupplierPayment(TenantScopedModel):
             ))
 
         return payment
+
+
+class OperatingExpenseSequence(TenantScopedModel):
+    """Mirrors QuickPurchaseSequence exactly — same real numbering pattern."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    last_sequence = models.PositiveIntegerField(default=0, verbose_name="Nomor Urut Terakhir")
+
+    class Meta:
+        verbose_name        = "Operating Expense Sequence"
+        verbose_name_plural  = "Operating Expense Sequences"
+        unique_together      = [("organization",)]
+
+    def __str__(self):
+        return f"{self.organization}: {self.last_sequence}"
+
+    @classmethod
+    def next_number(cls, organization):
+        seq, _ = cls.objects.select_for_update().get_or_create(
+            organization=organization, defaults={"last_sequence": 0},
+        )
+        seq.last_sequence += 1
+        seq.save(update_fields=["last_sequence"])
+        return seq.last_sequence
+
+
+class OperatingExpense(TenantScopedModel):
+    """
+    A real, immediate cash outflow for a recurring operating cost —
+    salary, rent, utilities, and so on. Made's own confirmed real
+    request, 27 Aug meeting: a guided "Catat Beban Operasional" form,
+    a real alternative to the generic Manual Adjusting Journal for
+    exactly this recurring, routine kind of entry — no account codes,
+    no debit/credit thinking required from Made himself.
+
+    Lives here, not apps.purchasing — same Roadmap precedent already
+    established for SupplierPayment: this is a real money-OUT event,
+    not a purchasing concept.
+
+    Deliberately single-line, unlike QuickPurchase's own multi-line
+    design — one real expense payment is one category, one amount,
+    one real transaction. No need to reinvent QuickPurchase's own
+    multi-item complexity for a fundamentally simpler real-world fact.
+
+    `account` is restricted to real, active EXPENSE-type accounts,
+    EXCLUDING 6004 (Beban Penyusutan) — enforced in record() below,
+    not just the frontend dropdown. 6004 is reserved for the real,
+    separate depreciation engine (non-cash, credits a contra-asset
+    account, not Cash/Bank) — posting a depreciation entry through
+    this Cash/Bank-only form would produce a real, wrong journal
+    entry, not just a cosmetic mismatch.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor")
+    sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
+    account = models.ForeignKey(
+        "accounting.Account", on_delete=models.PROTECT, related_name="operating_expenses",
+        verbose_name="Akun Beban",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Jumlah")
+    method = models.CharField(
+        max_length=10, choices=[("cash", "Tunai"), ("bank", "Transfer Bank")],
+        default="cash", verbose_name="Metode Pembayaran",
+        # Deliberately only cash/bank, not Payment's own full
+        # METHOD_CHOICES (qris/card/other) — matches QuickPurchase's
+        # own real, confirmed 2-option payment_method exactly, since
+        # this is the same "paid on the spot, cash or bank" real-
+        # world event, not a customer-facing payment method choice.
+    )
+    paid_at = models.DateTimeField(verbose_name="Waktu Dibayar")
+    # Made's own confirmed call, 27 Aug: optional attribution to a
+    # specific mechanic, ONLY meaningful for Gaji Karyawan (6001) —
+    # helps track labor efficiency against Made's own real
+    # Rp15.000.000/bulan target per mechanic (see apps.workorders'
+    # own Mechanic model). Nullable even for 6001 — "All / Lump Sum"
+    # is a real, valid choice too; not every payout is attributable
+    # to one specific person.
+    mechanic = models.ForeignKey(
+        "workorders.Mechanic", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="operating_expenses", verbose_name="Mekanik",
+    )
+    reference = models.CharField(
+        max_length=100, blank=True, verbose_name="Referensi",
+        help_text="Nomor kwitansi/struk, jika ada.",
+    )
+    notes = models.TextField(blank=True, verbose_name="Catatan")
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Operating Expense"
+        verbose_name_plural  = "Operating Expenses"
+        ordering             = ["-paid_at"]
+        unique_together      = [("organization", "number")]
+
+    def __str__(self):
+        return f"{self.number} — {self.account.name} ({self.amount})"
+
+    def _resolve_organization(self):
+        return self.account.organization
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        if creating and not self.number:
+            self.sequence_number = OperatingExpenseSequence.next_number(self.organization)
+            self.number = f"EXP/{self.sequence_number:05d}"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def record(
+        cls, *, organization, account, amount, method="cash",
+        paid_at=None, mechanic=None, reference="", notes="", created_by=None,
+    ):
+        """
+        The one real entry point — never construct OperatingExpense
+        directly. Real validation, not just a UI suggestion:
+          - account must be a real, active EXPENSE-type account,
+            excluding 6004 (see class docstring for why).
+          - mechanic can only be set when account.code == "6001" —
+            stops nonsensical data ("mechanic X got paid for rent")
+            at the source, not just discouraged by the form.
+        """
+        if account.account_type != account.AccountType.EXPENSE:
+            raise ValueError(f"Akun {account.code} bukan akun Beban (Expense).")
+        if account.code == "6004":
+            raise ValueError(
+                "Akun 6004 (Beban Penyusutan) tidak bisa dicatat di sini — "
+                "penyusutan aset memiliki alur pencatatan tersendiri."
+            )
+        if mechanic is not None and account.code != "6001":
+            raise ValueError("Mekanik hanya bisa dipilih untuk akun 6001 (Beban Gaji Karyawan).")
+        if amount is None or amount <= Decimal("0"):
+            raise ValueError("Jumlah beban harus lebih dari nol.")
+
+        with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            resolved_paid_at = paid_at or timezone.now()
+            AccountingPeriod.assert_open_for_posting(organization, resolved_paid_at.date())
+
+            expense = cls.objects.create(
+                organization=organization, account=account, amount=amount,
+                method=method, paid_at=resolved_paid_at, mechanic=mechanic,
+                reference=reference, notes=notes, created_by=created_by,
+            )
+
+            from apps.core.events.bus import default_bus
+            from apps.payments.events import OperatingExpenseRecorded
+            default_bus.publish(OperatingExpenseRecorded(
+                organization_id=organization.id,
+                operating_expense_id=expense.id,
+                account_code=account.code,
+                method=method,
+                amount=amount,
+            ))
+
+        return expense

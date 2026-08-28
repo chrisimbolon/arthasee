@@ -61,3 +61,35 @@ class SupplierPaymentMade(DomainEvent):
     amount: Decimal
     method: str
     event_type: str = field(init=False, default="SupplierPaymentMade", kw_only=True)
+
+
+@dataclass(frozen=True)
+class OperatingExpenseRecorded(DomainEvent):
+    """
+    Fired when OperatingExpense.record() successfully records a real
+    operating cost payment (27 Aug 2026 — Made's own confirmed real
+    request: a guided "Catat Beban Operasional" form, an alternative
+    to the generic Manual Adjusting Journal for exactly this
+    recurring, routine kind of entry).
+
+    Unlike every other event in this file, the DEBIT account is
+    dynamic, not fixed — Made picks the real Expense account (Gaji,
+    Sewa, Utilitas, etc.) per entry, excluding 6004 (reserved for the
+    real, separate depreciation engine — see
+    apps.payments.models.OperatingExpense's own docstring).
+    account_code is frozen into this event's own payload at creation
+    time, inside OperatingExpense.record()'s own transaction — same
+    "capture once, don't recompute from a shifting database"
+    discipline PurchaseReturned's own debit_account_code and
+    QuickPurchaseRecorded's own payment_method already established.
+
+    Posting rule: Dr {account_code} / Cr Cash (1001) or Bank (1101)
+    depending on `method` — reuses the same shared
+    cash_or_bank_account_code() mapping PaymentReceived/
+    SupplierPaymentMade/QuickPurchaseRecorded already use.
+    """
+    operating_expense_id: uuid.UUID
+    account_code: str
+    method: str
+    amount: Decimal
+    event_type: str = field(init=False, default="OperatingExpenseRecorded", kw_only=True)
