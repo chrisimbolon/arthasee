@@ -6,7 +6,7 @@ from decimal import Decimal
 from apps.core.models import Outbox
 from rest_framework import serializers
 
-from .models import JournalEntry, JournalLine
+from .models import AccountingPeriod, JournalEntry, JournalLine
 
 
 class ManualJournalLineInputSerializer(serializers.Serializer):
@@ -97,5 +97,30 @@ class FailedPostingSerializer(serializers.ModelSerializer):
         fields = [
             "id", "event_id", "event_type", "payload", "occurred_at",
             "attempts", "last_error", "processed_at", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class AccountingPeriodSerializer(serializers.ModelSerializer):
+    """
+    28 Aug 2026 — real month-end closing, Made's own confirmed
+    requirement via his tax & accounting consultant. Entirely read-
+    only — a period is only ever created via
+    periods.ensure_period_for_org() and only ever transitions via the
+    real period.close()/period.reopen() model methods, never through
+    a generic serializer.save().
+    """
+    is_open_for_posting = serializers.BooleanField(read_only=True)
+    closed_by_name = serializers.CharField(source="closed_by.full_name", read_only=True, default=None)
+    reopened_by_name = serializers.CharField(source="reopened_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = AccountingPeriod
+        fields = [
+            "id", "year", "month", "start_date", "end_date",
+            "is_closed", "is_locked", "is_open_for_posting",
+            "closed_at", "closed_by", "closed_by_name",
+            "reopened_at", "reopened_by", "reopened_by_name",
+            "created_at",
         ]
         read_only_fields = fields

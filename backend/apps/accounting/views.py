@@ -9,7 +9,9 @@ views (thin — parse params, call reports.py, return the result),
 Task 4.4's manual journal view (a real WRITE path, validated input,
 owner-only), and Task 5.2's two read-only audit views (general
 journal-entry listing, and the failed-postings view — the real point
-of Task 5.2).
+of Task 5.2). 28 Aug 2026 adds a fourth kind — real month-end period
+control (list/close/reopen), Made's own confirmed requirement via his
+tax & accounting consultant.
 """
 from datetime import date
 
@@ -19,8 +21,9 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from . import reports
-from .models import Account, JournalEntry
-from .serializers import (FailedPostingSerializer, JournalEntrySerializer,
+from .models import Account, AccountingPeriod, JournalEntry
+from .serializers import (AccountingPeriodSerializer, FailedPostingSerializer,
+                          JournalEntrySerializer,
                           ManualJournalRecordSerializer)
 
 
@@ -28,6 +31,17 @@ def _parse_date(value, default=None):
     if not value:
         return default
     return date.fromisoformat(value)
+
+
+def _require_owner(request, organization):
+    """
+    Shared authorization gate, 28 Aug 2026 — the two new period
+    write actions (close/reopen) need the exact same owner-only check
+    ManualJournalListCreateView.post() already established. Factored
+    out here rather than copy-pasted a third time.
+    """
+    membership = request.user.memberships.filter(organization=organization, is_active=True).first()
+    return membership is not None and membership.role == "owner"
 
 
 class TrialBalanceView(TenantScopedAPIView):
@@ -67,7 +81,6 @@ class ProfitLossView(TenantScopedAPIView):
         as_of = _parse_date(request.query_params.get("as_of"), default=date.today())
         since = _parse_date(request.query_params.get("since"))
         if since is None:
-            from apps.accounting.models import AccountingPeriod
             period = AccountingPeriod.objects.filter(
                 organization=organization, start_date__lte=as_of, end_date__gte=as_of,
             ).first()
@@ -99,7 +112,6 @@ class CashConversionCycleView(TenantScopedAPIView):
         as_of = _parse_date(request.query_params.get("as_of"), default=date.today())
         since = _parse_date(request.query_params.get("since"))
         if since is None:
-            from apps.accounting.models import AccountingPeriod
             period = AccountingPeriod.objects.filter(
                 organization=organization, start_date__lte=as_of, end_date__gte=as_of,
             ).first()
@@ -203,8 +215,7 @@ class ManualJournalListCreateView(TenantScopedAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        membership = request.user.memberships.filter(organization=organization, is_active=True).first()
-        if membership is None or membership.role != "owner":
+        if not _require_owner(request, organization):
             return Response(
                 {"success": False, "message": "Hanya pemilik bengkel yang bisa memposting jurnal manual."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -302,3 +313,92 @@ class FailedPostingsView(TenantScopedAPIView):
 
         failures = failures.order_by("-occurred_at")
         return Response({"success": True, "failed_postings": FailedPostingSerializer(failures, many=True).data})
+
+
+class AccountingPeriodListView(TenantScopedAPIView):
+    """
+    GET /api/accounting/periods/
+    28 Aug 2026 — every real AccountingPeriod for this org, newest
+    first. The real data source for the period-control UI (Sansan's
+    own 3-button diagram) — a real shop owner needs to see every
+    month's own open/closed/locked state at a glance before deciding
+    which one to close.
+    """
+    model = AccountingPeriod
+
+    def get(self, request):
+        periods = (
+            self.get_queryset()
+            .select_related("closed_by", "reopened_by")
+            .order_by("-year", "-month")
+        )
+        return Response({"success": True, "periods": AccountingPeriodSerializer(periods, many=True).data})
+
+
+class AccountingPeriodCloseView(TenantScopedAPIView):
+    """
+    POST /api/accounting/periods/<id>/close/
+    Owner-only — Made's own confirmed requirement. Same authorization
+    split as ManualJournalListCreateView.post(): this view enforces
+    WHO can call it, period.close() itself enforces WHETHER it's
+    allowed to happen at all (the real hard guard against
+    re-closing).
+    """
+    model = AccountingPeriod
+
+    def post(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa menutup periode akuntansi."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        period = self.get_object(pk)
+        try:
+            closing_entry, net_income = period.close(closed_by=request.user)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "success": True,
+            "period": AccountingPeriodSerializer(period).data,
+            "net_income": net_income,
+            "closing_entry": JournalEntrySerializer(closing_entry).data if closing_entry else None,
+        })
+
+
+class AccountingPeriodReopenView(TenantScopedAPIView):
+    """
+    POST /api/accounting/periods/<id>/reopen/
+    Same owner-only gate as close() — Made's own confirmed
+    requirement ("heavily guarded, owner-only"). period.reopen()
+    itself enforces the real state check (must currently be closed).
+    """
+    model = AccountingPeriod
+
+    def post(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa membuka kembali periode akuntansi."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        period = self.get_object(pk)
+        try:
+            period.reopen(reopened_by=request.user)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"success": True, "period": AccountingPeriodSerializer(period).data})
