@@ -23,7 +23,8 @@ from decimal import Decimal
 
 from apps.inventory.events import PartConsumed, StockOpnameCompleted
 from apps.invoicing.events import InvoiceIssued
-from apps.payments.events import PaymentReceived, SupplierPaymentMade
+from apps.payments.events import (OperatingExpenseRecorded, PaymentReceived,
+                                  SupplierPaymentMade)
 from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
                                     QuickPurchaseRecorded,
                                     SupplierInvoiceReceived)
@@ -109,6 +110,24 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": cash_or_bank_account_code(event.method), "side": "debit",  "amount": event.amount},
                 {"account_code": "1201",                                   "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, OperatingExpenseRecorded):
+        # 27 Aug 2026 — Made's own confirmed real request: a guided
+        # alternative to the generic Manual Adjusting Journal for a
+        # recurring operating cost (salary, rent, utilities). The
+        # debit account is DYNAMIC, chosen by Made per entry — unlike
+        # every other rule in this file, which posts to one fixed
+        # account. account_code is frozen into the event's own
+        # payload at creation time (same "frozen event payload"
+        # discipline PurchaseReturned's own debit_account_code
+        # already established), never re-derived here.
+        return {
+            "memo": f"Operating expense — {event.operating_expense_id}",
+            "lines": _lines(
+                {"account_code": event.account_code,                             "side": "debit",  "amount": event.amount},
+                {"account_code": cash_or_bank_account_code(event.method), "side": "credit", "amount": event.amount},
             ),
         }
 

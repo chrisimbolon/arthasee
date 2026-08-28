@@ -49,6 +49,7 @@ class AccountingEventHandler(EventHandler):
         "PartConsumed", "WorkOrderCompleted", "InvoiceIssued", "PaymentReceived",
         "GoodsReceived", "SupplierInvoiceReceived", "SupplierPaymentMade",
         "PurchaseReturned", "StockOpnameCompleted", "QuickPurchaseRecorded",
+        "OperatingExpenseRecorded",
     )
 
     def handle(self, event: DomainEvent) -> None:
