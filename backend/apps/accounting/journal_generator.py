@@ -52,9 +52,30 @@ def post_for_event(event) -> JournalEntry | None:
         for entry in resolved["lines"]
     ]
 
+    # 28 Aug 2026 — real bug found live: occurred_at is WHEN the
+    # event was published (system/server time), not necessarily the
+    # real business date a transaction represents — most events
+    # coincide (fired the instant the action happens), but any event
+    # sourced from a user-chosen date (OperatingExpense's own
+    # paid_at, confirmed live to diverge from "now") would silently
+    # post to the WRONG accounting period, exactly as if the real
+    # date had never been entered at all. transaction_date is a new,
+    # OPTIONAL, generic field name any event can freeze its own real
+    # business date into (same "frozen event payload" discipline
+    # PurchaseReturned's own debit_account_code already established)
+    # — falls back to occurred_at for every event that doesn't set
+    # it, so this is fully backward compatible with every existing
+    # event class. Flagged directly, not silently expanded here:
+    # WorkOrderCompleted/GoodsReceived/QuickPurchaseRecorded likely
+    # have this same real gap (their own real business dates —
+    # service_date/received_at/purchased_at — are never frozen into
+    # their events either) — a separate, real audit, not bundled
+    # into this fix blind.
+    posting_date = getattr(event, "transaction_date", None) or event.occurred_at.date()
+
     return JournalEntry.post(
         organization=organization,
-        posting_date=event.occurred_at.date(),
+        posting_date=posting_date,
         source=JournalEntry.Source.DOMAIN_EVENT,
         event_type=event.event_type,
         reference_event_id=event.event_id,
