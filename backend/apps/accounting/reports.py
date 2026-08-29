@@ -272,8 +272,31 @@ def balance_sheet(organization, *, as_of=None) -> dict:
     as_of = as_of or date.today()
 
     assets = Account.objects.filter(organization=organization, account_type=Account.AccountType.ASSET, is_active=True).order_by("code")
-    asset_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in assets]
-    total_assets = sum((r["balance"] for r in asset_rows), Decimal("0"))
+    asset_rows = [
+        {"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of), "normal_balance": a.normal_balance}
+        for a in assets
+    ]
+    # 29 Aug 2026 — real bug found and fixed BEFORE it ever shipped:
+    # a contra-asset account (1402 Accumulated Depreciation,
+    # normal_balance=CREDIT, the first asset-type account in this
+    # whole COA with a credit normal balance) correctly returns a
+    # POSITIVE number from Account.balance() for its own real credit
+    # balance — but blindly summing every asset row together, as
+    # this line originally did, would have ADDED that positive
+    # number to total_assets instead of subtracting it, inflating
+    # total assets the moment depreciation ever posted anything —
+    # the exact opposite of what a contra-asset means. Fixed
+    # generally, not special-cased to 1402 specifically — any future
+    # credit-normal asset account is handled correctly by the same
+    # rule. trial_balance() above never had this bug — it already
+    # branches on normal_balance before choosing a column.
+    total_assets = sum(
+        (
+            (r["balance"] if r["normal_balance"] == Account.NormalBalance.DEBIT else -r["balance"])
+            for r in asset_rows
+        ),
+        Decimal("0"),
+    )
 
     liabilities = Account.objects.filter(organization=organization, account_type=Account.AccountType.LIABILITY, is_active=True).order_by("code")
     liability_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in liabilities]
