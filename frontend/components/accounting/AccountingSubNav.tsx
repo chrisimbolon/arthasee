@@ -7,10 +7,14 @@ import { usePathname } from "next/navigation";
 
 // Task 5.2 — /journal now exists, extending the list per the comment
 // this file shipped with in Task 5.1.
+// 27 Aug 2026 — /operating-expenses added, Made's own confirmed real
+// request: a guided alternative to the generic Manual Adjusting
+// Journal for a recurring operating cost.
 const SUBNAV = [
   { href: "/dashboard/accounting/reports",  label: "Laporan" },
   { href: "/dashboard/accounting/accounts", label: "Daftar Akun" },
   { href: "/dashboard/accounting/journal",  label: "Jurnal" },
+  { href: "/dashboard/accounting/operating-expenses", label: "Beban Operasional" },
 ];
 
 export default function AccountingSubNav() {
