@@ -466,6 +466,11 @@ class OperatingExpense(TenantScopedModel):
                 account_code=account.code,
                 method=method,
                 amount=amount,
+                # 28 Aug 2026 — real bug fix: the real, user-chosen
+                # paid_at date, not "whenever this event happens to
+                # get published" — see OperatingExpenseRecorded's own
+                # docstring for the full story.
+                transaction_date=resolved_paid_at.date(),
             ))
 
         return expense
