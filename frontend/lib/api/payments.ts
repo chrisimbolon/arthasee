@@ -49,3 +49,69 @@ export const paymentsApi = {
     return data.payment;
   },
 };
+
+// ── 27 Aug 2026 — Made's own confirmed real request: a guided
+// "Catat Beban Operasional" form, an alternative to the generic
+// Manual Adjusting Journal for a recurring operating cost (salary,
+// rent, utilities). ─────────────────────────────────────────────
+
+export type OperatingExpenseMethod = "cash" | "bank";
+
+export interface OperatingExpense {
+  id:               string;
+  number:           string;
+  sequence_number:  number;
+  account:          string;
+  account_code:     string;
+  account_name:     string;
+  amount:           string;
+  method:           OperatingExpenseMethod;
+  paid_at:          string;
+  // Optional, ONLY meaningful when account_code === "6001" (Gaji
+  // Karyawan) — enforced server-side in OperatingExpense.record(),
+  // not just a frontend convention. null means "All / Lump Sum," a
+  // real, valid choice — not every payout is attributable to one
+  // specific mechanic.
+  mechanic:         string | null;
+  mechanic_name:    string | null;
+  reference:        string;
+  notes:            string;
+  created_by:       string | null;
+  created_by_name:  string | null;
+  created_at:       string;
+}
+
+export interface RecordOperatingExpensePayload {
+  account_code: string;
+  amount:       number | string;
+  method?:      OperatingExpenseMethod;
+  paid_at?:     string;
+  mechanic?:    string | null;
+  reference?:   string;
+  notes?:       string;
+}
+
+export interface RecordOperatingExpenseResult {
+  success: boolean;
+  message?: string;
+  operating_expense?: OperatingExpense;
+}
+
+export const operatingExpensesApi = {
+  async list(): Promise<OperatingExpense[]> {
+    const { data } = await api.get("/api/operating-expenses/");
+    return data.operating_expenses;
+  },
+  // Real WRITE action — a failure here must surface its real message
+  // (e.g. "Akun 6004 ... tidak bisa dicatat di sini") to the user,
+  // same discipline as accountingApi.closePeriod()/reopenPeriod().
+  async record(payload: RecordOperatingExpensePayload): Promise<RecordOperatingExpenseResult> {
+    try {
+      const { data } = await api.post("/api/operating-expenses/", payload);
+      return data;
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      return { success: false, message: message || "Gagal mencatat beban operasional." };
+    }
+  },
+};
