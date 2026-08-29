@@ -94,8 +94,10 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
     """
     from apps.inventory.events import PartConsumed, StockOpnameCompleted
     from apps.invoicing.events import InvoiceIssued
-    from apps.payments.events import PaymentReceived, SupplierPaymentMade
+    from apps.payments.events import (OperatingExpenseRecorded,
+                                      PaymentReceived, SupplierPaymentMade)
     from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
+                                        QuickPurchaseRecorded,
                                         SupplierInvoiceReceived)
     from apps.workorders.events import WorkOrderCompleted
 
@@ -109,6 +111,17 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
         "SupplierPaymentMade": SupplierPaymentMade,
         "PurchaseReturned": PurchaseReturned,
         "StockOpnameCompleted": StockOpnameCompleted,
+        # 28 Aug 2026 — real gap found live: both were real, already-
+        # posting event types (confirmed via apps.accounting.
+        # posting_engine.py's own real, applied imports — same
+        # sourcing discipline this registry has used since 08-22),
+        # just never added here, since neither had ever needed
+        # replay before now. A live, first-time dispatch never
+        # touches this registry at all (it already has the real
+        # event object in memory) — only replay does, which is
+        # exactly what surfaced this.
+        "QuickPurchaseRecorded": QuickPurchaseRecorded,
+        "OperatingExpenseRecorded": OperatingExpenseRecorded,
     }
     try:
         return registry[event_type]
