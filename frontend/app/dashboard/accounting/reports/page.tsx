@@ -7,7 +7,9 @@ import {
   ACCOUNT_TYPE_LABELS, accountingApi,
   AccountingPeriod,
   AgingBucket, AgingInvoiceRow,
-  AgingReportResponse, BalanceSheetResponse, CashConversionCycleResponse, ProfitLossComparisonResponse,
+  AgingReportResponse, BalanceSheetResponse, CashConversionCycleResponse,
+  depreciationRunApi,
+  ProfitLossComparisonResponse,
   ProfitLossResponse, ReportDelta, ReportLine, TrialBalanceResponse,
 } from "@/lib/api/accounting";
 import { Loader2, Lock, TriangleAlert, Unlock } from "lucide-react";
@@ -581,6 +583,38 @@ function ConfirmReopenModal({
   );
 }
 
+function DepreciationBreakdown({ periodId }: { periodId: string }) {
+  const [run, setRun] = useState<import("@/lib/api/accounting").DepreciationRunResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    depreciationRunApi.forPeriod(periodId).then((res) => { setRun(res); setLoading(false); });
+  }, [periodId]);
+
+  // Real, honest states — no depreciation run yet (period not
+  // closed, or closed with zero real assets to depreciate that
+  // month) renders nothing at all, not an error or an empty card.
+  if (loading) return null;
+  if (!run || run.entries.length === 0) return null;
+
+  return (
+    <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="label" style={{ marginBottom: 10 }}>Penyusutan Aset Bulan Ini</div>
+      {run.entries.map((entry) => (
+        <div key={entry.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13.5 }}>
+          <span style={{ color: "var(--ink-soft)" }}>{entry.asset_name} <span className="mono" style={{ color: "var(--steel)", fontSize: 12 }}>({entry.asset_number})</span></span>
+          <span className="mono">{formatRupiah(entry.amount)}</span>
+        </div>
+      ))}
+      <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0 0", fontSize: 13.5, fontWeight: 700, borderTop: "1px solid var(--line)", marginTop: 4 }}>
+        <span>Total Penyusutan</span>
+        <span className="mono">{formatRupiah(run.total_amount)}</span>
+      </div>
+    </div>
+  );
+}
+
 function PeriodReviewSummary({ period }: { period: AccountingPeriod }) {
   const [data, setData] = useState<ProfitLossResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -596,22 +630,29 @@ function PeriodReviewSummary({ period }: { period: AccountingPeriod }) {
   const netIncome = toNumber(data.net_income);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 18 }}>
-      <div className="card" style={{ padding: 14 }}>
-        <div className="label" style={{ marginBottom: 6 }}>Pendapatan</div>
-        <div className="mono" style={{ fontSize: 17, fontWeight: 700 }}>{formatRupiah(data.total_revenue)}</div>
-      </div>
-      <div className="card" style={{ padding: 14 }}>
-        <div className="label" style={{ marginBottom: 6 }}>Laba Kotor</div>
-        <div className="mono" style={{ fontSize: 17, fontWeight: 700 }}>{formatRupiah(data.gross_profit)}</div>
-      </div>
-      <div className="card" style={{ padding: 14 }}>
-        <div className="label" style={{ marginBottom: 6 }}>Laba Bersih</div>
-        <div className="mono" style={{ fontSize: 17, fontWeight: 700, color: netIncome >= 0 ? "var(--workshop)" : "var(--danger)" }}>
-          {formatRupiah(data.net_income)}
+    <>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 18 }}>
+        <div className="card" style={{ padding: 14 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Pendapatan</div>
+          <div className="mono" style={{ fontSize: 17, fontWeight: 700 }}>{formatRupiah(data.total_revenue)}</div>
+        </div>
+        <div className="card" style={{ padding: 14 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Laba Kotor</div>
+          <div className="mono" style={{ fontSize: 17, fontWeight: 700 }}>{formatRupiah(data.gross_profit)}</div>
+        </div>
+        <div className="card" style={{ padding: 14 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Laba Bersih</div>
+          <div className="mono" style={{ fontSize: 17, fontWeight: 700, color: netIncome >= 0 ? "var(--workshop)" : "var(--danger)" }}>
+            {formatRupiah(data.net_income)}
+          </div>
         </div>
       </div>
-    </div>
+      {/* 29 Aug 2026 — real depreciation breakdown, only meaningful
+          once a period has actually been closed (a still-open
+          period has no DepreciationRun yet at all — see
+          DepreciationBreakdown's own "renders nothing" fallback). */}
+      {period.is_closed && <DepreciationBreakdown periodId={period.id} />}
+    </>
   );
 }
 
