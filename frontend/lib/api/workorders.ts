@@ -57,6 +57,10 @@ export interface Mechanic {
   id:         string;
   name:       string;
   is_active:  boolean;
+  // 29 Aug 2026 — Made's own confirmed real request: a real monthly
+  // labor-revenue target per mechanic, Rp15.000.000 default —
+  // adjustable per mechanic, not a hardcoded constant.
+  monthly_target: string;
   created_at: string;
 }
 
@@ -314,7 +318,7 @@ export const mechanicsApi = {
   // No remove() — deliberately. Deactivation (update with
   // is_active: false) is the only removal path; see Mechanic's own
   // docstring in the backend for why a hard delete is never exposed.
-  async update(id: string, payload: { name?: string; is_active?: boolean }): Promise<Mechanic> {
+  async update(id: string, payload: { name?: string; is_active?: boolean; monthly_target?: number | string }): Promise<Mechanic> {
     const { data } = await api.put(`/api/mechanics/${id}/`, payload);
     return data.mechanic;
   },
@@ -351,5 +355,43 @@ export const dashboardApi = {
   async summary(period: "today" | "week" | "month" | "year" = "today"): Promise<DashboardSummary> {
     const { data } = await api.get("/api/dashboard/summary/", { params: { period } });
     return data;
+  },
+};
+
+// 29 Aug 2026 — Made's own confirmed real request: real monthly
+// labor-revenue tracking per mechanic against their own
+// monthly_target.
+
+export interface MechanicMonthlyProgressRow {
+  mechanic_id:        string;
+  mechanic_name:       string;
+  monthly_target:      string;
+  // Real, labor-only (kind="labor") revenue from genuinely DONE
+  // WorkOrders assigned to this mechanic, invoiced within the given
+  // month — see the backend's own mechanic_monthly_progress()
+  // docstring for the exact calculation basis. Never parts revenue.
+  labor_revenue:       string;
+  percent_of_target:   string;
+}
+
+export interface MechanicMonthlyProgressResponse {
+  year:      number;
+  month:     number;
+  mechanics: MechanicMonthlyProgressRow[];
+}
+
+export const mechanicProgressApi = {
+  // year/month both optional — omit for the current real calendar
+  // month, matching the backend's own default.
+  async monthly(year?: number, month?: number): Promise<MechanicMonthlyProgressResponse | null> {
+    try {
+      const { data } = await api.get("/api/mechanics/monthly-progress/", { params: { year, month } });
+      return data;
+    } catch {
+      // Mirrors this whole API module's own "missing org -> null"
+      // pattern used throughout the codebase's reporting endpoints —
+      // a real, expected state a page should render gracefully.
+      return null;
+    }
   },
 };
