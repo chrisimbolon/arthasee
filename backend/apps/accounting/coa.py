@@ -37,6 +37,19 @@ STANDARD_COA = [
     ("1301", "Inventory",                          Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
     ("1302", "Work In Progress (WIP)",              Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
     ("1401", "Fixed Assets",                        Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
+    # 29 Aug 2026 — real automated depreciation. A genuine CONTRA-
+    # asset: account_type=ASSET (it lives in the Asset section of
+    # the COA, appears on the Balance Sheet's asset side, reducing
+    # 1401's own net book value) but normal_balance=CREDIT — the
+    # FIRST asset-type account in this whole COA with a credit
+    # normal balance, exactly the mechanism NormalBalance exists as
+    # a field separate from account_type to support. Named in
+    # English, matching this section's own real, consistent
+    # convention (Cash, Bank, Accounts Receivable, Work In Progress,
+    # Fixed Assets — every ASSET/LIABILITY/EQUITY account here is
+    # English; only REVENUE/COGS/EXPENSE accounts below use
+    # Indonesian).
+    ("1402", "Accumulated Depreciation",            Account.AccountType.ASSET,     Account.NormalBalance.CREDIT),
     ("2001", "Accounts Payable",                    Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
     ("2010", "Accrued Inventory (Unbilled AP)",      Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
     ("2101", "Tax Payable",                         Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
