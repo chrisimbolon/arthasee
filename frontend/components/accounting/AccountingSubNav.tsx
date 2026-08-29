@@ -10,11 +10,14 @@ import { usePathname } from "next/navigation";
 // 27 Aug 2026 — /operating-expenses added, Made's own confirmed real
 // request: a guided alternative to the generic Manual Adjusting
 // Journal for a recurring operating cost.
+// 29 Aug 2026 — /assets added: real fixed asset register & automated
+// depreciation, Made's own confirmed request.
 const SUBNAV = [
   { href: "/dashboard/accounting/reports",  label: "Laporan" },
   { href: "/dashboard/accounting/accounts", label: "Daftar Akun" },
   { href: "/dashboard/accounting/journal",  label: "Jurnal" },
   { href: "/dashboard/accounting/operating-expenses", label: "Beban Operasional" },
+  { href: "/dashboard/accounting/assets", label: "Aset Tetap" },
 ];
 
 export default function AccountingSubNav() {
