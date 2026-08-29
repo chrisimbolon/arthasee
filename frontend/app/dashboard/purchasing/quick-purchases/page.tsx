@@ -201,6 +201,12 @@ function CreateQuickPurchaseModal({
   const [supplierId, setSupplierId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<QuickPurchasePaymentMethod>("cash");
   const [reference, setReference] = useState("");
+  // 29 Aug 2026 — real, must-have field, not cosmetic: without this,
+  // every submission silently defaults to "right now" server-side —
+  // confirmed live, this exact form, the moment August 2026 closed
+  // and the entire feature stopped working for real use. Same real
+  // fix already applied to OperatingExpense's own form.
+  const [purchasedAt, setPurchasedAt] = useState(() => new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<LineInput[]>([emptyLine()]);
   const [saving, setSaving] = useState(false);
@@ -222,6 +228,7 @@ function CreateQuickPurchaseModal({
     try {
       const qp = await quickPurchasesApi.create({
         supplier: supplierId, payment_method: paymentMethod,
+        purchased_at: purchasedAt ? new Date(purchasedAt).toISOString() : undefined,
         reference: reference || undefined, notes: notes || undefined,
         lines: filledLines.map((l) => ({
           part: l.part_id, quantity: toNumber(l.quantity), unit_cost: toNumber(l.unit_cost),
@@ -278,6 +285,11 @@ function CreateQuickPurchaseModal({
                 Transfer Bank
               </button>
             </div>
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <label className="label">Tanggal Pembelian</label>
+            <input className="input" type="date" required value={purchasedAt} onChange={(e) => setPurchasedAt(e.target.value)} />
           </div>
 
           <div style={{ marginBottom: 14 }}>
