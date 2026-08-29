@@ -60,7 +60,7 @@ class SeedCoaTests(TestCase):
 
     def test_seed_creates_every_standard_account(self):
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        self.assertEqual(Account.objects.filter(organization=self.org).count(), 25)
+        self.assertEqual(Account.objects.filter(organization=self.org).count(), 26)
         # A handful of specific codes, not just the count — the count
         # alone wouldn't catch a wrong code silently replacing a real
         # one from the Roadmap v2.2 COA Blueprint.
@@ -84,7 +84,7 @@ class SeedCoaTests(TestCase):
 
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
 
-        self.assertEqual(Account.objects.filter(organization=self.org).count(), 25)
+        self.assertEqual(Account.objects.filter(organization=self.org).count(), 26)
         account_1001.refresh_from_db()
         self.assertEqual(account_1001.name, "Kas (Customized)")
 
