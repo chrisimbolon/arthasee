@@ -6,6 +6,7 @@ Arthasee — Purchasing Domain Events (Sprint 3, Stage 2)
 """
 import uuid
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 from apps.core.events.interfaces import DomainEvent
@@ -109,10 +110,23 @@ class QuickPurchaseRecorded(DomainEvent):
     copy of that mapping. Never Accounts Payable (2001) — this is
     deliberately never a credit purchase; that's the entire point of
     the "paid on the spot" real-world event this describes.
+
+    transaction_date, added 29 Aug 2026 — real bug found live, same
+    class of bug as OperatingExpenseRecorded's own fix a day earlier:
+    without this, journal_generator.post_for_event() fell back to
+    occurred_at (when the event was PUBLISHED, i.e. "now"), silently
+    ignoring purchased_at whenever it genuinely differed from today.
+    Confirmed live: the QuickPurchase form itself had no date field
+    at all, meaning EVERY real submission defaulted to "now" — and
+    with August 2026 closed, this made the entire QuickPurchase
+    feature non-functional for real use the moment the month closed.
+    Frozen here, same discipline as payment_method above — the real
+    business date, not re-derived from anything that could shift.
     """
     quick_purchase_id: uuid.UUID
     supplier_id: uuid.UUID
     payment_method: str  # "cash" or "bank" — QuickPurchase.PaymentMethod's own real values
     amount: Decimal
     line_item_count: int
+    transaction_date: date
     event_type: str = field(init=False, default="QuickPurchaseRecorded", kw_only=True)
