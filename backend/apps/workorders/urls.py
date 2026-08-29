@@ -4,7 +4,8 @@
 from django.urls import path
 
 from .views import (ActiveJobsView, DashboardSummaryView, MechanicDetailView,
-                    MechanicListView, WorkOrderCancelView, WorkOrderCloseView,
+                    MechanicListView, MechanicMonthlyProgressView,
+                    WorkOrderCancelView, WorkOrderCloseView,
                     WorkOrderDetailView, WorkOrderJobLineAssignStageView,
                     WorkOrderJobLineDetailView, WorkOrderJobLineListView,
                     WorkOrderJobLineToggleView, WorkOrderJobTicketPdfView,
@@ -67,6 +68,10 @@ urlpatterns = [
     # lightweight roster (mechanics never log in, unchanged), and
     # dashboard/summary/ aggregates across Mechanic/WorkOrder/
     # WorkOrderStage in one call for a single dashboard screen.
+    # 29 Aug 2026 — real monthly labor-revenue tracking per mechanic.
+    # Placed ahead of mechanics/<uuid:pk>/, same convention as
+    # work-orders/active/ ahead of work-orders/<uuid:pk>/ above.
+    path("mechanics/monthly-progress/", MechanicMonthlyProgressView.as_view(), name="mechanic-monthly-progress"),
     path("mechanics/", MechanicListView.as_view(), name="mechanic-list"),
     path("mechanics/<uuid:pk>/", MechanicDetailView.as_view(), name="mechanic-detail"),
     path("dashboard/summary/", DashboardSummaryView.as_view(), name="dashboard-summary"),

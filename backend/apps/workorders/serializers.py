@@ -16,7 +16,12 @@ def _user_org_ids(request):
 class MechanicSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Mechanic
-        fields = ["id", "name", "is_active", "created_at"]
+        # monthly_target, 29 Aug 2026 — deliberately writable, not
+        # read-only: Chris's own confirmed reasoning for a real,
+        # per-mechanic field was specifically so Made can adjust it
+        # per mechanic later without a code change. Same PUT
+        # mechanism is_active already uses on the Mekanik page.
+        fields = ["id", "name", "is_active", "monthly_target", "created_at"]
         read_only_fields = ["id", "created_at"]
 
 

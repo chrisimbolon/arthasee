@@ -760,6 +760,59 @@ class MechanicDetailView(TenantScopedAPIView):
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
+class MechanicMonthlyProgressView(TenantScopedAPIView):
+    """
+    GET /api/mechanics/monthly-progress/?year=2026&month=8
+
+    29 Aug 2026 — Made's own confirmed real request: real monthly
+    labor-revenue tracking per mechanic against their own
+    monthly_target. All real logic lives in
+    apps.workorders.reports.mechanic_monthly_progress() — this view
+    is thin, resolving the acting organization the same explicit way
+    MechanicListView/DashboardSummaryView already do above (this
+    aggregates its own real computation across mechanics, not a
+    single-model queryset, so the usual self.get_queryset() pattern
+    doesn't apply here either — same reasoning DashboardSummaryView's
+    own docstring already gives for the same situation).
+
+    year/month both optional — defaults to the current real calendar
+    month when omitted, matching mechanic_monthly_progress()'s own
+    default. Placed as a real, named sub-route ahead of
+    mechanics/<uuid:pk>/ in urls.py, same convention as
+    work-orders/active/ ahead of work-orders/<uuid:pk>/ above.
+    """
+    model = Mechanic  # nominal only, same as DashboardSummaryView's
+    # own model=WorkOrder — just so TenantScopedAPIView's shared
+    # permission plumbing applies; not used for get_queryset() here.
+
+    def get(self, request):
+        org = self._resolve_org(request)
+        if org is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        raw_year = request.query_params.get("year")
+        raw_month = request.query_params.get("month")
+        try:
+            year = int(raw_year) if raw_year else None
+            month = int(raw_month) if raw_month else None
+        except ValueError:
+            return Response(
+                {"success": False, "message": "Parameter year/month harus berupa angka."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from apps.workorders.reports import mechanic_monthly_progress
+        data = mechanic_monthly_progress(org, year=year, month=month)
+        return Response({"success": True, **data})
+
+    def _resolve_org(self, request):
+        membership = request.user.memberships.filter(is_active=True).first()
+        return membership.organization if membership else None
+
+
 def _hours_elapsed(started_at):
     if started_at is None:
         return None
