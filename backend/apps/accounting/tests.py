@@ -34,7 +34,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Account, AccountingPeriod, JournalEntry, JournalLine
+from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
+                     JournalEntry, JournalLine)
 
 
 def _seed_all_months(org, year):
@@ -1315,3 +1316,342 @@ class JournalEntryAndFailedPostingsAPITests(APITestCase):
 
         resp = self.client.get("/api/accounting/failed-postings/")
         self.assertEqual(resp.data["failed_postings"], [])
+
+
+class AssetRecordTests(TestCase):
+    """
+    29 Aug 2026 — real coverage for Asset.record(). Own fixture, not
+    reusing any other class's setUp — Asset needs nothing beyond a
+    seeded org and a full year of periods (assets get acquired and
+    depreciated across many months in these tests).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        _seed_all_months(self.org, 2026)
+
+    def test_record_creates_sequential_number(self):
+        asset = Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("5000000"), useful_life_months=36,
+        )
+        self.assertEqual(asset.number, "AST/00001")
+        self.assertEqual(asset.sequence_number, 1)
+
+    def test_cash_acquisition_posts_dr_1401_cr_1001(self):
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("5000000"), useful_life_months=36, method="cash",
+        )
+        fixed_assets = Account.objects.get(organization=self.org, code="1401")
+        cash = Account.objects.get(organization=self.org, code="1001")
+        self.assertEqual(fixed_assets.balance(), Decimal("5000000.00"))
+        self.assertEqual(cash.balance(), Decimal("-5000000.00"))
+
+    def test_bank_acquisition_posts_dr_1401_cr_1101(self):
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("5000000"), useful_life_months=36, method="bank",
+        )
+        fixed_assets = Account.objects.get(organization=self.org, code="1401")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(fixed_assets.balance(), Decimal("5000000.00"))
+        self.assertEqual(bank.balance(), Decimal("-5000000.00"))
+
+    def test_acquisition_entry_source_is_asset_acquisition(self):
+        asset = Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("5000000"), useful_life_months=36,
+        )
+        entry = JournalEntry.objects.get(organization=self.org, memo__icontains=asset.number)
+        self.assertEqual(entry.source, JournalEntry.Source.ASSET_ACQUISITION)
+
+    def test_zero_cost_rejected(self):
+        with self.assertRaises(ValueError):
+            Asset.record(
+                organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+                cost=Decimal("0"), useful_life_months=36,
+            )
+        self.assertFalse(Asset.objects.exists())
+
+    def test_negative_cost_rejected(self):
+        with self.assertRaises(ValueError):
+            Asset.record(
+                organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+                cost=Decimal("-100"), useful_life_months=36,
+            )
+
+    def test_zero_useful_life_rejected(self):
+        with self.assertRaises(ValueError):
+            Asset.record(
+                organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+                cost=Decimal("5000000"), useful_life_months=0,
+            )
+
+    def test_invalid_method_rejected(self):
+        with self.assertRaises(ValueError):
+            Asset.record(
+                organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+                cost=Decimal("5000000"), useful_life_months=36, method="credit",
+            )
+
+    def test_blocked_when_target_period_is_closed(self):
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=1)
+        period.close(closed_by=None)
+        with self.assertRaises(ValueError):
+            Asset.record(
+                organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+                cost=Decimal("5000000"), useful_life_months=36,
+            )
+        self.assertFalse(Asset.objects.exists())
+
+
+class DepreciationRunExecuteTests(TestCase):
+    """
+    29 Aug 2026 — real coverage for DepreciationRun.execute(),
+    including the two most important, previously-unverified-by-any-
+    automated-test guarantees: the no-proration rule, and the
+    rounding-ceiling fix that keeps N months of straight-line
+    division summing to EXACTLY the original cost.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        _seed_all_months(self.org, 2026)
+
+    def _period(self, month):
+        return AccountingPeriod.objects.get(organization=self.org, year=2026, month=month)
+
+    def test_no_assets_creates_run_with_no_journal_entry(self):
+        run = DepreciationRun.execute(organization=self.org, accounting_period=self._period(2))
+        self.assertIsNone(run.journal_entry)
+        self.assertEqual(run.total_amount, Decimal("0"))
+
+    def test_asset_acquired_this_month_not_depreciated_yet(self):
+        """No proration, Chris's own confirmed call — the acquisition
+        month itself gets no entry at all."""
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        run = DepreciationRun.execute(organization=self.org, accounting_period=self._period(1))
+        self.assertIsNone(run.journal_entry)
+        self.assertEqual(run.total_amount, Decimal("0"))
+
+    def test_first_real_depreciation_is_the_month_after_acquisition(self):
+        asset = Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        run = DepreciationRun.execute(organization=self.org, accounting_period=self._period(2))
+        self.assertIsNotNone(run.journal_entry)
+        self.assertEqual(run.total_amount, Decimal("333333.33"))
+        self.assertEqual(run.entries.count(), 1)
+        self.assertEqual(run.entries.first().asset_id, asset.id)
+
+    def test_rounding_ceiling_final_month_sums_to_exact_original_cost(self):
+        """
+        Real, hand-verified math (also proven standalone before any
+        code was written): 333.333,33 + 333.333,33 + 333.333,34 =
+        1.000.000,00 exactly — the whole point of the entries_so_far
+        fix over a naive rounded-amount comparison.
+        """
+        asset = Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        run1 = DepreciationRun.execute(organization=self.org, accounting_period=self._period(2))
+        run2 = DepreciationRun.execute(organization=self.org, accounting_period=self._period(3))
+        run3 = DepreciationRun.execute(organization=self.org, accounting_period=self._period(4))
+
+        self.assertEqual(run1.total_amount, Decimal("333333.33"))
+        self.assertEqual(run2.total_amount, Decimal("333333.33"))
+        self.assertEqual(run3.total_amount, Decimal("333333.34"))  # final month absorbs the remainder
+
+        self.assertEqual(run1.total_amount + run2.total_amount + run3.total_amount, Decimal("1000000.00"))
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.accumulated_depreciation, Decimal("1000000.00"))
+        self.assertEqual(asset.book_value, Decimal("0.00"))
+        self.assertFalse(asset.is_active)  # deactivated after its final entry
+
+    def test_fully_depreciated_asset_excluded_from_further_runs(self):
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        DepreciationRun.execute(organization=self.org, accounting_period=self._period(2))
+        DepreciationRun.execute(organization=self.org, accounting_period=self._period(3))
+        DepreciationRun.execute(organization=self.org, accounting_period=self._period(4))
+
+        run5 = DepreciationRun.execute(organization=self.org, accounting_period=self._period(5))
+        self.assertIsNone(run5.journal_entry)
+        self.assertEqual(run5.total_amount, Decimal("0"))
+
+    def test_posts_correct_dr_6004_cr_1402(self):
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        DepreciationRun.execute(organization=self.org, accounting_period=self._period(2))
+
+        depreciation_expense = Account.objects.get(organization=self.org, code="6004")
+        accumulated = Account.objects.get(organization=self.org, code="1402")
+        self.assertEqual(depreciation_expense.balance(), Decimal("333333.33"))
+        self.assertEqual(accumulated.balance(), Decimal("333333.33"))
+
+    def test_aggregates_multiple_assets_into_one_journal_entry(self):
+        """Chris's own confirmed granularity call — one consolidated
+        entry on the Jurnal page, real itemized breakdown underneath."""
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        Asset.record(
+            organization=self.org, name="Toolbox", acquisition_date=date(2026, 1, 10),
+            cost=Decimal("600000"), useful_life_months=6,
+        )
+        run = DepreciationRun.execute(organization=self.org, accounting_period=self._period(2))
+
+        self.assertEqual(run.entries.count(), 2)
+        self.assertEqual(run.journal_entry.lines.count(), 2)  # one Dr 6004, one Cr 1402 — never one line per asset
+        self.assertEqual(run.total_amount, Decimal("333333.33") + Decimal("100000.00"))
+
+    def test_second_call_for_same_period_raises_integrity_error(self):
+        """Real, hard idempotency guard, enforced at the DB level —
+        not just application logic."""
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        period = self._period(2)
+        DepreciationRun.execute(organization=self.org, accounting_period=period)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                DepreciationRun.execute(organization=self.org, accounting_period=period)
+
+
+class AccountingPeriodCloseTests(TestCase):
+    """
+    29 Aug 2026 — real, end-to-end coverage for
+    AccountingPeriod.close() itself, a genuine gap in this whole
+    codebase until now: every prior test exercising period state
+    (AccountingPeriodLockTests above) only ever flipped is_closed/
+    is_locked as plain flags directly, never actually called close()
+    and checked the real closing entry it produces. The only place
+    close() was ever genuinely exercised before this was a live shell
+    session, not a repeatable automated test.
+
+    Matters more now specifically because close() was just
+    restructured (29 Aug 2026) to run the real depreciation loop
+    FIRST, inside the same atomic block, before computing P&L — real,
+    non-trivial ordering logic with real money math, previously
+    proven by hand once and never again automatically.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        _seed_all_months(self.org, 2026)
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+        self.ar = Account.objects.get(organization=self.org, code="1201")
+
+    def test_close_with_zero_activity_posts_nothing_but_still_closes(self):
+        """Matches the existing WorkOrderCompleted "$0 -> post
+        nothing" precedent — a genuinely quiet month closes cleanly
+        with no journal entry at all."""
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=2)
+        closing_entry, net_income = period.close(closed_by=None)
+        self.assertIsNone(closing_entry)
+        self.assertEqual(net_income, Decimal("0"))
+        period.refresh_from_db()
+        self.assertTrue(period.is_closed)
+        self.assertIsNotNone(period.closed_at)
+
+    def test_close_posts_real_pl_entry_and_updates_retained_earnings(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 3, 10), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("2000000")}, {"account": self.revenue, "credit": Decimal("2000000")}],
+        )
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=3)
+        closing_entry, net_income = period.close(closed_by=None)
+
+        self.assertEqual(net_income, Decimal("2000000"))
+        self.assertIsNotNone(closing_entry)
+        self.assertEqual(closing_entry.source, JournalEntry.Source.PERIOD_CLOSING)
+
+        retained_earnings = Account.objects.get(organization=self.org, code="3101")
+        self.assertEqual(retained_earnings.balance(), Decimal("2000000.00"))
+
+    def test_close_includes_this_months_real_depreciation_expense(self):
+        """
+        The real proof of today's own pipeline restructuring —
+        depreciation must post BEFORE the P&L calculation runs, or
+        this month's real depreciation expense would silently never
+        reach the closing entry, understating expenses for a month
+        that genuinely had real depreciation. 1.000.000 revenue minus
+        333.333,33 real depreciation expense = 666.666,67 net income,
+        not 1.000.000.
+        """
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 2, 10), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
+        )
+
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=2)
+        closing_entry, net_income = period.close(closed_by=None)
+
+        self.assertEqual(net_income, Decimal("666666.67"))
+
+        depreciation_run = DepreciationRun.objects.get(organization=self.org, accounting_period=period)
+        self.assertEqual(depreciation_run.total_amount, Decimal("333333.33"))
+
+    def test_reclose_blocked_even_after_reopen(self):
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=4)
+        period.close(closed_by=None)
+        period.reopen(reopened_by=None)
+
+        with self.assertRaises(ValueError):
+            period.close(closed_by=None)
+
+    def test_reopen_flips_is_closed_false_but_keeps_closed_at(self):
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=5)
+        period.close(closed_by=None)
+        original_closed_at = period.closed_at
+
+        period.reopen(reopened_by=None)
+        period.refresh_from_db()
+
+        self.assertFalse(period.is_closed)
+        self.assertEqual(period.closed_at, original_closed_at)  # never cleared, the real permanent guard
+        self.assertIsNotNone(period.reopened_at)
+
+    def test_a_failed_reclose_attempt_never_creates_a_duplicate_depreciation_run(self):
+        """
+        Real proof close()'s own hard guard (checking closed_at
+        first, before anything else runs) means a genuine re-close
+        attempt never even reaches DepreciationRun.execute() a second
+        time for the same period — the IntegrityError that class's
+        own unique_together WOULD raise is never actually hit in real
+        usage, since close() itself blocks first, at the very top of
+        the method.
+        """
+        Asset.record(
+            organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
+            cost=Decimal("1000000"), useful_life_months=3,
+        )
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=2)
+        period.close(closed_by=None)
+
+        self.assertEqual(DepreciationRun.objects.filter(organization=self.org, accounting_period=period).count(), 1)
+
+        with self.assertRaises(ValueError):
+            period.close(closed_by=None)
+
+        self.assertEqual(DepreciationRun.objects.filter(organization=self.org, accounting_period=period).count(), 1)
