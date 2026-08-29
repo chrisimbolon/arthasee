@@ -325,3 +325,91 @@ export const accountingApi = {
     }
   },
 };
+
+// 29 Aug 2026 — real fixed asset register & automated depreciation,
+// Made's own confirmed request.
+
+export type AssetPaymentMethod = "cash" | "bank";
+
+export interface Asset {
+  id: string;
+  number: string;
+  sequence_number: number;
+  name: string;
+  acquisition_date: string;
+  cost: string | number;
+  useful_life_months: number;
+  method: string;
+  is_active: boolean;
+  // Real Python properties on the backend, computed on read from
+  // AssetDepreciationEntry rows — never cached, never stale.
+  monthly_depreciation: string | number;
+  accumulated_depreciation: string | number;
+  book_value: string | number;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export interface RecordAssetPayload {
+  name: string;
+  acquisition_date: string;
+  cost: number | string;
+  useful_life_months: number;
+  method?: AssetPaymentMethod;
+}
+
+export interface RecordAssetResult {
+  success: boolean;
+  message?: string;
+  asset?: Asset;
+}
+
+export interface AssetDepreciationEntryRow {
+  id: string;
+  asset_id: string;
+  asset_number: string;
+  asset_name: string;
+  amount: string | number;
+  created_at: string;
+}
+
+export interface DepreciationRunResponse {
+  id: string;
+  accounting_period: string;
+  journal_entry_id: string | null;
+  total_amount: string | number;
+  run_at: string;
+  entries: AssetDepreciationEntryRow[];
+}
+
+export const assetsApi = {
+  list: () => getListOrNull<Asset>("/api/accounting/assets/", "assets", {}),
+
+  // Real WRITE action — same discipline as closePeriod()/reopenPeriod()
+  // above: a failure here must surface its real message (e.g. a
+  // rejected zero/negative cost) to the user, not silently collapse.
+  async record(payload: RecordAssetPayload): Promise<RecordAssetResult> {
+    try {
+      const { data } = await api.post("/api/accounting/assets/", payload);
+      return data;
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      return { success: false, message: message || "Gagal mencatat aset." };
+    }
+  },
+};
+
+export const depreciationRunApi = {
+  // Returns depreciation_run: null (not a thrown error) when no run
+  // exists yet for this period — a real, honest "hasn't been closed
+  // yet" state, matching the backend's own real response shape.
+  async forPeriod(periodId: string): Promise<DepreciationRunResponse | null> {
+    try {
+      const { data } = await api.get(`/api/accounting/periods/${periodId}/depreciation-run/`);
+      return data.depreciation_run;
+    } catch {
+      return null;
+    }
+  },
+};
