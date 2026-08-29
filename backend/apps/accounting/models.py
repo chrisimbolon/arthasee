@@ -912,94 +912,110 @@ class DepreciationRun(TenantScopedModel):
         established discipline for anything about to be read and
         depended on within a single atomic block (WorkOrderSequence.
         next_number(), etc.).
+
+        29 Aug 2026 — real bug found live, via direct manual testing
+        outside AccountingPeriod.close(): select_for_update() above
+        requires an active transaction to attach its row lock to,
+        and this method's own body was never wrapped in one itself
+        — it only ever worked because its one real call site
+        (close()) already runs inside transaction.atomic(). Called
+        directly (a real, legitimate need — reviewing/testing
+        depreciation for a specific period without a full close),
+        Django raised TransactionManagementError outright. Fixed by
+        wrapping this method's own body in transaction.atomic() —
+        fully safe to call from anywhere now, including from inside
+        close()'s own already-atomic block, since Django's atomic()
+        is reentrant and simply becomes a harmless nested savepoint
+        there, with zero change to that real, existing call path.
         """
-        assets = (
-            Asset.objects
-            .filter(organization=organization, is_active=True)
-            .select_for_update()
-        )
-
-        entries_to_create = []
-        total = Decimal("0")
-
-        for asset in assets:
-            # No proration — skip entirely if this period's own
-            # start_date is still the SAME calendar month as
-            # acquisition, or falls before it entirely.
-            same_month_as_acquisition = (
-                accounting_period.start_date.year == asset.acquisition_date.year
-                and accounting_period.start_date.month == asset.acquisition_date.month
+        with transaction.atomic():
+            assets = (
+                Asset.objects
+                .filter(organization=organization, is_active=True)
+                .select_for_update()
             )
-            if same_month_as_acquisition or accounting_period.start_date < asset.acquisition_date:
-                continue
 
-            entries_so_far = asset.depreciation_entries.count()
-            if entries_so_far >= asset.useful_life_months:
-                # Already fully depreciated — is_active should
-                # already be False by the time this could happen
-                # (set the moment the FINAL entry was created, below),
-                # but this guard stands regardless of that flag's
-                # own correctness.
-                continue
+            entries_to_create = []
+            total = Decimal("0")
 
-            remaining = asset.cost - asset.accumulated_depreciation
-            is_final_month = (entries_so_far + 1) >= asset.useful_life_months
-            amount = remaining if is_final_month else asset.monthly_depreciation
+            for asset in assets:
+                # No proration — skip entirely if this period's own
+                # start_date is still the SAME calendar month as
+                # acquisition, or falls before it entirely.
+                same_month_as_acquisition = (
+                    accounting_period.start_date.year == asset.acquisition_date.year
+                    and accounting_period.start_date.month == asset.acquisition_date.month
+                )
+                if same_month_as_acquisition or accounting_period.start_date < asset.acquisition_date:
+                    continue
 
-            if amount <= Decimal("0"):
-                continue
+                entries_so_far = asset.depreciation_entries.count()
+                if entries_so_far >= asset.useful_life_months:
+                    # Already fully depreciated — is_active should
+                    # already be False by the time this could happen
+                    # (set the moment the FINAL entry was created, below),
+                    # but this guard stands regardless of that flag's
+                    # own correctness.
+                    continue
 
-            entries_to_create.append((asset, amount, is_final_month))
-            total += amount
+                remaining = asset.cost - asset.accumulated_depreciation
+                is_final_month = (entries_so_far + 1) >= asset.useful_life_months
+                amount = remaining if is_final_month else asset.monthly_depreciation
 
-        if not entries_to_create:
-            # Real, honest "nothing to depreciate this month" state
-            # — no assets yet, every asset still in its acquisition
-            # month, or every asset already fully depreciated. Still
-            # creates the real DepreciationRun row (so a genuine
-            # re-run attempt for this period is still correctly
-            # blocked), just with no journal entry — same "$0 -> post
-            # nothing" precedent as close()'s own P&L closing entry.
-            return cls.objects.create(
+                if amount <= Decimal("0"):
+                    continue
+
+                entries_to_create.append((asset, amount, is_final_month))
+                total += amount
+
+            if not entries_to_create:
+                # Real, honest "nothing to depreciate this month" state
+                # — no assets yet, every asset still in its acquisition
+                # month, or every asset already fully depreciated. Still
+                # creates the real DepreciationRun row (so a genuine
+                # re-run attempt for this period is still correctly
+                # blocked), just with no journal entry — same "$0 -> post
+                # nothing" precedent as close()'s own P&L closing entry.
+                return cls.objects.create(
+                    organization=organization, accounting_period=accounting_period,
+                    journal_entry=None, total_amount=Decimal("0"),
+                )
+
+            journal_entry = JournalEntry.post(
+                organization=organization,
+                posting_date=accounting_period.end_date,
+                source=JournalEntry.Source.DEPRECIATION,
+                memo=f"Penyusutan aset — {accounting_period.start_date}–{accounting_period.end_date}",
+                created_by=run_by,
+                lines=[
+                    {"account": Account.resolve(organization, "6004"), "debit": total},
+                    {"account": Account.resolve(organization, "1402"), "credit": total},
+                ],
+            )
+
+            run = cls.objects.create(
                 organization=organization, accounting_period=accounting_period,
-                journal_entry=None, total_amount=Decimal("0"),
+                journal_entry=journal_entry, total_amount=total,
             )
 
-        journal_entry = JournalEntry.post(
-            organization=organization,
-            posting_date=accounting_period.end_date,
-            source=JournalEntry.Source.DEPRECIATION,
-            memo=f"Penyusutan aset — {accounting_period.start_date}–{accounting_period.end_date}",
-            created_by=run_by,
-            lines=[
-                {"account": Account.resolve(organization, "6004"), "debit": total},
-                {"account": Account.resolve(organization, "1402"), "credit": total},
-            ],
-        )
+            AssetDepreciationEntry.objects.bulk_create([
+                AssetDepreciationEntry(
+                    organization=organization, asset=asset, depreciation_run=run, amount=amount,
+                )
+                for asset, amount, _ in entries_to_create
+            ])
 
-        run = cls.objects.create(
-            organization=organization, accounting_period=accounting_period,
-            journal_entry=journal_entry, total_amount=total,
-        )
+            # Deactivate any asset that just received its FINAL entry —
+            # matches Asset.is_active's own docstring: False once fully
+            # depreciated. bulk_update(), not individual .save() calls —
+            # same "no per-instance side effects to preserve" reasoning
+            # already established for WorkOrder.close()'s own
+            # bulk_update() of stages/job lines.
+            fully_depreciated_ids = [asset.id for asset, _, is_final in entries_to_create if is_final]
+            if fully_depreciated_ids:
+                Asset.objects.filter(pk__in=fully_depreciated_ids).update(is_active=False)
 
-        AssetDepreciationEntry.objects.bulk_create([
-            AssetDepreciationEntry(
-                organization=organization, asset=asset, depreciation_run=run, amount=amount,
-            )
-            for asset, amount, _ in entries_to_create
-        ])
-
-        # Deactivate any asset that just received its FINAL entry —
-        # matches Asset.is_active's own docstring: False once fully
-        # depreciated. bulk_update(), not individual .save() calls —
-        # same "no per-instance side effects to preserve" reasoning
-        # already established for WorkOrder.close()'s own
-        # bulk_update() of stages/job lines.
-        fully_depreciated_ids = [asset.id for asset, _, is_final in entries_to_create if is_final]
-        if fully_depreciated_ids:
-            Asset.objects.filter(pk__in=fully_depreciated_ids).update(is_active=False)
-
-        return run
+            return run
 
 
 class AssetDepreciationEntry(TenantScopedModel):
