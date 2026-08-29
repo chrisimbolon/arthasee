@@ -121,6 +121,10 @@ class Mechanic(TenantScopedModel):
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name       = models.CharField(max_length=200, verbose_name="Nama Mekanik")
     is_active  = models.BooleanField(default=True, verbose_name="Aktif")
+    monthly_target = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("15000000"),
+        verbose_name="Target Bulanan (Rp)",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
