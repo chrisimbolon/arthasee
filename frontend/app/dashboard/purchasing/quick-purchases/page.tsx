@@ -15,7 +15,7 @@ import {
   QuickPurchase, QuickPurchasePaymentMethod, quickPurchasesApi,
   Supplier, suppliersApi,
 } from "@/lib/api/purchasing";
-import { Part, partsApi } from "@/lib/api/service";
+import { ItemType, Part, partsApi, VehicleBrand } from "@/lib/api/service";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -91,11 +91,112 @@ function InlineAddSupplier({ onAdded }: { onAdded: (s: Supplier) => void }) {
   );
 }
 
+// Small, local label map — same VehicleBrand real values the
+// backend's own TextChoices define, matching the convention already
+// established on the Spare Parts & Fluids page. Duplicated locally
+// rather than imported from that page — pages shouldn't import from
+// other pages, only from shared modules.
+const VEHICLE_BRAND_LABELS: Record<Exclude<VehicleBrand, "">, string> = {
+  TOYOTA: "Toyota", HONDA: "Honda", DAIHATSU: "Daihatsu",
+  SUZUKI: "Suzuki", MITSUBISHI: "Mitsubishi",
+};
+
+// Inline "Part Baru" — Made's own confirmed request, 27 Aug meeting
+// notes: "disediakan tampilan untuk menginput parts baru (belum ada
+// nama parts tersebut di persediaan)" — staff needs a real way to
+// add a genuinely new, not-yet-in-inventory part right inside this
+// same quick-purchase flow, without leaving to a separate page
+// first. Deliberately minimal — name, unit, and a real starting
+// selling price (unit_price is a required backend field with no
+// default; silently defaulting it to 0 would land a wrong-looking
+// "Rp0" part in production data) — plus the one field Made's own
+// note explicitly asked for, vehicle_brand. Everything else (fluid
+// taxonomy, reorder cadence) stays editable later via the existing
+// Part edit modal, same "can finish categorizing later" philosophy
+// already established for every other part in this system.
+function InlineAddPart({ onAdded }: { onAdded: (p: Part) => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [unit, setUnit] = useState("pcs");
+  const [unitPrice, setUnitPrice] = useState("");
+  const [vehicleBrand, setVehicleBrand] = useState<VehicleBrand>("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canSave = name.trim() && toNumber(unitPrice) > 0 && !saving;
+
+  const handleAdd = async () => {
+    if (!canSave) return;
+    setSaving(true); setError(null);
+    try {
+      const part = await partsApi.create({
+        name: name.trim(), unit, unit_price: toNumber(unitPrice),
+        item_type: "SPARE_PART" as ItemType,
+        vehicle_brand: vehicleBrand || undefined,
+      });
+      onAdded(part);
+      setName(""); setUnitPrice(""); setVehicleBrand(""); setOpen(false);
+    } catch {
+      setError("Gagal menambah part baru.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button type="button" className="btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px", marginTop: 4 }} onClick={() => setOpen(true)}>
+        <Plus size={11} /> Part Baru
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 6, marginBottom: 6, padding: 10, border: "1px solid var(--line)", borderRadius: 6, background: "var(--paper-2)" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input
+          className="input" style={{ fontSize: 13 }} placeholder="Nama part baru"
+          value={name} onChange={(e) => setName(e.target.value)} autoFocus
+        />
+        <select className="input" style={{ fontSize: 13 }} value={unit} onChange={(e) => setUnit(e.target.value)}>
+          <option value="pcs">pcs</option>
+          <option value="liter">liter</option>
+          <option value="set">set</option>
+          <option value="botol">botol</option>
+        </select>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input
+          className="input" style={{ fontSize: 13 }} type="number" min={0} placeholder="Harga Jual (Rp)"
+          value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)}
+        />
+        <select className="input" style={{ fontSize: 13 }} value={vehicleBrand} onChange={(e) => setVehicleBrand(e.target.value as VehicleBrand)}>
+          <option value="">Untuk kendaraan apa? (opsional)</option>
+          {(Object.keys(VEHICLE_BRAND_LABELS) as Exclude<VehicleBrand, "">[]).map((key) => (
+            <option key={key} value={key}>{VEHICLE_BRAND_LABELS[key]}</option>
+          ))}
+        </select>
+      </div>
+      {error && <div style={{ fontSize: 11.5, color: "var(--danger)", marginBottom: 8 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" className="btn-rust" style={{ fontSize: 12, padding: "7px 12px" }} disabled={!canSave} onClick={handleAdd}>
+          {saving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Tambah Part"}
+        </button>
+        <button type="button" className="btn-ghost" style={{ fontSize: 12, padding: "7px 10px" }} onClick={() => setOpen(false)}>
+          Batal
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 function CreateQuickPurchaseModal({
-  suppliers, parts, onClose, onCreated, onSupplierAdded,
+  suppliers, parts, onClose, onCreated, onSupplierAdded, onPartAdded,
 }: {
   suppliers: Supplier[]; parts: Part[]; onClose: () => void;
   onCreated: (qp: QuickPurchase) => void; onSupplierAdded: (s: Supplier) => void;
+  onPartAdded: (p: Part) => void;
 }) {
   const [supplierId, setSupplierId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<QuickPurchasePaymentMethod>("cash");
@@ -193,6 +294,7 @@ function CreateQuickPurchaseModal({
                   <option value="">Pilih part…</option>
                   {parts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
+                <InlineAddPart onAdded={(p) => { onPartAdded(p); updateLine(i, { part_id: p.id }); }} />
               </div>
               <div style={{ width: 90 }}>
                 {i === 0 && <div style={{ fontSize: 11.5, color: "var(--steel)", marginBottom: 4 }}>Jumlah</div>}
@@ -291,6 +393,7 @@ export default function QuickPurchasesPage() {
           onClose={() => setShowCreate(false)}
           onCreated={(qp) => setPurchases((prev) => [qp, ...prev])}
           onSupplierAdded={(s) => setSuppliers((prev) => [...prev, s])}
+          onPartAdded={(p) => setParts((prev) => [...prev, p])}
         />
       )}
     </div>
