@@ -29,12 +29,15 @@ behavior. Without it, a test could pass for the wrong reason (the
 handler silently never running at all, rather than genuinely running
 after commit).
 """
+import dataclasses
+import inspect
 import uuid
 from dataclasses import dataclass, field
 
 from apps.core.events.bus import default_bus
 from apps.core.events.handlers import EventHandler
 from apps.core.events.interfaces import DomainEvent
+from apps.core.events.registry import event_class_for
 from apps.core.models import Outbox
 from apps.organizations.models import Organization
 from django.db import IntegrityError, transaction
@@ -314,3 +317,79 @@ class OutboxModelTests(TestCase):
                     organization=self.org, event_id=event.event_id, event_type=event.event_type,
                     payload=event.payload(), occurred_at=event.occurred_at,
                 )
+
+
+class EventRegistryCompletenessTests(TestCase):
+    """
+    28 Aug 2026 — real, structural guard against the exact gap that's
+    now bitten this codebase THREE times (Aug 9, Aug 22, 28 Aug): a
+    new event type ships correctly for LIVE dispatch, but nobody
+    remembers apps.core.events.registry.py is a SEPARATE, second
+    place that also needs it — invisible until a real Outbox row
+    actually needs replaying and fails with a raw KeyError.
+
+    Deliberately does NOT rely on a hand-maintained list of "every
+    event type" that could itself silently drift out of date — walks
+    apps.accounting.posting_engine's own real, live module namespace
+    for every DomainEvent subclass it actually imports (the EXACT
+    same sourcing method registry.event_class_for()'s own docstring
+    already documents using, confirmed directly against that file),
+    and confirms each one is retrievable from the registry AND maps
+    back to the correct class. A future event added to
+    posting_engine.py but forgotten in registry.py fails THIS test
+    immediately, the very next time the suite runs — not silently,
+    only during a real production incident's own replay attempt, a
+    fourth time.
+
+    Reads each event class's own real event_type default via
+    dataclasses.fields() rather than instantiating one — every event
+    class declares event_type as field(init=False, default="...",
+    kw_only=True); the literal default is directly inspectable
+    without needing a real organization_id or any other required
+    argument.
+    """
+
+    def test_every_event_type_posting_engine_handles_is_registered_for_replay(self):
+        from apps.accounting import posting_engine
+
+        event_classes = [
+            obj for _, obj in vars(posting_engine).items()
+            if inspect.isclass(obj) and issubclass(obj, DomainEvent) and obj is not DomainEvent
+        ]
+        # Sanity check on the discovery mechanism itself — if this
+        # ever comes back empty, posting_engine.py's own import shape
+        # changed in a way that broke discovery, and a passing result
+        # below would be trusting a test that silently checked
+        # nothing at all.
+        self.assertGreater(
+            len(event_classes), 0,
+            "Found zero DomainEvent subclasses imported into posting_engine.py — "
+            "either that module's own imports changed shape, or this test's own "
+            "discovery logic is broken. Investigate before trusting this test's "
+            "own 'passed' result.",
+        )
+
+        missing = []
+        for event_cls in event_classes:
+            event_type_field = next(f for f in dataclasses.fields(event_cls) if f.name == "event_type")
+            event_type_value = event_type_field.default
+            try:
+                registered_cls = event_class_for(event_type_value)
+            except ValueError:
+                missing.append(event_cls.__name__)
+                continue
+            if registered_cls is not event_cls:
+                missing.append(
+                    f"{event_cls.__name__} (registry maps {event_type_value!r} to a "
+                    f"DIFFERENT class: {registered_cls.__name__})"
+                )
+
+        self.assertEqual(
+            missing, [],
+            f"The following event type(s) are imported by posting_engine.py — meaning "
+            f"they can be posted via a real, LIVE first-time dispatch right now — but "
+            f"are missing from, or incorrectly mapped in, "
+            f"apps.core.events.registry.event_class_for(). A real, already-FAILED "
+            f"Outbox row for any of these could never be replayed. Add each one to "
+            f"that registry's own dict: {missing}",
+        )
