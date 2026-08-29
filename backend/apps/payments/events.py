@@ -6,6 +6,7 @@ Arthasee — Payments Domain Events
 """
 import uuid
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 from apps.core.events.interfaces import DomainEvent
@@ -83,6 +84,16 @@ class OperatingExpenseRecorded(DomainEvent):
     discipline PurchaseReturned's own debit_account_code and
     QuickPurchaseRecorded's own payment_method already established.
 
+    transaction_date, added 28 Aug 2026 — real bug found live:
+    without this, journal_generator.post_for_event() fell back to
+    occurred_at (when the event was PUBLISHED, i.e. "now"), silently
+    ignoring the real, user-chosen paid_at date whenever it genuinely
+    differed from today — a real expense entered for a real past or
+    future date would post into the WRONG accounting period, exactly
+    as if the real date had never been entered. Frozen here, same
+    discipline as account_code above — the real business date, not
+    re-derived from anything that could shift.
+
     Posting rule: Dr {account_code} / Cr Cash (1001) or Bank (1101)
     depending on `method` — reuses the same shared
     cash_or_bank_account_code() mapping PaymentReceived/
@@ -92,4 +103,5 @@ class OperatingExpenseRecorded(DomainEvent):
     account_code: str
     method: str
     amount: Decimal
+    transaction_date: date
     event_type: str = field(init=False, default="OperatingExpenseRecorded", kw_only=True)
