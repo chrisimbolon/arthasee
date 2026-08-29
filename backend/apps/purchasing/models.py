@@ -1135,6 +1135,14 @@ class QuickPurchase(TenantScopedModel):
                 payment_method=payment_method,
                 amount=total_cost,
                 line_item_count=len(line_items),
+                # 29 Aug 2026 — real bug fix: qp.purchased_at already
+                # holds the fully-resolved real value (either the
+                # caller's own purchased_at, or the timezone.now()
+                # fallback applied above) — the real business date,
+                # not "whenever this event happens to get published."
+                # See QuickPurchaseRecorded's own docstring for the
+                # full story.
+                transaction_date=qp.purchased_at.date(),
             ))
 
         return qp
