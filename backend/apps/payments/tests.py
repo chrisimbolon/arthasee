@@ -12,6 +12,8 @@ into existence in production, so it's the only honest way to test
 against them.
 """
 import uuid
+from datetime import datetime as dt
+from datetime import timedelta
 from decimal import Decimal
 
 from apps.accounting import cancellations
@@ -21,7 +23,7 @@ from apps.core.models import Outbox
 from apps.invoicing.events import InvoiceRefunded
 from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
-from apps.payments.models import SupplierPayment
+from apps.payments.models import OperatingExpense, SupplierPayment
 from apps.purchasing.models import Supplier, SupplierInvoice
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
@@ -497,3 +499,184 @@ class SupplierPaymentMadeEventTests(TestCase):
         bank = Account.objects.get(organization=self.org, code="1101")
         self.assertEqual(cash.balance(), Decimal("-450000.00"))
         self.assertEqual(bank.balance(), Decimal("0.00"))
+
+
+class OperatingExpenseTests(TestCase):
+    """
+    27-28 Aug 2026 — Made's own confirmed real request: a guided
+    "Catat Beban Operasional" form. Own fixture, not
+    PaymentsAPITestBase — OperatingExpense needs no Invoice/WorkOrder
+    chain at all, just a seeded org and, for the mechanic-attribution
+    tests, a real Mechanic.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Yoga")
+
+    def test_record_creates_sequential_number(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.captureOnCommitCallbacks(execute=True):
+            expense = OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("300000.00"),
+            )
+        self.assertEqual(expense.number, "EXP/00001")
+        self.assertEqual(expense.sequence_number, 1)
+
+    def test_cash_expense_posts_dr_account_cr_cash(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.captureOnCommitCallbacks(execute=True):
+            OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("300000.00"), method="cash",
+            )
+        utilities = Account.objects.get(organization=self.org, code="6003")
+        cash      = Account.objects.get(organization=self.org, code="1001")
+        self.assertEqual(utilities.balance(), Decimal("300000.00"))
+        self.assertEqual(cash.balance(), Decimal("-300000.00"))
+
+    def test_bank_expense_posts_dr_account_cr_bank(self):
+        account = Account.objects.get(organization=self.org, code="6001")
+        with self.captureOnCommitCallbacks(execute=True):
+            OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("6000000.00"), method="bank",
+            )
+        salary = Account.objects.get(organization=self.org, code="6001")
+        bank   = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(salary.balance(), Decimal("6000000.00"))
+        self.assertEqual(bank.balance(), Decimal("-6000000.00"))
+
+    def test_posting_date_matches_paid_at_not_occurred_at(self):
+        """
+        Real regression test, 28 Aug 2026 — found live, via Chris's
+        own manual testing, not caught by any test before this one:
+        journal_generator.post_for_event() originally hardcoded
+        event.occurred_at.date() (WHEN the event was published,
+        practically always "now") instead of the real business date
+        the user actually chose. paid_at set to yesterday specifically
+        — clearly, unambiguously DIFFERENT from occurred_at (today,
+        since this event is published live during this exact test) —
+        so a real regression back to the old bug would make this
+        assertion fail with today's date instead of yesterday's, not
+        silently pass either way.
+        """
+        account = Account.objects.get(organization=self.org, code="6003")
+        yesterday = timezone.now() - timedelta(days=1)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            expense = OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("100000.00"),
+                paid_at=yesterday,
+            )
+
+        entry = JournalEntry.objects.get(reference_event_id__isnull=False, memo__icontains=str(expense.id))
+        self.assertEqual(entry.posting_date, yesterday.date())
+
+    def test_account_must_be_expense_type(self):
+        cash_account = Account.objects.get(organization=self.org, code="1001")  # ASSET, not EXPENSE
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(organization=self.org, account=cash_account, amount=Decimal("100000.00"))
+
+    def test_6004_depreciation_account_rejected(self):
+        """
+        Real, deliberate exclusion — 6004 is reserved for the
+        separate depreciation engine (non-cash, credits a contra-
+        asset account, not Cash/Bank). Posting through this form
+        would produce a real, wrong journal entry.
+        """
+        depreciation_account = Account.objects.get(organization=self.org, code="6004")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(
+                organization=self.org, account=depreciation_account, amount=Decimal("50000.00"),
+            )
+
+    def test_mechanic_allowed_for_gaji_karyawan(self):
+        salary_account = Account.objects.get(organization=self.org, code="6001")
+        with self.captureOnCommitCallbacks(execute=True):
+            expense = OperatingExpense.record(
+                organization=self.org, account=salary_account, amount=Decimal("6000000.00"),
+                mechanic=self.mechanic,
+            )
+        self.assertEqual(expense.mechanic_id, self.mechanic.id)
+
+    def test_mechanic_rejected_for_non_salary_account(self):
+        utilities_account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(
+                organization=self.org, account=utilities_account, amount=Decimal("300000.00"),
+                mechanic=self.mechanic,
+            )
+
+    def test_zero_amount_rejected(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(organization=self.org, account=account, amount=Decimal("0"))
+
+    def test_negative_amount_rejected(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(organization=self.org, account=account, amount=Decimal("-50000.00"))
+
+    def test_blocked_when_target_period_is_closed(self):
+        """
+        Real, direct proof of the synchronous period-lock guard for
+        THIS specific write path — never explicitly tested before,
+        even though it's the exact mechanism that caught the real
+        August-closed-period block live during manual testing.
+        """
+        from apps.accounting.models import AccountingPeriod
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=1)
+        period.close(closed_by=None)
+
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("100000.00"),
+                paid_at=timezone.make_aware(dt(2026, 1, 15)),
+            )
+
+
+class OperatingExpenseAPITests(APITestCase):
+    """Thin-view smoke test — the real logic is already fully proven
+    at the model layer above; this confirms the endpoint itself wires
+    everything together correctly end to end."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.opex@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def test_create_operating_expense_via_api(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post("/api/operating-expenses/", {
+                "account_code": "6003", "amount": "300000.00", "method": "cash",
+            }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        utilities = Account.objects.get(organization=self.org, code="6003")
+        self.assertEqual(utilities.balance(), Decimal("300000.00"))
+
+    def test_6004_rejected_via_api(self):
+        resp = self.client.post("/api/operating-expenses/", {
+            "account_code": "6004", "amount": "50000.00", "method": "cash",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(OperatingExpense.objects.exists())
+
+    def test_rejects_cross_tenant_mechanic(self):
+        other_org = Organization.objects.create(name="Bengkel Lain OpEx")
+        other_mechanic = Mechanic.objects.create(organization=other_org, name="Mekanik Lain")
+
+        resp = self.client.post("/api/operating-expenses/", {
+            "account_code": "6001", "amount": "6000000.00", "method": "cash",
+            "mechanic": str(other_mechanic.id),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(OperatingExpense.objects.exists())
