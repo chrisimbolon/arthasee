@@ -5,8 +5,9 @@ from django.urls import path
 
 from .views import (AccountingPeriodCloseView, AccountingPeriodListView,
                     AccountingPeriodReopenView, AgingAPView, AgingARView,
-                    BalanceSheetView, CashConversionCycleView,
-                    DashboardFinancialSummaryView, FailedPostingsView,
+                    AssetListCreateView, BalanceSheetView,
+                    CashConversionCycleView, DashboardFinancialSummaryView,
+                    DepreciationRunDetailView, FailedPostingsView,
                     JournalEntryListView, ManualJournalListCreateView,
                     ProfitLossView, TrialBalanceView)
 
@@ -26,4 +27,8 @@ urlpatterns = [
     path("periods/",                    AccountingPeriodListView.as_view(),   name="accounting-period-list"),
     path("periods/<uuid:pk>/close/",    AccountingPeriodCloseView.as_view(),  name="accounting-period-close"),
     path("periods/<uuid:pk>/reopen/",   AccountingPeriodReopenView.as_view(), name="accounting-period-reopen"),
+    # 29 Aug 2026 — real fixed asset register & automated
+    # depreciation, Made's own confirmed request.
+    path("assets/", AssetListCreateView.as_view(), name="asset-list-create"),
+    path("periods/<uuid:period_id>/depreciation-run/", DepreciationRunDetailView.as_view(), name="depreciation-run-detail"),
 ]

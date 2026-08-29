@@ -6,7 +6,8 @@ from decimal import Decimal
 from apps.core.models import Outbox
 from rest_framework import serializers
 
-from .models import AccountingPeriod, JournalEntry, JournalLine
+from .models import (AccountingPeriod, Asset, AssetDepreciationEntry,
+                     DepreciationRun, JournalEntry, JournalLine)
 
 
 class ManualJournalLineInputSerializer(serializers.Serializer):
@@ -123,4 +124,80 @@ class AccountingPeriodSerializer(serializers.ModelSerializer):
             "reopened_at", "reopened_by", "reopened_by_name",
             "created_at",
         ]
+        read_only_fields = fields
+
+
+class AssetSerializer(serializers.ModelSerializer):
+    """
+    29 Aug 2026 — real fixed asset register, Made's own confirmed
+    request. monthly_depreciation/accumulated_depreciation/book_value
+    are real Python properties on the model, computed on read from
+    AssetDepreciationEntry rows — same "never trust a second source
+    of truth" discipline as every other computed property in this
+    codebase (Invoice.subtotal, Account.balance(), etc.), never
+    cached fields that could drift.
+
+    Entirely read-only — an Asset is only ever created via the real
+    Asset.record() (which also posts its own acquisition journal
+    entry in the same transaction), never through a generic
+    serializer.save().
+    """
+    monthly_depreciation     = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    accumulated_depreciation = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    book_value               = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    created_by_name          = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = Asset
+        fields = [
+            "id", "number", "sequence_number", "name", "acquisition_date",
+            "cost", "useful_life_months", "method", "is_active",
+            "monthly_depreciation", "accumulated_depreciation", "book_value",
+            "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class AssetRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/accounting/assets/. No salvage
+    value field — Chris's own confirmed call, v1 always assumes 0
+    (see Asset's own docstring in models.py) — asking for one on
+    every asset would slow down exactly the kind of fast,
+    low-ceremony entry this system optimizes for elsewhere
+    (QuickPurchase, OperatingExpense).
+    """
+    name               = serializers.CharField(max_length=200)
+    acquisition_date   = serializers.DateField()
+    cost               = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    useful_life_months = serializers.IntegerField(min_value=1)
+    method             = serializers.ChoiceField(choices=[("cash", "Tunai"), ("bank", "Transfer Bank")], default="cash")
+
+
+class AssetDepreciationEntrySerializer(serializers.ModelSerializer):
+    """One real, granular line in a DepreciationRun's own itemized
+    breakdown — see that serializer's own docstring below."""
+    asset_id     = serializers.UUIDField(source="asset.id", read_only=True)
+    asset_number = serializers.CharField(source="asset.number", read_only=True)
+    asset_name   = serializers.CharField(source="asset.name", read_only=True)
+
+    class Meta:
+        model  = AssetDepreciationEntry
+        fields = ["id", "asset_id", "asset_number", "asset_name", "amount", "created_at"]
+        read_only_fields = fields
+
+
+class DepreciationRunSerializer(serializers.ModelSerializer):
+    """
+    29 Aug 2026 — Chris's own confirmed granularity call: one
+    consolidated Dr 6004 / Cr 1402 journal entry per period on the
+    Jurnal page, with the real, itemized per-asset breakdown
+    retrievable underneath via `entries` here.
+    """
+    entries          = AssetDepreciationEntrySerializer(many=True, read_only=True)
+    journal_entry_id = serializers.UUIDField(source="journal_entry.id", read_only=True, default=None)
+
+    class Meta:
+        model  = DepreciationRun
+        fields = ["id", "accounting_period", "journal_entry_id", "total_amount", "run_at", "entries"]
         read_only_fields = fields

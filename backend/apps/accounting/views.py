@@ -21,9 +21,11 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from . import reports
-from .models import Account, AccountingPeriod, JournalEntry
-from .serializers import (AccountingPeriodSerializer, FailedPostingSerializer,
-                          JournalEntrySerializer,
+from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
+                     JournalEntry)
+from .serializers import (AccountingPeriodSerializer, AssetRecordSerializer,
+                          AssetSerializer, DepreciationRunSerializer,
+                          FailedPostingSerializer, JournalEntrySerializer,
                           ManualJournalRecordSerializer)
 
 
@@ -402,3 +404,74 @@ class AccountingPeriodReopenView(TenantScopedAPIView):
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"success": True, "period": AccountingPeriodSerializer(period).data})
+
+
+class AssetListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/accounting/assets/  — every real fixed asset for this org
+    POST /api/accounting/assets/  — record a new one
+
+    29 Aug 2026 — real fixed asset register, Made's own confirmed
+    request. All real logic — including the real acquisition
+    journal entry, posted in the same transaction — lives in
+    Asset.record(); this view is thin, same discipline as every
+    other real write path in this codebase.
+    """
+    model = Asset
+
+    def get(self, request):
+        assets = self.get_queryset().order_by("-acquisition_date")
+        return Response({"success": True, "assets": AssetSerializer(assets, many=True).data})
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = AssetRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        try:
+            asset = Asset.record(
+                organization=organization, name=data["name"],
+                acquisition_date=data["acquisition_date"], cost=data["cost"],
+                useful_life_months=data["useful_life_months"], method=data.get("method", "cash"),
+                created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "asset": AssetSerializer(asset).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class DepreciationRunDetailView(TenantScopedAPIView):
+    """
+    GET /api/accounting/periods/<period_id>/depreciation-run/
+
+    29 Aug 2026 — surfaces the itemized per-asset breakdown for one
+    period's own DepreciationRun (Chris's own confirmed granularity
+    call: one consolidated Dr 6004 / Cr 1402 entry on the Jurnal
+    page, but a real, retrievable breakdown underneath — this is
+    that underneath). Returns depreciation_run: null (not a 404)
+    when no run exists yet for this period — a real, honest "hasn't
+    been closed yet" state, not an error.
+    """
+    model = DepreciationRun
+
+    def get(self, request, period_id):
+        run = (
+            self.get_queryset()
+            .filter(accounting_period_id=period_id)
+            .prefetch_related("entries__asset")
+            .first()
+        )
+        if run is None:
+            return Response({"success": True, "depreciation_run": None})
+        return Response({"success": True, "depreciation_run": DepreciationRunSerializer(run).data})
