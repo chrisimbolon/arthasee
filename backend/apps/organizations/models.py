@@ -38,6 +38,25 @@ class Organization(models.Model):
             "di Pengaturan Bengkel."
         ),
     )
+    # 29 Aug 2026 — real onboarding gate, Chris's own confirmed
+    # design. blank=True, default="" — matches invoice_code's own
+    # established convention exactly (an empty string, not NULL, as
+    # the "no value" sentinel), not a new pattern for this model.
+    # Both remain genuinely optional at the DB level — the ownership
+    # gate that makes them de facto REQUIRED lives entirely in
+    # OnboardingCompleteSerializer, not here (same "the model stays
+    # defensive, the write path enforces the real business rule"
+    # split already used throughout this codebase).
+    phone   = models.CharField(max_length=30, blank=True, default="", verbose_name="Telepon Bengkel")
+    address = models.TextField(blank=True, default="", verbose_name="Alamat Bengkel")
+    # The real, explicit signal the mandatory first-login gate checks
+    # directly — Chris's own confirmed call: far more reliable than
+    # inferring "needs setup" from phone/address happening to be
+    # empty, which would silently break the moment the real required-
+    # fields list ever changes. Set exactly once, by
+    # OnboardingCompleteSerializer, the one real place this ever
+    # flips to True.
+    onboarding_completed = models.BooleanField(default=False, verbose_name="Pengaturan Awal Selesai")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
