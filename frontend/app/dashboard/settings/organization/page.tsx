@@ -1,6 +1,6 @@
 "use client";
 // =============================================================================
-// === frontend/app/settings/organization/page.tsx ===
+// === frontend/app/dashboard/settings/organization/page.tsx ===
 // =============================================================================
 // Chris's own explicit call, 5 Aug: registration stays completely
 // frictionless (name, email, password, shop name only) — invoice_code
@@ -9,13 +9,16 @@
 // (see Organization._generate_invoice_code() on the backend) — this
 // page is where an owner customizes it whenever they actually want
 // to, not a required setup step blocking anything.
-import { organizationsApi, Organization } from "@/lib/api/organizations";
+import { Organization, organizationsApi } from "@/lib/api/organizations";
 import { AlertTriangle, Check, Loader2, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 
 export default function OrganizationSettingsPage() {
   const [org, setOrg] = useState<Organization | null>(null);
-  const [form, setForm] = useState({ name: "", invoice_code: "" });
+  // 29 Aug 2026 — phone/address added, same "everything gathered at
+  // onboarding stays editable in Settings afterward" philosophy
+  // already established for invoice_code above.
+  const [form, setForm] = useState({ name: "", invoice_code: "", phone: "", address: "" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -30,7 +33,10 @@ export default function OrganizationSettingsPage() {
     organizationsApi.mine().then((res) => {
       if (res) {
         setOrg(res.organization);
-        setForm({ name: res.organization.name, invoice_code: res.organization.invoice_code });
+        setForm({
+          name: res.organization.name, invoice_code: res.organization.invoice_code,
+          phone: res.organization.phone, address: res.organization.address,
+        });
         setIsOwner(res.role === "owner");
       }
     }).finally(() => setLoading(false));
@@ -43,9 +49,14 @@ export default function OrganizationSettingsPage() {
       const updated = await organizationsApi.update({
         name: form.name,
         invoice_code: form.invoice_code,
+        phone: form.phone,
+        address: form.address,
       });
       setOrg(updated);
-      setForm({ name: updated.name, invoice_code: updated.invoice_code });
+      setForm({
+        name: updated.name, invoice_code: updated.invoice_code,
+        phone: updated.phone, address: updated.address,
+      });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (err) {
@@ -68,7 +79,7 @@ export default function OrganizationSettingsPage() {
     <div style={{ maxWidth: 520 }}>
       <h1 className="display" style={{ fontSize: 26, marginBottom: 4, textTransform: "none" }}>Pengaturan Bengkel</h1>
       <p style={{ color: "var(--steel)", fontSize: 14, marginBottom: 24 }}>
-        Nama tampilan dan kode invoice bengkel Anda.
+        Profil bengkel Anda — nama, kontak, dan kode invoice.
       </p>
 
       {!isOwner && (
@@ -89,6 +100,25 @@ export default function OrganizationSettingsPage() {
           <input
             className="input" required value={form.name} disabled={!isOwner}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
+          />
+        </div>
+
+        <div style={{ marginBottom: 18 }}>
+          <label className="label">Nomor Telepon Bengkel</label>
+          <input
+            className="input" value={form.phone} disabled={!isOwner}
+            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            placeholder="cth. 0812-3456-7890"
+          />
+        </div>
+
+        <div style={{ marginBottom: 18 }}>
+          <label className="label">Alamat Bengkel</label>
+          <textarea
+            className="input" rows={3} value={form.address} disabled={!isOwner}
+            onChange={(e) => setForm({ ...form, address: e.target.value })}
+            placeholder="Alamat lengkap untuk ditampilkan di invoice"
+            style={{ resize: "vertical", fontFamily: "inherit" }}
           />
         </div>
 
