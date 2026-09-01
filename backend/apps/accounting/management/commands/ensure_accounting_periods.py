@@ -2,7 +2,7 @@
 # === backend/apps/accounting/management/commands/ensure_accounting_periods.py ===
 # =============================================================================
 """
-Arthasee — Daily Accounting Period Rollover (60-Day Lead-Time)
+Arthasee — Daily Accounting Period Rollover (60-Day Lead-Time, Gap-Filling)
 
 Same real cron pattern already proven on the production droplet —
 send_service_reminders, snapshot_risk_daily, mark_overdue_payments —
@@ -10,35 +10,39 @@ a plain management command, no Celery, no new infrastructure.
 
 Why this exists: ensure_current_month_period() only ever runs once,
 at signup. Nothing else creates a period after that. Left alone,
-every posting for every organization would hit the exact same
-strict-block failure Chris hit in August — on the 1st of every future
-MONTH, guaranteed, not hypothetical. This risk is now real every 30
-days instead of once a year, which is exactly why this command
-matters more, not less, under monthly closing.
+every posting for every organization would hit a strict-block
+failure the moment "today" moves past the last period any org has —
+now a real risk every 30 days under monthly closing, not once a
+year.
 
-Design: runs daily, checks 60 days ahead of today rather than
-reacting only once the current period actually runs out. That turns
-"must not fail on exactly one specific day of the month" into "has
-weeks of slack" — a holiday-season cron outage of a few days can
-never cause a real gap, even now that rollover happens monthly.
-Costs nothing: an unused future period sitting idle is harmless, same
-"safe to call more than once" spirit as seed_chart_of_accounts() and
-ensure_period_for_org() already have.
+--- 1 Sep 2026: real production gap found and fixed ---
+The original version of this command (written 26 Aug 2026, when
+ensure_period_for_org() first became month-granular) only ever
+computed ONE target month — today + LEAD_TIME_DAYS — and called
+ensure_period_for_org() once for it. That was correct back when
+periods were yearly (one call always covered the whole year, so
+there was never a gap to fill), but was never revisited when periods
+became monthly. Running daily, it correctly created "today's month"
+whenever today+60 happened to land there, and correctly skipped
+duplicates — but never touched any month strictly BETWEEN the day it
+happened to run and its own 60-day-out target. Confirmed live on CV
+Arya Motor: August and October existed, September (the current
+month) did not, blocking every real posting on Sep 1 2026.
+
+Fix: this command now ensures EVERY month from today's month through
+the 60-day lookahead month, inclusive, not just the single lookahead
+point. Same idempotent, "safe to call more than once, unused future
+period is harmless" primitive (ensure_period_for_org's own
+get_or_create) — just applied as a range instead of two endpoints.
 
 Covers every organization in one run, same as send_service_reminders
 — no request/session to scope from when cron-driven.
 
---- 26 Aug 2026: yearly -> monthly ---
-Made's own confirmed requirement (monthly closing, via his tax &
-accounting consultant) moved period seeding from one period per year
-to one real period per month. ensure_period_for_org() itself now
-requires an explicit (year, month), not just a year — this command's
-own target date resolves BOTH from the same 60-day lookahead.
-
-Note: this creates one period LEAD_TIME_DAYS ahead, nothing more —
-it doesn't backfill multiple months if the command hasn't run in a
-long time. Real monitoring on the cron job itself is still the actual
-safety net here, same as it is for send_service_reminders.
+Note: this still only ever looks forward from "today" — it won't
+retroactively backfill a month that's already in the past by the
+time the command finally runs after an extended outage. Real
+monitoring on the cron job itself remains the actual safety net,
+same as it is for send_service_reminders.
 """
 from datetime import date, timedelta
 
@@ -51,30 +55,46 @@ LEAD_TIME_DAYS = 60
 
 
 class Command(BaseCommand):
-    help = "Ensure every organization has an AccountingPeriod covering 60 days from today."
+    help = "Ensure every organization has AccountingPeriods covering today through 60 days ahead — no gaps."
 
     def handle(self, *args, **options):
-        target_date = date.today() + timedelta(days=LEAD_TIME_DAYS)
-        target_year = target_date.year
-        target_month = target_date.month
+        today = date.today()
+        target_date = today + timedelta(days=LEAD_TIME_DAYS)
+
+        months_to_ensure = self._month_range(today, target_date)
 
         created_count = 0
         already_existed_count = 0
 
         for org in Organization.objects.all():
-            period, created = self._ensure_and_report(org, target_year, target_month)
-            if created:
-                created_count += 1
-                self.stdout.write(self.style.SUCCESS(
-                    f"Created — {org.name} → {period.start_date} to {period.end_date}"
-                ))
-            else:
-                already_existed_count += 1
+            for year, month in months_to_ensure:
+                period, created = self._ensure_and_report(org, year, month)
+                if created:
+                    created_count += 1
+                    self.stdout.write(self.style.SUCCESS(
+                        f"Created — {org.name} → {period.start_date} to {period.end_date}"
+                    ))
+                else:
+                    already_existed_count += 1
 
         self.stdout.write(self.style.SUCCESS(
             f"Done. Created: {created_count}, Already covered: {already_existed_count} "
-            f"(checked {LEAD_TIME_DAYS} days ahead, target {target_year}-{target_month:02d})"
+            f"(ensured every month from {today.year}-{today.month:02d} "
+            f"through {target_date.year}-{target_date.month:02d}, {LEAD_TIME_DAYS} days ahead)"
         ))
+
+    @staticmethod
+    def _month_range(start_date, end_date):
+        """Every distinct (year, month) from start_date through end_date, inclusive."""
+        months = []
+        year, month = start_date.year, start_date.month
+        while (year, month) <= (end_date.year, end_date.month):
+            months.append((year, month))
+            month += 1
+            if month == 13:
+                month = 1
+                year += 1
+        return months
 
     def _ensure_and_report(self, organization, year, month):
         """
