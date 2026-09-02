@@ -61,6 +61,15 @@ handles, verified rather than assumed. PurchaseReturned is included
 too, for the same reason, even though it hasn't failed yet — this
 registry's whole job is to never be caught short again the way it
 was on both 08-09 and 08-22.
+
+--- 1 Sep 2026: InternalCashMutationRecorded added ---
+Same sourcing discipline as every entry below: confirmed against
+apps.accounting.posting_engine.py's own real, applied import before
+being added here, not guessed at — same as QuickPurchaseRecorded/
+OperatingExpenseRecorded were on 28 Aug. Added proactively, before
+this event has ever failed once, precisely because this registry's
+whole job (per the 08-09/08-22 history above) is to never again be
+the reason a real event type can't be replayed.
 """
 from __future__ import annotations
 
@@ -94,7 +103,8 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
     """
     from apps.inventory.events import PartConsumed, StockOpnameCompleted
     from apps.invoicing.events import InvoiceIssued
-    from apps.payments.events import (OperatingExpenseRecorded,
+    from apps.payments.events import (InternalCashMutationRecorded,
+                                      OperatingExpenseRecorded,
                                       PaymentReceived, SupplierPaymentMade)
     from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
                                         QuickPurchaseRecorded,
@@ -122,6 +132,9 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
         # exactly what surfaced this.
         "QuickPurchaseRecorded": QuickPurchaseRecorded,
         "OperatingExpenseRecorded": OperatingExpenseRecorded,
+        # 1 Sep 2026 — added proactively this time, not in response
+        # to a real failure (see module docstring).
+        "InternalCashMutationRecorded": InternalCashMutationRecorded,
     }
     try:
         return registry[event_type]
