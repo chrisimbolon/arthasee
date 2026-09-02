@@ -430,6 +430,7 @@ class PostingEngineIntegrationTests(TestCase):
         event = PaymentReceived(
             organization_id=self.org.id, invoice_id=uuid.uuid4(),
             payment_id=uuid.uuid4(), amount=Decimal("250000.00"), method="cash",
+            customer_name="Test Customer",
         )
         with self.captureOnCommitCallbacks(execute=True):
             default_bus.publish(event)
@@ -443,6 +444,7 @@ class PostingEngineIntegrationTests(TestCase):
         event = PaymentReceived(
             organization_id=self.org.id, invoice_id=uuid.uuid4(),
             payment_id=uuid.uuid4(), amount=Decimal("100000.00"), method="bank_transfer",
+            customer_name="Test Customer",
         )
         with self.captureOnCommitCallbacks(execute=True):
             default_bus.publish(event)
