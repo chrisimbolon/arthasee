@@ -13,8 +13,11 @@ from apps.workorders.models import Mechanic
 from rest_framework import status
 from rest_framework.response import Response
 
-from .models import OperatingExpense, Payment, Refund, SupplierPayment
-from .serializers import (OperatingExpenseRecordSerializer,
+from .models import (InternalCashMutation, OperatingExpense, Payment, Refund,
+                     SupplierPayment)
+from .serializers import (InternalCashMutationRecordSerializer,
+                          InternalCashMutationSerializer,
+                          OperatingExpenseRecordSerializer,
                           OperatingExpenseSerializer, PaymentRecordSerializer,
                           PaymentSerializer, RefundRecordSerializer,
                           RefundSerializer, SupplierPaymentRecordSerializer,
@@ -243,5 +246,58 @@ class OperatingExpenseListCreateView(TenantScopedAPIView):
 
         return Response(
             {"success": True, "operating_expense": OperatingExpenseSerializer(expense).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class InternalCashMutationListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/internal-cash-mutations/  — every real internal cash
+         mutation for this org
+    POST /api/internal-cash-mutations/  — record a new one
+
+    1 Sep 2026 — Made's own confirmed real request, arrived at while
+    designing the Kas Harian dashboard. All real logic lives in
+    InternalCashMutation.record() — this view is thin, same
+    discipline as OperatingExpenseListCreateView above, which this
+    view mirrors exactly (TenantScopedAPIView's own
+    get_organization()/get_queryset(), not the older per-view
+    helper pattern).
+    """
+    model = InternalCashMutation
+
+    def get(self, request):
+        mutations = self.get_queryset().select_related("created_by")
+        return Response(
+            {"success": True, "internal_cash_mutations": InternalCashMutationSerializer(mutations, many=True).data}
+        )
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = InternalCashMutationRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        try:
+            mutation = InternalCashMutation.record(
+                organization=organization,
+                from_account_code=data["from_account_code"],
+                to_account_code=data["to_account_code"],
+                amount=data["amount"],
+                transaction_date=data.get("transaction_date"),
+                note=data.get("note", ""),
+                created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "internal_cash_mutation": InternalCashMutationSerializer(mutation).data},
             status=status.HTTP_201_CREATED,
         )
