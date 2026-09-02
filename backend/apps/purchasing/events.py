@@ -122,9 +122,21 @@ class QuickPurchaseRecorded(DomainEvent):
     feature non-functional for real use the moment the month closed.
     Frozen here, same discipline as payment_method above — the real
     business date, not re-derived from anything that could shift.
+
+    supplier_name, added 2 Sep 2026 — real UX gap found on the Kas
+    Harian dashboard: every memo across the whole posting matrix was
+    built from a raw ID (event.quick_purchase_id), meaningless in a
+    friendly, owner-facing view. Frozen from supplier.name at
+    QuickPurchase.record() time, same discipline as
+    payments.events.SupplierPaymentMade.supplier_name — no existing
+    snapshot field on QuickPurchase for this (unlike Invoice's own
+    customer_name_snapshot), so this is a live read at record() time,
+    captured once, never re-derived later from a Supplier row that
+    could itself be renamed after the fact.
     """
     quick_purchase_id: uuid.UUID
     supplier_id: uuid.UUID
+    supplier_name: str
     payment_method: str  # "cash" or "bank" — QuickPurchase.PaymentMethod's own real values
     amount: Decimal
     line_item_count: int
