@@ -23,7 +23,8 @@ from decimal import Decimal
 
 from apps.inventory.events import PartConsumed, StockOpnameCompleted
 from apps.invoicing.events import InvoiceIssued
-from apps.payments.events import (OperatingExpenseRecorded, PaymentReceived,
+from apps.payments.events import (InternalCashMutationRecorded,
+                                  OperatingExpenseRecorded, PaymentReceived,
                                   SupplierPaymentMade)
 from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
                                     QuickPurchaseRecorded,
@@ -128,6 +129,24 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": event.account_code,                             "side": "debit",  "amount": event.amount},
                 {"account_code": cash_or_bank_account_code(event.method), "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, InternalCashMutationRecorded):
+        # 1 Sep 2026 — Made's own confirmed real request: a real
+        # internal cash movement (till -> bank, or bank -> till), a
+        # pure asset swap with ZERO income-statement impact. Both
+        # account codes come straight from the event's own frozen
+        # payload — from_account_code/to_account_code were already
+        # validated as real Cash/Bank codes inside
+        # InternalCashMutation.record() before this event was ever
+        # published, so no re-validation happens here, same
+        # discipline every other event in this file follows.
+        return {
+            "memo": f"Internal cash mutation — {event.internal_cash_mutation_id}",
+            "lines": _lines(
+                {"account_code": event.to_account_code,   "side": "debit",  "amount": event.amount},
+                {"account_code": event.from_account_code, "side": "credit", "amount": event.amount},
             ),
         }
 

@@ -13,7 +13,10 @@ Two handlers, two bounded concerns — matching EventHandler's own
     and — Retur Pembelian v1 — PurchaseReturned, and — Sprint 7,
     Task 7.3 — StockOpnameCompleted, and — 25 Aug 2026, Made's own
     confirmed HARIAN/MINGGUAN spot-purchase exception —
-    QuickPurchaseRecorded) via posting_engine.py/journal_generator.py.
+    QuickPurchaseRecorded, and — 27 Aug 2026 — OperatingExpenseRecorded,
+    and — 1 Sep 2026, Made's own confirmed real internal cash-
+    movement request — InternalCashMutationRecorded) via
+    posting_engine.py/journal_generator.py.
   - CancellationEventHandler reverses PREVIOUSLY posted facts
     (InvoiceCancelled, InvoiceRefunded) via cancellations.py — routed
     by event_type, since the two reversal shapes are genuinely
@@ -32,6 +35,10 @@ specific journal entry, even though its whole purpose is correcting
 the books. Same category as GoodsReceived/PurchaseReturned, same
 handler.
 
+InternalCashMutationRecorded is the same story again — a genuinely
+NEW posting rule (a pure asset swap between Cash and Bank), not a
+reversal of anything. Same category, same handler.
+
 No purchasing-domain CANCELLATION events exist yet — "un-receive
 goods entirely" or "cancel a supplier invoice" were never scoped;
 add them to CancellationEventHandler if that's ever needed later,
@@ -49,7 +56,7 @@ class AccountingEventHandler(EventHandler):
         "PartConsumed", "WorkOrderCompleted", "InvoiceIssued", "PaymentReceived",
         "GoodsReceived", "SupplierInvoiceReceived", "SupplierPaymentMade",
         "PurchaseReturned", "StockOpnameCompleted", "QuickPurchaseRecorded",
-        "OperatingExpenseRecorded",
+        "OperatingExpenseRecorded", "InternalCashMutationRecorded",
     )
 
     def handle(self, event: DomainEvent) -> None:
