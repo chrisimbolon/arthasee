@@ -10,8 +10,18 @@ ServiceRecord with a mechanic assigned. Not copy-pasted out of
 laziness — this is genuinely the only way any of these objects come
 into existence in production, so it's the only honest way to test
 against them.
+
+2 Sep 2026 — InternalCashMutationTests / InternalCashMutationAPITests
+added, closing a real gap: the model, event, and endpoint all shipped
+same-day as the Kas Harian dashboard with zero automated coverage —
+every other real write path in this file (OperatingExpense,
+SupplierPayment) got its own test class the session it shipped; this
+one didn't, in the middle of a live production incident response.
+Own fixture, mirrors OperatingExpenseTests' own shape exactly — no
+Invoice/WorkOrder chain needed, just a seeded org.
 """
 import uuid
+from datetime import date
 from datetime import datetime as dt
 from datetime import timedelta
 from decimal import Decimal
@@ -23,7 +33,8 @@ from apps.core.models import Outbox
 from apps.invoicing.events import InvoiceRefunded
 from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
-from apps.payments.models import OperatingExpense, SupplierPayment
+from apps.payments.models import (InternalCashMutation, OperatingExpense,
+                                  SupplierPayment)
 from apps.purchasing.models import Supplier, SupplierInvoice
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
@@ -559,16 +570,26 @@ class OperatingExpenseTests(TestCase):
         so a real regression back to the old bug would make this
         assertion fail with today's date instead of yesterday's, not
         silently pass either way.
+
+        2 Sep 2026 — lookup switched from memo__icontains=str(expense.id)
+        to event_type="OperatingExpenseRecorded": the real memo fix
+        that day (raw UUID -> real account name, for Kas Harian's own
+        sake) meant this test's own ID-in-memo search stopped
+        matching anything at all — a real, honest fix to the test's
+        lookup strategy, not a workaround. event_type is a stable,
+        stored field, independent of memo text, and this test's own
+        setUp() creates a fresh org publishing exactly one
+        OperatingExpenseRecorded event, so there's no ambiguity.
         """
         account = Account.objects.get(organization=self.org, code="6003")
         yesterday = timezone.now() - timedelta(days=1)
 
         with self.captureOnCommitCallbacks(execute=True):
-            expense = OperatingExpense.record(
+            OperatingExpense.record(
                 organization=self.org, account=account, amount=Decimal("100000.00"),
                 paid_at=yesterday,
             )
-        
+
         entry = JournalEntry.objects.get(organization=self.org, event_type="OperatingExpenseRecorded")
         self.assertEqual(entry.posting_date, yesterday.date())
 
@@ -680,3 +701,175 @@ class OperatingExpenseAPITests(APITestCase):
         }, format="json")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertFalse(OperatingExpense.objects.exists())
+
+
+class InternalCashMutationTests(TestCase):
+    """
+    2 Sep 2026 — Made's own confirmed real request, arrived at while
+    designing the Kas Harian dashboard: a real internal cash movement
+    (till -> bank, or bank -> till), zero P&L impact. Own fixture,
+    mirrors OperatingExpenseTests' own shape exactly — no Invoice/
+    WorkOrder chain needed, just a seeded org.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_record_creates_sequential_number(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            mutation = InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("1500000.00"),
+            )
+        self.assertEqual(mutation.number, "MUT/00001")
+        self.assertEqual(mutation.sequence_number, 1)
+
+    def test_cash_to_bank_posts_dr_1101_cr_1001(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("1500000.00"),
+            )
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("-1500000.00"))
+        self.assertEqual(bank.balance(), Decimal("1500000.00"))
+
+    def test_bank_to_cash_posts_dr_1001_cr_1101(self):
+        """The reverse direction — a real, if less common, case
+        (topping up the till from the bank)."""
+        with self.captureOnCommitCallbacks(execute=True):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1101", to_account_code="1001",
+                amount=Decimal("500000.00"),
+            )
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("500000.00"))
+        self.assertEqual(bank.balance(), Decimal("-500000.00"))
+
+    def test_zero_pnl_impact(self):
+        """
+        The whole real point of this model, proven directly — a pure
+        asset swap must never move net income, unlike every other
+        event in the posting matrix.
+        """
+        from apps.accounting import reports
+        with self.captureOnCommitCallbacks(execute=True):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("1500000.00"),
+            )
+        data = reports.profit_and_loss(self.org, since=date(2026, 1, 1), as_of=date(2026, 12, 31))
+        self.assertEqual(data["net_income"], Decimal("0"))
+
+    def test_same_account_rejected(self):
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1001",
+                amount=Decimal("100000.00"),
+            )
+        self.assertFalse(InternalCashMutation.objects.exists())
+
+    def test_account_outside_cash_or_bank_rejected(self):
+        """
+        v1's own deliberate scope limit — Cash/Bank only, Chris's own
+        confirmed call. An account like 2001 (Accounts Payable) must
+        never be accepted here, even though it's a real, valid
+        account code elsewhere in the COA.
+        """
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="2001",
+                amount=Decimal("100000.00"),
+            )
+
+    def test_zero_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("0"),
+            )
+
+    def test_negative_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("-100000"),
+            )
+
+    def test_blocked_when_target_period_is_closed(self):
+        from apps.accounting.models import AccountingPeriod
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=1)
+        period.close(closed_by=None)
+
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("100000.00"), transaction_date=date(2026, 1, 15),
+            )
+        self.assertFalse(InternalCashMutation.objects.exists())
+
+
+class InternalCashMutationAPITests(APITestCase):
+    """Thin-view smoke test — same discipline as OperatingExpenseAPITests
+    above: the real logic is already fully proven at the model layer,
+    this confirms the endpoint wires everything together correctly."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.icm@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def test_create_internal_cash_mutation_via_api(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post("/api/internal-cash-mutations/", {
+                "from_account_code": "1001", "to_account_code": "1101", "amount": "1500000.00",
+            }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(bank.balance(), Decimal("1500000.00"))
+
+    def test_same_account_rejected_via_api(self):
+        resp = self.client.post("/api/internal-cash-mutations/", {
+            "from_account_code": "1001", "to_account_code": "1001", "amount": "100000.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(InternalCashMutation.objects.exists())
+
+    def test_invalid_account_code_rejected_via_api(self):
+        """
+        The serializer's own ChoiceField only offers 1001/1101 — this
+        proves an out-of-choices code is rejected at the serializer
+        layer already, before ever reaching the model's own guard.
+        """
+        resp = self.client.post("/api/internal-cash-mutations/", {
+            "from_account_code": "1001", "to_account_code": "2001", "amount": "100000.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_scoped_to_organization(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post("/api/internal-cash-mutations/", {
+                "from_account_code": "1001", "to_account_code": "1101", "amount": "100000.00",
+            }, format="json")
+
+        other_org = Organization.objects.create(name="Bengkel Lain ICM")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.icm@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/internal-cash-mutations/")
+        self.assertEqual(resp.data["internal_cash_mutations"], [])
