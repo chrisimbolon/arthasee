@@ -12,6 +12,18 @@
 // confirmed scope call — no real till-closing/cash-drawer count
 // feature exists yet, so this never claims to reconcile against a
 // physical count, only against what's already posted.
+//
+// 2 Sep 2026 — detail panel now shows BOTH posting_date (the real
+// transaction/business date — the same field this whole page's
+// date picker filters on) and created_at (when the DB row was
+// actually inserted), clearly labeled as two separate things. Real
+// UX bug found live: the panel used to show only created_at under
+// the bare label "Waktu," which reads as "the date this belongs
+// to" but isn't — for backdated or test data the two genuinely
+// diverge, and a single ambiguous label made that look like a
+// filtering bug when it wasn't one. daily_cash_activity() already
+// returns posting_date on every row; this was a display gap, not a
+// backend gap.
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   accountingApi, DailyCashActivityDirection, DailyCashActivityResponse,
@@ -241,8 +253,23 @@ export default function KasHarianPage() {
                     <span style={{ color: "var(--steel)" }}>No. Entri</span>
                     <span className="mono">{selected.entry_number}</span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 14 }}>
-                    <span style={{ color: "var(--steel)" }}>Waktu</span>
+                  {/* 2 Sep 2026 — real UX fix: this used to show only
+                      created_at (when the DB row was actually
+                      inserted) under the bare label "Waktu," easily
+                      mistaken for the transaction date the entry is
+                      actually filed under (posting_date — the real
+                      field this whole page filters by). For backdated
+                      or test data the two can genuinely differ.
+                      Showing both, clearly labeled, matches what's
+                      already returned by daily_cash_activity() and
+                      removes the ambiguity rather than picking one
+                      and hiding the other. */}
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                    <span style={{ color: "var(--steel)" }}>Tanggal Transaksi</span>
+                    <span>{new Date(selected.posting_date).toLocaleDateString("id-ID")}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 14, color: "var(--steel)" }}>
+                    <span>Dicatat pada</span>
                     <span>{new Date(selected.created_at).toLocaleString("id-ID")}</span>
                   </div>
 
