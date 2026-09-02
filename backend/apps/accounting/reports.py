@@ -14,7 +14,7 @@ data without going through HTTP.
 from datetime import date, timedelta
 from decimal import Decimal
 
-from apps.accounting.models import Account, AccountingPeriod
+from apps.accounting.models import Account, AccountingPeriod, JournalEntry
 from apps.invoicing.models import Invoice
 from apps.purchasing.models import SupplierInvoice
 
@@ -497,4 +497,132 @@ def dashboard_financial_summary(organization, *, as_of=None) -> dict:
         "ap_due_soon_total": ap_due_soon_total,
         "ap_due_soon_count": len(ap_due_soon_rows),
         "ap_due_soon_invoices": ap_due_soon_rows[:5],
+    }
+
+
+# 1 Sep 2026 — Kas Harian. Made's own confirmed real request: a
+# plain-language daily cash view, distinct from the Jurnal & Audit
+# Log page (see the real Ringkasan/Jurnal UX discussion this task
+# came out of — Jurnal stays exactly as-is, audit-grade and
+# untouched; this is the "5-second glance" version, reusing the same
+# already-posted ledger data, never a second, duplicate cash ledger).
+#
+# Every event type actually capable of touching Cash (1001) or Bank
+# (1101) is mapped to a real, friendly category label here — the
+# ONLY place in this codebase that maps event_type -> a human label
+# for cash purposes, so the Kas Harian page and any future consumer
+# share one real definition, not a second copy that could drift.
+_CASH_BANK_CODES = ("1001", "1101")
+
+_CASH_ACTIVITY_CATEGORY_LABELS = {
+    "PaymentReceived": "Servis & Part",
+    "SupplierPaymentMade": "Pembayaran Supplier",
+    "OperatingExpenseRecorded": "Biaya Operasional",
+    "QuickPurchaseRecorded": "Pembelian Stok",
+    "InternalCashMutationRecorded": "Mutasi Kas",
+}
+
+
+def daily_cash_activity(organization, *, on_date=None) -> dict:
+    """
+    Every real cash/bank-touching JournalEntry for one calendar day,
+    grouped into plain-language rows an owner can actually read —
+    "Rp736.000 masuk dari pembayaran Yono," not "Dr 1001 / Cr 1201."
+    Reads the already-posted ledger directly (JournalEntry/
+    JournalLine) — no second cash ledger table, Chris's own
+    confirmed call: the GL is the one real source of truth, this is
+    just a friendlier lens on it.
+
+    InternalCashMutationRecorded is handled as a special case,
+    deliberately: every OTHER event in this file's own category map
+    touches exactly one Cash/Bank line per entry (money genuinely
+    entering or leaving the business), but a mutation's own 2-line
+    entry (Dr 1101 / Cr 1001, or the reverse) touches Cash/Bank on
+    BOTH sides — it's an internal transfer, not a real inflow or
+    outflow. Emitting it as two separate in/out rows would double-
+    count it and misrepresent it as real revenue/expense activity;
+    emitting it as ONE "mutation" row (direction="mutation", no sign)
+    is both mathematically correct (net_cash excludes it entirely,
+    matching real position) and matches what an owner actually did —
+    moved money, not earned or spent it.
+
+    Every other qualifying entry emits one row per Cash/Bank line it
+    actually contains — in practice always exactly one, since no
+    other event in this system's posting matrix currently posts to
+    two Cash/Bank accounts in the same entry.
+    """
+    on_date = on_date or date.today()
+
+    entries = (
+        JournalEntry.objects
+        .filter(organization=organization, posting_date=on_date, lines__account__code__in=_CASH_BANK_CODES)
+        .distinct()
+        .prefetch_related("lines__account")
+        .order_by("-created_at")
+    )
+
+    activities = []
+    total_in = Decimal("0")
+    total_out = Decimal("0")
+
+    for entry in entries:
+        category = _CASH_ACTIVITY_CATEGORY_LABELS.get(entry.event_type, "Lainnya")
+        cash_bank_lines = [l for l in entry.lines.all() if l.account.code in _CASH_BANK_CODES]
+
+        if entry.event_type == "InternalCashMutationRecorded":
+            # See docstring above — one row, no sign, excluded from
+            # total_in/total_out on purpose.
+            debit_line = next((l for l in cash_bank_lines if l.debit_amount > Decimal("0")), None)
+            credit_line = next((l for l in cash_bank_lines if l.credit_amount > Decimal("0")), None)
+            if debit_line is None or credit_line is None:
+                continue  # malformed/partial data — skip rather than misreport
+            activities.append({
+                "journal_entry_id": str(entry.id),
+                "entry_number": entry.entry_number,
+                "posting_date": entry.posting_date,
+                "created_at": entry.created_at,
+                "event_type": entry.event_type,
+                "category": category,
+                "memo": entry.memo,
+                "direction": "mutation",
+                "from_account_code": credit_line.account.code,
+                "from_account_name": credit_line.account.name,
+                "to_account_code": debit_line.account.code,
+                "to_account_name": debit_line.account.name,
+                "amount": debit_line.debit_amount,
+            })
+            continue
+
+        for line in cash_bank_lines:
+            if line.debit_amount > Decimal("0"):
+                direction, amount = "in", line.debit_amount
+                total_in += amount
+            else:
+                direction, amount = "out", line.credit_amount
+                total_out += amount
+            activities.append({
+                "journal_entry_id": str(entry.id),
+                "entry_number": entry.entry_number,
+                "posting_date": entry.posting_date,
+                "created_at": entry.created_at,
+                "event_type": entry.event_type,
+                "category": category,
+                "memo": entry.memo,
+                "direction": direction,
+                "account_code": line.account.code,
+                "account_name": line.account.name,
+                "amount": amount,
+            })
+
+    activities.sort(key=lambda a: a["created_at"], reverse=True)
+
+    return {
+        "date": on_date,
+        "activities": activities,
+        "total_in": total_in,
+        "total_out": total_out,
+        "net_cash": total_in - total_out,
+        "in_count": sum(1 for a in activities if a["direction"] == "in"),
+        "out_count": sum(1 for a in activities if a["direction"] == "out"),
+        "mutation_count": sum(1 for a in activities if a["direction"] == "mutation"),
     }
