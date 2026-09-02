@@ -2,11 +2,14 @@
 // =============================================================================
 // === frontend/app/dashboard/page.tsx ===
 // =============================================================================
-import { accountingApi, DashboardFinancialSummaryResponse, ProfitLossComparisonResponse, ReportDelta } from "@/lib/api/accounting";
+import {
+  accountingApi, DailyCashActivityResponse, DashboardFinancialSummaryResponse,
+  ProfitLossComparisonResponse, ReportDelta,
+} from "@/lib/api/accounting";
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { ActiveJob, activeJobsApi, dashboardApi, DashboardSummary } from "@/lib/api/workorders";
 import {
-  AlertTriangle, Car, CheckCircle2, Clock, Landmark, Layers,
+  AlertTriangle, ArrowLeftRight, Car, CheckCircle2, Clock, Landmark, Layers,
   Loader2, TrendingDown, TrendingUp, Users, Wallet, Wrench,
 } from "lucide-react";
 import Link from "next/link";
@@ -79,6 +82,16 @@ export default function DashboardOverviewPage() {
   const [financialSummary, setFinancialSummary] = useState<DashboardFinancialSummaryResponse | null>(null);
   const [financialSummaryLoading, setFinancialSummaryLoading] = useState(true);  
 
+  // 1 Sep 2026 — Kas Harian. Made's own confirmed real request,
+  // arrived at from a real UX gap: the Jurnal & Audit Log page is
+  // correct for audit purposes but not friendly for a daily glance
+  // — this compact card is that glance; the full filterable/
+  // searchable view lives at /dashboard/accounting/kas-harian. Own
+  // fetch, own loading state, same as financialSummary above —
+  // always today's own date, not tied to the `period` toggle below.
+  const [cashActivity, setCashActivity] = useState<DailyCashActivityResponse | null>(null);
+  const [cashActivityLoading, setCashActivityLoading] = useState(true);
+
   // Sprint 7, Task 7.4 — Chris and Made's own confirmed call: no new
   // calculation engine, reuses profit_and_loss_comparison() exactly
   // as-is (already live since Phase 5, Task 5.5), the dashboard card
@@ -116,6 +129,12 @@ export default function DashboardOverviewPage() {
       .then(setFinancialSummary)
       .finally(() => setFinancialSummaryLoading(false));
   }, []);  
+
+  useEffect(() => {
+    accountingApi.dailyCashActivity()
+      .then(setCashActivity)
+      .finally(() => setCashActivityLoading(false));
+  }, []);
 
   useEffect(() => {
     // Local date components, deliberately NOT toISOString().slice(0,10)
@@ -241,6 +260,40 @@ export default function DashboardOverviewPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* 1 Sep 2026 — Kas Harian. Made and Chris's own confirmed
+          placement: same row-shape as the Piutang/Utang cards above
+          (a compact glance, not the full filterable/searchable
+          view), linking out to /dashboard/accounting/kas-harian for
+          the real thing — same "glance card + dedicated page" split
+          already established for Laba Bersih below. */}
+      {!cashActivityLoading && cashActivity && (
+        <div className="card" style={{ marginBottom: 32 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <ArrowLeftRight size={18} style={{ color: "var(--workshop)" }} />
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--steel)", textTransform: "uppercase" }}>Kas Hari Ini</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Masuk</div>
+              <div className="mono" style={{ fontSize: 20, fontWeight: 600, color: "var(--workshop)" }}>{formatRupiah(cashActivity.total_in)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Keluar</div>
+              <div className="mono" style={{ fontSize: 20, fontWeight: 600, color: "var(--danger)" }}>{formatRupiah(cashActivity.total_out)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>Bersih</div>
+              <div className="mono" style={{ fontSize: 20, fontWeight: 600, color: toNumber(cashActivity.net_cash) < 0 ? "var(--danger)" : "var(--ink)" }}>
+                {formatRupiah(cashActivity.net_cash)}
+              </div>
+            </div>
+          </div>
+          <Link href="/dashboard/accounting/kas-harian" style={{ display: "inline-block", fontSize: 12, color: "var(--rust)", marginTop: 16 }}>
+            Lihat Kas Harian →
+          </Link>
+        </div>
       )}
 
       {/* Sprint 7, Task 7.4 — Made and Chris's own confirmed
