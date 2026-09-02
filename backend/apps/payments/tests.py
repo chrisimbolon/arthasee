@@ -568,8 +568,8 @@ class OperatingExpenseTests(TestCase):
                 organization=self.org, account=account, amount=Decimal("100000.00"),
                 paid_at=yesterday,
             )
-
-        entry = JournalEntry.objects.get(reference_event_id__isnull=False, memo__icontains=str(expense.id))
+        
+        entry = JournalEntry.objects.get(organization=self.org, event_type="OperatingExpenseRecorded")
         self.assertEqual(entry.posting_date, yesterday.date())
 
     def test_account_must_be_expense_type(self):
