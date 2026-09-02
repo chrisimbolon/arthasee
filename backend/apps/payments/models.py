@@ -16,6 +16,14 @@ SupplierPayment lives here, not in apps.purchasing, per the Roadmap's
 own posting matrix — it lists SupplierPaymentMade under the payments
 domain, not purchasing. Reuses Payment.METHOD_CHOICES directly, same
 as Refund already does.
+
+1 Sep 2026 — OperatingExpenseSequence/OperatingExpense (27 Aug) is
+joined by InternalCashMutationSequence/InternalCashMutation: a real
+internal cash movement (till -> bank, or bank -> till), Made's own
+confirmed request while designing the Kas Harian dashboard. Mirrors
+OperatingExpense's own skeleton exactly — same numbered-document
+pattern, same "one classmethod is the only real entry point"
+discipline.
 """
 import uuid
 from decimal import Decimal
@@ -474,3 +482,149 @@ class OperatingExpense(TenantScopedModel):
             ))
 
         return expense
+
+
+class InternalCashMutationSequence(TenantScopedModel):
+    """Mirrors OperatingExpenseSequence exactly — same real numbering pattern."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    last_sequence = models.PositiveIntegerField(default=0, verbose_name="Nomor Urut Terakhir")
+
+    class Meta:
+        verbose_name        = "Internal Cash Mutation Sequence"
+        verbose_name_plural  = "Internal Cash Mutation Sequences"
+        unique_together      = [("organization",)]
+
+    def __str__(self):
+        return f"{self.organization}: {self.last_sequence}"
+
+    @classmethod
+    def next_number(cls, organization):
+        seq, _ = cls.objects.select_for_update().get_or_create(
+            organization=organization, defaults={"last_sequence": 0},
+        )
+        seq.last_sequence += 1
+        seq.save(update_fields=["last_sequence"])
+        return seq.last_sequence
+
+
+class InternalCashMutation(TenantScopedModel):
+    """
+    A real internal movement of cash between the till and the bank —
+    NOT a customer or supplier transaction, and NEVER touches any
+    Revenue/COGS/Expense account. 1 Sep 2026 — Made's own confirmed
+    real request, arrived at while designing the Kas Harian
+    dashboard: real workshops move physical cash to the bank
+    regularly (theft-risk management), and this system had no way to
+    record that real fact.
+
+    Deliberately restricted to Cash (1001) <-> Bank (1101) only in
+    v1 — Chris's own confirmed scope call, same "don't build real
+    multi-bank-account tracking speculatively" discipline already
+    applied to Open Decision #10 (per-supplier cost tracking) and
+    Asset's own no-salvage-value call. A specific bank channel name
+    (BCA, Mandiri, QRIS) is cosmetic-only, carried in `note` for
+    display — never a real ledger distinction; see Roadmap COA
+    Blueprint, 1101 (Bank), for why there's only one real bank
+    account in the COA today.
+
+    Single real write path, mirrors OperatingExpense's own skeleton
+    exactly — same numbered-document pattern (`MUT/00001`), same
+    "one classmethod is the only real entry point" discipline.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor")
+    sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
+    from_account_code = models.CharField(max_length=10, verbose_name="Dari Akun")
+    to_account_code   = models.CharField(max_length=10, verbose_name="Ke Akun")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Jumlah")
+    transaction_date = models.DateField(verbose_name="Tanggal Transaksi")
+    note = models.CharField(
+        max_length=255, blank=True, verbose_name="Catatan",
+        help_text="Cosmetic only — e.g. 'Transfer BCA'. No real per-bank "
+                  "ledger account exists yet; see Roadmap Open Decisions.",
+    )
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # Same restriction InternalCashMutationRecorded's own docstring
+    # states as a hard architectural fact — enforced here too, not
+    # just described, since record() is the one real place that can
+    # actually stop bad data from ever being created.
+    ALLOWED_ACCOUNT_CODES = {"1001", "1101"}
+
+    class Meta:
+        verbose_name        = "Internal Cash Mutation"
+        verbose_name_plural  = "Internal Cash Mutations"
+        ordering             = ["-transaction_date", "-sequence_number"]
+        unique_together      = [("organization", "number")]
+
+    def __str__(self):
+        return f"{self.number} — {self.from_account_code} → {self.to_account_code} ({self.amount})"
+
+    def _resolve_organization(self):
+        # Set directly at creation (see record() below) — no FK to
+        # derive it from, same as OperatingExpense derives it via
+        # account.organization; this model has no such FK, so
+        # organization is passed explicitly instead.
+        return self.organization
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        if creating and not self.number:
+            self.sequence_number = InternalCashMutationSequence.next_number(self.organization)
+            self.number = f"MUT/{self.sequence_number:05d}"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def record(
+        cls, *, organization, from_account_code, to_account_code, amount,
+        transaction_date=None, note="", created_by=None,
+    ):
+        """
+        The one real entry point — never construct
+        InternalCashMutation directly. Real validation, not just a
+        UI suggestion:
+          - both account codes must be real Cash/Bank codes (1001 or
+            1101), and must differ from each other.
+          - amount must be positive.
+        """
+        if from_account_code not in cls.ALLOWED_ACCOUNT_CODES or to_account_code not in cls.ALLOWED_ACCOUNT_CODES:
+            raise ValueError(
+                "Mutasi kas internal hanya didukung antara Kas (1001) dan "
+                "Bank (1101) pada v1."
+            )
+        if from_account_code == to_account_code:
+            raise ValueError("Akun asal dan akun tujuan tidak boleh sama.")
+        if amount is None or amount <= Decimal("0"):
+            raise ValueError("Jumlah mutasi harus lebih dari nol.")
+
+        with transaction.atomic():
+            from apps.accounting.models import AccountingPeriod
+            resolved_date = transaction_date or timezone.now().date()
+            AccountingPeriod.assert_open_for_posting(organization, resolved_date)
+
+            mutation = cls(
+                organization=organization,
+                from_account_code=from_account_code,
+                to_account_code=to_account_code,
+                amount=amount,
+                transaction_date=resolved_date,
+                note=note,
+                created_by=created_by,
+            )
+            mutation.save()
+
+            from apps.core.events.bus import default_bus
+            from apps.payments.events import InternalCashMutationRecorded
+            default_bus.publish(InternalCashMutationRecorded(
+                organization_id=organization.id,
+                internal_cash_mutation_id=mutation.id,
+                from_account_code=from_account_code,
+                to_account_code=to_account_code,
+                amount=amount,
+                transaction_date=resolved_date,
+            ))
+
+        return mutation
