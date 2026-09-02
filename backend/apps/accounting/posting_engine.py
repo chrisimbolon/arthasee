@@ -18,6 +18,19 @@ hidden behind local imports the way cross-app FK declarations are
 elsewhere in this codebase — this file's entire job IS mapping these
 specific types to posting rules; the dependency is the point, not an
 incidental reach into another domain.
+
+2 Sep 2026 — every memo string that used to embed a raw ID
+(event.payment_id, event.quick_purchase_id, etc.) now embeds the
+real, frozen display name each event carries as of that date's memo
+fix (customer_name/supplier_name/account_name — see each event
+class's own docstring in payments/events.py and purchasing/events.py
+for where each one comes from). This memo IS what JournalEntry.memo
+stores, which is what both the Jurnal audit page AND the Kas Harian
+dashboard display — a real UX gap, not cosmetic: an owner-facing memo
+built from a UUID was never actually readable by an owner.
+InternalCashMutationRecorded needed no change — its own memo already
+carried no ID, and Kas Harian builds its title separately anyway
+(see that event's own docstring).
 """
 from decimal import Decimal
 
@@ -107,7 +120,9 @@ def resolve(event) -> dict:
 
     if isinstance(event, PaymentReceived):
         return {
-            "memo": f"Payment received — {event.payment_id}",
+            # 2 Sep 2026 — real name, not event.payment_id. See
+            # module docstring.
+            "memo": f"Payment received — {event.customer_name}",
             "lines": _lines(
                 {"account_code": cash_or_bank_account_code(event.method), "side": "debit",  "amount": event.amount},
                 {"account_code": "1201",                                   "side": "credit", "amount": event.amount},
@@ -125,7 +140,8 @@ def resolve(event) -> dict:
         # discipline PurchaseReturned's own debit_account_code
         # already established), never re-derived here.
         return {
-            "memo": f"Operating expense — {event.operating_expense_id}",
+            # 2 Sep 2026 — real name, not event.operating_expense_id.
+            "memo": f"Operating expense — {event.account_name}",
             "lines": _lines(
                 {"account_code": event.account_code,                             "side": "debit",  "amount": event.amount},
                 {"account_code": cash_or_bank_account_code(event.method), "side": "credit", "amount": event.amount},
@@ -169,7 +185,8 @@ def resolve(event) -> dict:
         # helper PaymentReceived/SupplierPaymentMade already use, not
         # a second copy of that mapping.
         return {
-            "memo": f"Quick purchase — {event.quick_purchase_id}",
+            # 2 Sep 2026 — real name, not event.quick_purchase_id.
+            "memo": f"Quick purchase — {event.supplier_name}",
             "lines": _lines(
                 {"account_code": "1301",                                          "side": "debit",  "amount": event.amount},
                 {"account_code": cash_or_bank_account_code(event.payment_method), "side": "credit", "amount": event.amount},
@@ -207,7 +224,8 @@ def resolve(event) -> dict:
 
     if isinstance(event, SupplierPaymentMade):
         return {
-            "memo": f"Supplier payment made — {event.supplier_payment_id}",
+            # 2 Sep 2026 — real name, not event.supplier_payment_id.
+            "memo": f"Supplier payment made — {event.supplier_name}",
             "lines": _lines(
                 {"account_code": "2001",                                   "side": "debit",  "amount": event.amount},
                 {"account_code": cash_or_bank_account_code(event.method),  "side": "credit", "amount": event.amount},
