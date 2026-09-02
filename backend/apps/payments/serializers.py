@@ -5,7 +5,8 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from .models import OperatingExpense, Payment, Refund, SupplierPayment
+from .models import (InternalCashMutation, OperatingExpense, Payment, Refund,
+                     SupplierPayment)
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -123,3 +124,41 @@ class OperatingExpenseRecordSerializer(serializers.Serializer):
     mechanic     = serializers.UUIDField(required=False, allow_null=True)
     reference    = serializers.CharField(required=False, allow_blank=True, default="")
     notes        = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class InternalCashMutationSerializer(serializers.ModelSerializer):
+    """
+    1 Sep 2026 — Made's own confirmed real request. Entirely read-
+    only from this serializer's own point of view — always created
+    via the real InternalCashMutation.record(), never a generic
+    serializer.save(), same discipline as OperatingExpenseSerializer
+    above.
+    """
+    created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = InternalCashMutation
+        fields = [
+            "id", "number", "sequence_number", "from_account_code", "to_account_code",
+            "amount", "transaction_date", "note", "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class InternalCashMutationRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/internal-cash-mutations/.
+    from_account_code/to_account_code are plain strings, not a
+    dropdown of Account UUIDs — v1 only ever supports "1001"/"1101"
+    (real validation lives in InternalCashMutation.record(), not
+    just this field's own choices list, so a future account added to
+    the COA under either code can't silently slip through here
+    without a real, deliberate change to record() itself).
+    """
+    ACCOUNT_CODE_CHOICES = [("1001", "Kas (Tunai)"), ("1101", "Bank")]
+
+    from_account_code = serializers.ChoiceField(choices=ACCOUNT_CODE_CHOICES)
+    to_account_code   = serializers.ChoiceField(choices=ACCOUNT_CODE_CHOICES)
+    amount            = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    transaction_date  = serializers.DateField(required=False, allow_null=True)
+    note              = serializers.CharField(required=False, allow_blank=True, default="")
