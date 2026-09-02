@@ -105,3 +105,39 @@ class OperatingExpenseRecorded(DomainEvent):
     amount: Decimal
     transaction_date: date
     event_type: str = field(init=False, default="OperatingExpenseRecorded", kw_only=True)
+
+
+@dataclass(frozen=True)
+class InternalCashMutationRecorded(DomainEvent):
+    """
+    Fired when InternalCashMutation.record() successfully records a
+    real internal cash movement — the till being dropped to the bank,
+    or (less commonly) a bank withdrawal made to top up the till. 1
+    Sep 2026 — Made's own confirmed real request, arrived at while
+    designing the Kas Harian dashboard: real workshops move physical
+    cash to the bank regularly to manage theft risk, and that
+    movement is a real fact this system had no way to record.
+
+    Deliberately NOT a revenue or expense event — no P&L account is
+    ever touched. `from_account_code`/`to_account_code` are always
+    one of {"1001", "1101"} (Cash / Bank), enforced in
+    InternalCashMutation.record() before this event is ever
+    published — never re-validated here, same "frozen event payload"
+    discipline OperatingExpenseRecorded's own account_code already
+    established.
+
+    transaction_date is frozen at creation for the same reason
+    OperatingExpenseRecorded's own field is (Principle #12,
+    Roadmap v2.7) — the real business date the mutation happened on,
+    never re-derived from occurred_at.
+
+    Posting rule: Dr {to_account_code} / Cr {from_account_code}, both
+    for `amount` — a pure asset swap between two Cash/Bank accounts,
+    zero income-statement impact.
+    """
+    internal_cash_mutation_id: uuid.UUID
+    from_account_code: str
+    to_account_code: str
+    amount: Decimal
+    transaction_date: date
+    event_type: str = field(init=False, default="InternalCashMutationRecorded", kw_only=True)
