@@ -115,3 +115,63 @@ export const operatingExpensesApi = {
     }
   },
 };
+
+// ── 1 Sep 2026 — Made's own confirmed real request, arrived at
+// while designing the Kas Harian dashboard: real workshops move
+// physical cash to the bank regularly (theft-risk management), and
+// this system had no way to record that real fact. Cash (1001) <->
+// Bank (1101) only in v1 — see InternalCashMutation's own backend
+// docstring for why. ────────────────────────────────────────────
+
+export type CashBankAccountCode = "1001" | "1101";
+
+export interface InternalCashMutation {
+  id:                 string;
+  number:             string;
+  sequence_number:    number;
+  from_account_code:  CashBankAccountCode;
+  to_account_code:    CashBankAccountCode;
+  amount:             string;
+  transaction_date:   string;
+  // Cosmetic only — e.g. "Transfer BCA". No real per-bank ledger
+  // account exists yet; see Roadmap Open Decisions and
+  // InternalCashMutation's own backend docstring.
+  note:               string;
+  created_by:         string | null;
+  created_by_name:    string | null;
+  created_at:         string;
+}
+
+export interface RecordInternalCashMutationPayload {
+  from_account_code: CashBankAccountCode;
+  to_account_code:   CashBankAccountCode;
+  amount:            number | string;
+  transaction_date?: string;
+  note?:             string;
+}
+
+export interface RecordInternalCashMutationResult {
+  success: boolean;
+  message?: string;
+  internal_cash_mutation?: InternalCashMutation;
+}
+
+export const internalCashMutationsApi = {
+  async list(): Promise<InternalCashMutation[]> {
+    const { data } = await api.get("/api/internal-cash-mutations/");
+    return data.internal_cash_mutations;
+  },
+  // Real WRITE action — same discipline as operatingExpensesApi.record()
+  // above: a failure here must surface its real message (e.g. "Akun
+  // asal dan akun tujuan tidak boleh sama") to the user, not silently
+  // collapse to a generic message.
+  async record(payload: RecordInternalCashMutationPayload): Promise<RecordInternalCashMutationResult> {
+    try {
+      const { data } = await api.post("/api/internal-cash-mutations/", payload);
+      return data;
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      return { success: false, message: message || "Gagal mencatat mutasi kas." };
+    }
+  },
+};
