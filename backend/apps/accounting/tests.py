@@ -8,6 +8,17 @@ apps/accounting/urls.py and real API views land. These are TestCase,
 not APITestCase, and go straight at the model/manager layer
 (JournalEntry.post(), Account.balance(), the seed_coa command) — the
 only surface that actually exists to test right now.
+
+2 Sep 2026 — DailyCashActivityReportTests / DailyCashActivityAPITests
+added, closing a real gap: reports.daily_cash_activity() and its
+endpoint shipped same-day as the Kas Harian dashboard (built in
+response to a real production incident) with zero automated
+coverage. Posts directly via JournalEntry.post() with real
+event_type/memo values, same style as FinancialReportingTests
+elsewhere in this file — daily_cash_activity() reads the ledger, it
+doesn't care what produced it, so this tests the report function in
+isolation rather than requiring the full domain-event fixture chains
+(Invoice/WorkOrder/etc.) each real event type would otherwise need.
 """
 import uuid
 from datetime import date, timedelta
@@ -1657,3 +1668,214 @@ class AccountingPeriodCloseTests(TestCase):
             period.close(closed_by=None)
 
         self.assertEqual(DepreciationRun.objects.filter(organization=self.org, accounting_period=period).count(), 1)
+
+
+class DailyCashActivityReportTests(TestCase):
+    """
+    2 Sep 2026 — real coverage for reports.daily_cash_activity(),
+    closing a genuine gap: the function shipped same-day as the Kas
+    Harian dashboard (built in direct response to the Sep 1 period-
+    gap incident) with zero automated coverage. Posts directly via
+    JournalEntry.post() with real event_type/memo values, same style
+    as FinancialReportingTests above — this function reads the
+    ledger, it doesn't care what produced it, so no domain-event
+    fixture chains (Invoice/WorkOrder/etc.) are needed to prove its
+    own real logic.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.bank = Account.objects.get(organization=self.org, code="1101")
+        self.ar   = Account.objects.get(organization=self.org, code="1201")
+        self.expense_account = Account.objects.get(organization=self.org, code="6003")
+        self.inventory = Account.objects.get(organization=self.org, code="1301")
+        self.accrued = Account.objects.get(organization=self.org, code="2010")
+
+    def _post_payment_received(self, on_date, amount=Decimal("500000")):
+        return JournalEntry.post(
+            organization=self.org, posting_date=on_date,
+            source=JournalEntry.Source.DOMAIN_EVENT, event_type="PaymentReceived",
+            memo="Payment received — Yono",
+            lines=[{"account": self.cash, "debit": amount}, {"account": self.ar, "credit": amount}],
+        )
+
+    def _post_operating_expense(self, on_date, amount=Decimal("200000")):
+        return JournalEntry.post(
+            organization=self.org, posting_date=on_date,
+            source=JournalEntry.Source.DOMAIN_EVENT, event_type="OperatingExpenseRecorded",
+            memo="Operating expense — Listrik",
+            lines=[{"account": self.expense_account, "debit": amount}, {"account": self.cash, "credit": amount}],
+        )
+
+    def _post_internal_mutation(self, on_date, amount=Decimal("1500000")):
+        return JournalEntry.post(
+            organization=self.org, posting_date=on_date,
+            source=JournalEntry.Source.DOMAIN_EVENT, event_type="InternalCashMutationRecorded",
+            memo="Internal cash mutation — abcd1234",
+            lines=[{"account": self.bank, "debit": amount}, {"account": self.cash, "credit": amount}],
+        )
+
+    def test_only_returns_entries_for_the_given_date(self):
+        self._post_payment_received(date(2026, 5, 1))
+        self._post_payment_received(date(2026, 5, 2))
+
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+        self.assertEqual(len(data["activities"]), 1)
+        self.assertEqual(data["date"], date(2026, 5, 1))
+
+    def test_payment_received_shows_as_in_with_real_memo(self):
+        self._post_payment_received(date(2026, 5, 1), amount=Decimal("500000"))
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+
+        self.assertEqual(len(data["activities"]), 1)
+        row = data["activities"][0]
+        self.assertEqual(row["direction"], "in")
+        self.assertEqual(row["category"], "Servis & Part")
+        self.assertEqual(row["memo"], "Payment received — Yono")
+        self.assertEqual(row["amount"], Decimal("500000.00"))
+        self.assertEqual(row["account_code"], "1001")
+
+    def test_operating_expense_shows_as_out(self):
+        self._post_operating_expense(date(2026, 5, 1), amount=Decimal("200000"))
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+
+        row = data["activities"][0]
+        self.assertEqual(row["direction"], "out")
+        self.assertEqual(row["category"], "Biaya Operasional")
+        self.assertEqual(row["amount"], Decimal("200000.00"))
+
+    def test_totals_and_counts_are_correct(self):
+        self._post_payment_received(date(2026, 5, 1), amount=Decimal("500000"))
+        self._post_operating_expense(date(2026, 5, 1), amount=Decimal("200000"))
+
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+        self.assertEqual(data["total_in"], Decimal("500000.00"))
+        self.assertEqual(data["total_out"], Decimal("200000.00"))
+        self.assertEqual(data["net_cash"], Decimal("300000.00"))
+        self.assertEqual(data["in_count"], 1)
+        self.assertEqual(data["out_count"], 1)
+
+    def test_internal_mutation_renders_as_one_row_not_two(self):
+        """
+        The real, non-obvious logic in this whole function — a
+        mutation's own 2-line entry (Dr Bank / Cr Cash) touches
+        BOTH sides of the Cash/Bank filter. Naively emitting one row
+        per matching line would double-count it and misreport an
+        internal transfer as real revenue/expense activity. Must
+        collapse to exactly ONE row, direction="mutation".
+        """
+        self._post_internal_mutation(date(2026, 5, 1), amount=Decimal("1500000"))
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+
+        self.assertEqual(len(data["activities"]), 1)
+        row = data["activities"][0]
+        self.assertEqual(row["direction"], "mutation")
+        self.assertEqual(row["category"], "Mutasi Kas")
+        self.assertEqual(row["from_account_code"], "1001")
+        self.assertEqual(row["to_account_code"], "1101")
+        self.assertEqual(row["amount"], Decimal("1500000.00"))
+        self.assertEqual(data["mutation_count"], 1)
+
+    def test_mutation_excluded_from_totals_and_net_cash(self):
+        """
+        The real correctness proof — an internal transfer is not
+        revenue or expense, and must never inflate or deflate the
+        headline numbers a real owner glances at first.
+        """
+        self._post_payment_received(date(2026, 5, 1), amount=Decimal("500000"))
+        self._post_internal_mutation(date(2026, 5, 1), amount=Decimal("1500000"))
+
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+        self.assertEqual(data["total_in"], Decimal("500000.00"))
+        self.assertEqual(data["total_out"], Decimal("0"))
+        self.assertEqual(data["net_cash"], Decimal("500000.00"))
+
+    def test_non_cash_bank_event_produces_no_activity(self):
+        """
+        GoodsReceived (Dr 1301 / Cr 2010) never touches Cash or Bank
+        — must be entirely invisible to this report, same as it's
+        entirely invisible to the whole Kas Harian concept.
+        """
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 5, 1),
+            source=JournalEntry.Source.DOMAIN_EVENT, event_type="GoodsReceived",
+            memo="Goods received — GRN 1",
+            lines=[{"account": self.inventory, "debit": Decimal("300000")}, {"account": self.accrued, "credit": Decimal("300000")}],
+        )
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+        self.assertEqual(data["activities"], [])
+        self.assertEqual(data["total_in"], Decimal("0"))
+        self.assertEqual(data["total_out"], Decimal("0"))
+
+    def test_unmapped_event_type_falls_back_to_lainnya_category(self):
+        """
+        A manual journal (or any future event type never added to
+        _CASH_ACTIVITY_CATEGORY_LABELS) must still show up honestly,
+        not crash or vanish — falls back to "Lainnya."
+        """
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 5, 1),
+            source=JournalEntry.Source.MANUAL,
+            memo="Penyesuaian kas",
+            lines=[{"account": self.cash, "debit": Decimal("50000")}, {"account": self.ar, "credit": Decimal("50000")}],
+        )
+        data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
+        self.assertEqual(data["activities"][0]["category"], "Lainnya")
+
+    def test_defaults_to_today_when_no_date_given(self):
+        self._post_payment_received(date.today())
+        data = reports.daily_cash_activity(self.org)
+        self.assertEqual(data["date"], date.today())
+        self.assertEqual(len(data["activities"]), 1)
+
+
+class DailyCashActivityAPITests(APITestCase):
+    """Thin-view smoke test — the real logic is already fully proven
+    at the report layer above; this confirms the endpoint wires
+    everything together correctly, same discipline as
+    ReportingAPITests above."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.dailycash@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_endpoint_defaults_to_today(self):
+        resp = self.client.get("/api/accounting/daily-cash-activity/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["date"], date.today())
+        self.assertIn("net_cash", resp.data)
+
+    def test_endpoint_accepts_explicit_date(self):
+        resp = self.client.get("/api/accounting/daily-cash-activity/?date=2026-01-15")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["date"], date(2026, 1, 15))
+
+    def test_endpoint_scoped_to_organization(self):
+        cash = Account.objects.get(organization=self.org, code="1001")
+        ar   = Account.objects.get(organization=self.org, code="1201")
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(),
+            source=JournalEntry.Source.DOMAIN_EVENT, event_type="PaymentReceived",
+            memo="Payment received — Org A Customer",
+            lines=[{"account": cash, "debit": Decimal("100000")}, {"account": ar, "credit": Decimal("100000")}],
+        )
+
+        other_org = Organization.objects.create(name="Bengkel Lain Daily Cash")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.dailycash@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/daily-cash-activity/")
+        self.assertEqual(resp.data["activities"], [])
