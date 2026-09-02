@@ -238,6 +238,48 @@ export const ACCOUNT_TYPE_ORDER: string[] = [
   "ASSET", "LIABILITY", "EQUITY", "REVENUE", "COGS", "EXPENSE",
 ];
 
+// 1 Sep 2026 — Kas Harian. `direction` "mutation" is the real,
+// distinct third case (alongside "in"/"out") for an internal
+// Cash<->Bank transfer — see reports.py's own daily_cash_activity()
+// docstring for why it's never folded into in/out. Only the
+// "mutation" rows carry from_account_code/to_account_code; only
+// "in"/"out" rows carry account_code/account_name — TypeScript can't
+// express that split cleanly without a discriminated union, so both
+// sets of fields are optional here and the UI branches on
+// `direction` to know which are actually present.
+export type DailyCashActivityDirection = "in" | "out" | "mutation";
+
+export interface DailyCashActivityRow {
+  journal_entry_id: string;
+  entry_number: string;
+  posting_date: string;
+  created_at: string;
+  event_type: string;
+  category: string;
+  memo: string;
+  direction: DailyCashActivityDirection;
+  amount: string | number;
+  // Present only when direction is "in" or "out".
+  account_code?: string;
+  account_name?: string;
+  // Present only when direction is "mutation".
+  from_account_code?: string;
+  from_account_name?: string;
+  to_account_code?: string;
+  to_account_name?: string;
+}
+
+export interface DailyCashActivityResponse {
+  date: string;
+  activities: DailyCashActivityRow[];
+  total_in: string | number;
+  total_out: string | number;
+  net_cash: string | number;
+  in_count: number;
+  out_count: number;
+  mutation_count: number;
+}
+
 async function getOrNull<T>(url: string, params: Record<string, string | undefined>): Promise<T | null> {
   try {
     const { data } = await api.get(url, { params });
@@ -288,6 +330,12 @@ export const accountingApi = {
 
   dashboardFinancialSummary: (asOf?: string) =>
     getOrNull<DashboardFinancialSummaryResponse>("/api/accounting/dashboard-financial-summary/", { as_of: asOf }),
+
+  // 1 Sep 2026 — Kas Harian. `date` defaults server-side to today
+  // when omitted, same convention as every other as_of-style param
+  // on this page.
+  dailyCashActivity: (date?: string) =>
+    getOrNull<DailyCashActivityResponse>("/api/accounting/daily-cash-activity/", { date }),
 
   journalEntries: (opts?: { source?: JournalSource; since?: string; asOf?: string }) =>
     getListOrNull<JournalEntryRow>("/api/accounting/journal-entries/", "journal_entries", {
