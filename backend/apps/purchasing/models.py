@@ -1132,6 +1132,12 @@ class QuickPurchase(TenantScopedModel):
                 organization_id=organization.id,
                 quick_purchase_id=qp.id,
                 supplier_id=supplier.id,
+                # 2 Sep 2026 — real UX fix: `supplier` is the exact
+                # same object already used two lines above to create
+                # qp itself — no extra query, just threading a value
+                # already in hand. See QuickPurchaseRecorded's own
+                # docstring.
+                supplier_name=supplier.name,
                 payment_method=payment_method,
                 amount=total_cost,
                 line_item_count=len(line_items),

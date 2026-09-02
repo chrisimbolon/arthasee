@@ -24,6 +24,15 @@ confirmed request while designing the Kas Harian dashboard. Mirrors
 OperatingExpense's own skeleton exactly — same numbered-document
 pattern, same "one classmethod is the only real entry point"
 discipline.
+
+2 Sep 2026 — Payment.record()/SupplierPayment.record()/
+OperatingExpense.record() now thread a real display name
+(customer_name/supplier_name/account_name) into their own published
+event — real UX gap found on the Kas Harian dashboard: every memo
+across the whole posting matrix was built from a raw ID, meaningless
+in a friendly, owner-facing view. No new queries — each name was
+already reachable off data already in hand at the point of
+publishing.
 """
 import uuid
 from decimal import Decimal
@@ -128,6 +137,11 @@ class Payment(TenantScopedModel):
                 payment_id=payment.id,
                 amount=amount,
                 method=method,
+                # 2 Sep 2026 — real UX fix: an already-frozen snapshot
+                # field on Invoice, threaded one hop further into the
+                # event payload — no new query, no new source of
+                # truth. See PaymentReceived's own docstring.
+                customer_name=invoice.customer_name_snapshot,
             ))
 
             if invoice.balance_due <= Decimal("0"):
@@ -317,6 +331,12 @@ class SupplierPayment(TenantScopedModel):
                 supplier_payment_id=payment.id,
                 amount=amount,
                 method=method,
+                # 2 Sep 2026 — real UX fix: no existing snapshot field
+                # for this one (unlike Invoice's own
+                # customer_name_snapshot), so a live read at the
+                # moment of payment, captured once. See
+                # SupplierPaymentMade's own docstring.
+                supplier_name=supplier_invoice.supplier.name,
             ))
 
         return payment
@@ -472,6 +492,11 @@ class OperatingExpense(TenantScopedModel):
                 organization_id=organization.id,
                 operating_expense_id=expense.id,
                 account_code=account.code,
+                # 2 Sep 2026 — real UX fix: already resolved above to
+                # validate account_type/6004-exclusion — no extra
+                # query, just threading a value already in hand. See
+                # OperatingExpenseRecorded's own docstring.
+                account_name=account.name,
                 method=method,
                 amount=amount,
                 # 28 Aug 2026 — real bug fix: the real, user-chosen
