@@ -12,10 +12,14 @@ import { usePathname } from "next/navigation";
 // Journal for a recurring operating cost.
 // 29 Aug 2026 — /assets added: real fixed asset register & automated
 // depreciation, Made's own confirmed request.
+// 1 Sep 2026 — /kas-harian added: Kas Harian, a plain-language daily
+// cash view distinct from /journal (which stays exactly as-is,
+// audit-grade, untouched) — Made's own confirmed real request.
 const SUBNAV = [
   { href: "/dashboard/accounting/reports",  label: "Laporan" },
   { href: "/dashboard/accounting/accounts", label: "Daftar Akun" },
   { href: "/dashboard/accounting/journal",  label: "Jurnal" },
+  { href: "/dashboard/accounting/kas-harian", label: "Kas Harian" },
   { href: "/dashboard/accounting/operating-expenses", label: "Beban Operasional" },
   { href: "/dashboard/accounting/assets", label: "Aset Tetap" },
 ];
