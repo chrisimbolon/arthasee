@@ -6,10 +6,11 @@ from django.urls import path
 from .views import (AccountingPeriodCloseView, AccountingPeriodListView,
                     AccountingPeriodReopenView, AgingAPView, AgingARView,
                     AssetListCreateView, BalanceSheetView,
-                    CashConversionCycleView, DashboardFinancialSummaryView,
-                    DepreciationRunDetailView, FailedPostingsView,
-                    JournalEntryListView, ManualJournalListCreateView,
-                    ProfitLossView, TrialBalanceView)
+                    CashConversionCycleView, DailyCashActivityView,
+                    DashboardFinancialSummaryView, DepreciationRunDetailView,
+                    FailedPostingsView, JournalEntryListView,
+                    ManualJournalListCreateView, ProfitLossView,
+                    TrialBalanceView)
 
 urlpatterns = [
     path("trial-balance/",   TrialBalanceView.as_view(),           name="trial-balance"),
@@ -18,7 +19,9 @@ urlpatterns = [
     path("cash-conversion-cycle/", CashConversionCycleView.as_view(), name="cash-conversion-cycle"),
     path("aging-ar/",        AgingARView.as_view(),                name="aging-ar"),
     path("aging-ap/",        AgingAPView.as_view(),                name="aging-ap"),
-    path("dashboard-financial-summary/", DashboardFinancialSummaryView.as_view(), name="dashboard-financial-summary"),    
+    path("dashboard-financial-summary/", DashboardFinancialSummaryView.as_view(), name="dashboard-financial-summary"),
+    # 1 Sep 2026 — Kas Harian, Made's own confirmed real request.
+    path("daily-cash-activity/", DailyCashActivityView.as_view(), name="daily-cash-activity"),
     path("manual-journals/", ManualJournalListCreateView.as_view(), name="manual-journal-list-create"),
     path("journal-entries/", JournalEntryListView.as_view(),       name="journal-entry-list"),
     path("failed-postings/", FailedPostingsView.as_view(),         name="failed-postings-list"),

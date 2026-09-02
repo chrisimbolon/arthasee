@@ -11,7 +11,9 @@ owner-only), and Task 5.2's two read-only audit views (general
 journal-entry listing, and the failed-postings view — the real point
 of Task 5.2). 28 Aug 2026 adds a fourth kind — real month-end period
 control (list/close/reopen), Made's own confirmed requirement via his
-tax & accounting consultant.
+tax & accounting consultant. 1 Sep 2026 adds DailyCashActivityView —
+Kas Harian, a point-in-day reporting view following the exact same
+thin-view-calls-reports.py shape as every other read-only view here.
 """
 from datetime import date
 
@@ -185,6 +187,33 @@ class DashboardFinancialSummaryView(TenantScopedAPIView):
         as_of = _parse_date(request.query_params.get("as_of"))
         data = reports.dashboard_financial_summary(organization, as_of=as_of)
         return Response({"success": True, **data})
+
+
+class DailyCashActivityView(TenantScopedAPIView):
+    """
+    GET /api/accounting/daily-cash-activity/?date=YYYY-MM-DD
+    1 Sep 2026 — Kas Harian. A single-DAY snapshot, not a range —
+    `date` defaults to today, same "no `since`" shape as
+    DashboardFinancialSummaryView above. Purpose-built for the
+    /dashboard/accounting/kas-harian page and the Ringkasan "Kas
+    Hari Ini" card; deliberately separate from JournalEntryListView
+    — that view is the full audit-grade Jurnal page (every source,
+    every event type, date-range filterable); this one is the
+    friendly, Cash/Bank-only, single-day lens reports.py's own
+    daily_cash_activity() builds specifically for a shop owner.
+    """
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        on_date = _parse_date(request.query_params.get("date"), default=date.today())
+        data = reports.daily_cash_activity(organization, on_date=on_date)
+        return Response({"success": True, **data})
+
 
 _CONTROL_ACCOUNT_CODES = {"1201", "2001"}
 
