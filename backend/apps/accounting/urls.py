@@ -9,7 +9,19 @@ from .views import (AccountingPeriodCloseView, AccountingPeriodListView,
                     CashConversionCycleView, DailyCashActivityView,
                     DashboardFinancialSummaryView, DepreciationRunDetailView,
                     FailedPostingsView, JournalEntryListView,
-                    ManualJournalListCreateView, ProfitLossView,
+                    ManualJournalListCreateView,
+                    OpeningBalanceAssetLineDetailView,
+                    OpeningBalanceAssetLineListCreateView,
+                    OpeningBalanceCashLineView,
+                    OpeningBalanceOtherLineDetailView,
+                    OpeningBalanceOtherLineListCreateView,
+                    OpeningBalancePartLineDetailView,
+                    OpeningBalancePartLineListCreateView,
+                    OpeningBalancePayableDetailView,
+                    OpeningBalancePayableListCreateView,
+                    OpeningBalancePostView, OpeningBalanceReceivableDetailView,
+                    OpeningBalanceReceivableListCreateView,
+                    OpeningBalanceSessionView, ProfitLossView,
                     TrialBalanceView)
 
 urlpatterns = [
@@ -34,4 +46,25 @@ urlpatterns = [
     # depreciation, Made's own confirmed request.
     path("assets/", AssetListCreateView.as_view(), name="asset-list-create"),
     path("periods/<uuid:period_id>/depreciation-run/", DepreciationRunDetailView.as_view(), name="depreciation-run-detail"),
+    # 3 Sep 2026 — Opening Balance onboarding, Sansan's own canonical
+    # onboarding proposal (meticulously reviewed and revised before
+    # any of this was built — see models.py's own module docstring).
+    # Session create/read/post are owner-only, real-model-owns-the-
+    # logic thin views, same discipline as the period-close endpoints
+    # above; the six line-item endpoints underneath are open to any
+    # authenticated org member — see views.py's own module docstring
+    # for why data entry and the final post carry different stakes.
+    path("opening-balance/",               OpeningBalanceSessionView.as_view(),         name="opening-balance-session"),
+    path("opening-balance/post/",          OpeningBalancePostView.as_view(),            name="opening-balance-post"),
+    path("opening-balance/cash/",          OpeningBalanceCashLineView.as_view(),        name="opening-balance-cash"),
+    path("opening-balance/parts/",         OpeningBalancePartLineListCreateView.as_view(), name="opening-balance-part-list-create"),
+    path("opening-balance/parts/<uuid:pk>/", OpeningBalancePartLineDetailView.as_view(), name="opening-balance-part-detail"),
+    path("opening-balance/assets/",        OpeningBalanceAssetLineListCreateView.as_view(), name="opening-balance-asset-list-create"),
+    path("opening-balance/assets/<uuid:pk>/", OpeningBalanceAssetLineDetailView.as_view(), name="opening-balance-asset-detail"),
+    path("opening-balance/receivables/",   OpeningBalanceReceivableListCreateView.as_view(), name="opening-balance-receivable-list-create"),
+    path("opening-balance/receivables/<uuid:pk>/", OpeningBalanceReceivableDetailView.as_view(), name="opening-balance-receivable-detail"),
+    path("opening-balance/payables/",      OpeningBalancePayableListCreateView.as_view(), name="opening-balance-payable-list-create"),
+    path("opening-balance/payables/<uuid:pk>/", OpeningBalancePayableDetailView.as_view(), name="opening-balance-payable-detail"),
+    path("opening-balance/other/",         OpeningBalanceOtherLineListCreateView.as_view(), name="opening-balance-other-list-create"),
+    path("opening-balance/other/<uuid:pk>/", OpeningBalanceOtherLineDetailView.as_view(), name="opening-balance-other-detail"),
 ]
