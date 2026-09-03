@@ -297,14 +297,29 @@ class WorkOrder(TenantScopedModel):
     def is_overdue(self):
         """
         Made's own literal example: a job taking longer than expected
-        (his case — oil change + brake pads over 2 hours). Only
-        meaningful while genuinely IN_PROGRESS with a real
+        (his case — oil change + brake pads over 2 hours). Meaningful
+        while genuinely IN_PROGRESS OR in QC, with a real
         work_started_at on record — a WorkOrder still OPEN hasn't
         started yet (nothing to be "overdue" against), and one that's
         DONE/CANCELLED is finished, not overdue. Computed on read,
         never stored — same discipline as Vehicle.is_due_for_service.
+
+        3 Sep 2026 — QC added to the eligible statuses, Made's own
+        confirmed real dashboard fix: a vehicle stuck in QC past its
+        promised/expected time is exactly the kind of bottleneck this
+        property exists to surface, not a state where "overdue" stops
+        meaning anything. Before this, DashboardSummaryView's own
+        in_progress_qs was widened to COUNT a QC job under
+        "Dikerjakan," but its overdue-alert list still silently
+        excluded every QC job — this property itself was the actual
+        gate, and it hard-coded IN_PROGRESS only. work_started_at
+        itself is unaffected — still set once, the moment a WorkOrder
+        first reaches IN_PROGRESS (see mark_started()), and never
+        reset by the later IN_PROGRESS -> QC transition, so "how long
+        has this job been open" keeps meaning the same real thing in
+        both states.
         """
-        if self.status != "IN_PROGRESS" or self.work_started_at is None:
+        if self.status not in ("IN_PROGRESS", "QC") or self.work_started_at is None:
             return False
         elapsed_hours = (timezone.now() - self.work_started_at).total_seconds() / 3600
         return elapsed_hours >= DEFAULT_DURATION_ALERT_HOURS
