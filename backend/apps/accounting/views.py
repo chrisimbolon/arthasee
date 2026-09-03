@@ -14,6 +14,15 @@ control (list/close/reopen), Made's own confirmed requirement via his
 tax & accounting consultant. 1 Sep 2026 adds DailyCashActivityView —
 Kas Harian, a point-in-day reporting view following the exact same
 thin-view-calls-reports.py shape as every other read-only view here.
+
+3 Sep 2026 adds a fifth kind — Opening Balance onboarding. Session
+create/read/post follow the owner-only, real-model-method-owns-the-
+logic discipline AccountingPeriodCloseView already established; the
+six line-item endpoints underneath are open to any authenticated
+member of the org (data entry during onboarding doesn't need to be
+owner-only — only CREATING the session and the final, irreversible
+POST do, matching the stakes of each action rather than gating
+everything uniformly).
 """
 from datetime import date
 
@@ -24,11 +33,28 @@ from rest_framework.response import Response
 
 from . import reports
 from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
-                     JournalEntry)
+                     JournalEntry, OpeningBalanceAssetLine,
+                     OpeningBalanceCashLine, OpeningBalanceOtherLine,
+                     OpeningBalancePartLine, OpeningBalancePayable,
+                     OpeningBalanceReceivable, OpeningBalanceSession)
 from .serializers import (AccountingPeriodSerializer, AssetRecordSerializer,
                           AssetSerializer, DepreciationRunSerializer,
                           FailedPostingSerializer, JournalEntrySerializer,
-                          ManualJournalRecordSerializer)
+                          ManualJournalRecordSerializer,
+                          OpeningBalanceAssetLineRecordSerializer,
+                          OpeningBalanceAssetLineSerializer,
+                          OpeningBalanceCashLineRecordSerializer,
+                          OpeningBalanceCashLineSerializer,
+                          OpeningBalanceOtherLineRecordSerializer,
+                          OpeningBalanceOtherLineSerializer,
+                          OpeningBalancePartLineRecordSerializer,
+                          OpeningBalancePartLineSerializer,
+                          OpeningBalancePayableRecordSerializer,
+                          OpeningBalancePayableSerializer,
+                          OpeningBalanceReceivableRecordSerializer,
+                          OpeningBalanceReceivableSerializer,
+                          OpeningBalanceSessionRecordSerializer,
+                          OpeningBalanceSessionSerializer)
 
 
 def _parse_date(value, default=None):
@@ -504,3 +530,474 @@ class DepreciationRunDetailView(TenantScopedAPIView):
         if run is None:
             return Response({"success": True, "depreciation_run": None})
         return Response({"success": True, "depreciation_run": DepreciationRunSerializer(run).data})
+
+
+# =============================================================================
+# Opening Balance — new-workshop onboarding (3 Sep 2026)
+# =============================================================================
+
+def _get_draft_session_or_response(organization):
+    """
+    Shared helper for every line-item endpoint below — resolves the
+    org's one real OpeningBalanceSession and confirms it's still
+    DRAFT (line items can never be added/removed once POSTED — as
+    immutable as any other posted history in this codebase). Returns
+    (session, None) on success, or (None, Response) with the real
+    error already built — callers do:
+
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+    """
+    session = OpeningBalanceSession.objects.filter(organization=organization).first()
+    if session is None:
+        return None, Response(
+            {"success": False, "message": "Sesi saldo awal belum dibuat — buat sesi terlebih dahulu."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    if session.status != OpeningBalanceSession.Status.DRAFT:
+        return None, Response(
+            {"success": False, "message": "Sesi saldo awal ini sudah diposting — tidak bisa diubah lagi."},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return session, None
+
+
+class OpeningBalanceSessionView(TenantScopedAPIView):
+    """
+    GET  /api/accounting/opening-balance/  — the org's one real
+         session, fully nested with every line item across all six
+         categories plus live total_debit/total_credit/is_balanced —
+         returns opening_balance_session: null (not a 404) when none
+         exists yet, same real, honest "hasn't happened yet" state
+         DepreciationRunDetailView's own null response already
+         establishes above.
+    POST /api/accounting/opening-balance/  — creates the org's one
+         real session (start_date only — every line item is added
+         afterward via its own endpoint below). Owner-only — this
+         establishes the entire accounting foundation for the shop,
+         same real stakes as closing a period.
+
+    prefetch_related() on GET covers all six line-item relations
+    (plus customer/supplier for the two categories that need a
+    real name) — required so OpeningBalanceSessionSerializer's own
+    total_debit/total_credit computation doesn't N+1 query; see that
+    serializer's own docstring for why this is explicitly the view's
+    job, not something the serializer can own itself.
+    """
+    model = OpeningBalanceSession
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session = (
+            OpeningBalanceSession.objects
+            .filter(organization=organization)
+            .prefetch_related(
+                "cash_lines", "part_lines", "asset_lines",
+                "receivable_lines__customer", "payable_lines__supplier", "other_lines",
+            )
+            .first()
+        )
+        if session is None:
+            return Response({"success": True, "opening_balance_session": None})
+        return Response({"success": True, "opening_balance_session": OpeningBalanceSessionSerializer(session).data})
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa memulai sesi saldo awal."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if OpeningBalanceSession.objects.filter(organization=organization).exists():
+            return Response(
+                {"success": False, "message": "Sesi saldo awal untuk organisasi ini sudah pernah dibuat."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        input_serializer = OpeningBalanceSessionRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        session = OpeningBalanceSession.objects.create(
+            organization=organization, start_date=data["start_date"], created_by=request.user,
+        )
+        return Response(
+            {"success": True, "opening_balance_session": OpeningBalanceSessionSerializer(session).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OpeningBalancePostView(TenantScopedAPIView):
+    """
+    POST /api/accounting/opening-balance/post/
+    The real, final, irreversible action — owner-only, same stakes
+    as AccountingPeriodCloseView. All real logic lives in
+    OpeningBalanceSession.post() itself (models.py) — this view is
+    thin, same discipline as every other real write path here.
+    """
+    model = OpeningBalanceSession
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa memposting saldo awal."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        session = OpeningBalanceSession.objects.filter(organization=organization).first()
+        if session is None:
+            return Response(
+                {"success": False, "message": "Sesi saldo awal belum dibuat."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            session.post(posted_by=request.user)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        session.refresh_from_db()
+        return Response({"success": True, "opening_balance_session": OpeningBalanceSessionSerializer(session).data})
+
+
+class OpeningBalanceCashLineView(TenantScopedAPIView):
+    """
+    PUT /api/accounting/opening-balance/cash/
+    Real upsert, not create — mirrors SupplierPartCode.set_code()'s
+    own real update_or_create precedent, matching the model's own
+    unique_together(session, account_code): a second PUT for the
+    same account_code updates the existing amount rather than
+    erroring or silently creating a duplicate row.
+    """
+    model = OpeningBalanceCashLine
+
+    def put(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        input_serializer = OpeningBalanceCashLineRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        line, _ = OpeningBalanceCashLine.objects.update_or_create(
+            organization=organization, session=session, account_code=data["account_code"],
+            defaults={"amount": data["amount"]},
+        )
+        return Response({"success": True, "cash_line": OpeningBalanceCashLineSerializer(line).data})
+
+
+class OpeningBalancePartLineListCreateView(TenantScopedAPIView):
+    """POST /api/accounting/opening-balance/parts/ — add one itemized opening-stock line."""
+    model = OpeningBalancePartLine
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        input_serializer = OpeningBalancePartLineRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        line = OpeningBalancePartLine.objects.create(
+            organization=organization, session=session,
+            part_name=data["part_name"], sku=data.get("sku", ""), unit=data.get("unit", "pcs"),
+            quantity=data["quantity"], cost_price=data["cost_price"],
+        )
+        return Response(
+            {"success": True, "part_line": OpeningBalancePartLineSerializer(line).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OpeningBalancePartLineDetailView(TenantScopedAPIView):
+    """
+    DELETE /api/accounting/opening-balance/parts/<pk>/ — remove one
+    line while the session is still DRAFT. Looked up via a direct,
+    self-contained queryset filter (organization + session scoped)
+    rather than self.get_object(pk) — deliberate: this codebase's
+    real get_object() behavior on a miss (None vs. raising Http404)
+    wasn't available to verify while writing this, so a directly
+    controlled lookup is the safer choice here.
+    """
+    model = OpeningBalancePartLine
+
+    def delete(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        line = OpeningBalancePartLine.objects.filter(organization=organization, session=session, pk=pk).first()
+        if line is None:
+            return Response({"success": False, "message": "Baris tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        line.delete()
+        return Response({"success": True})
+
+
+class OpeningBalanceAssetLineListCreateView(TenantScopedAPIView):
+    """POST /api/accounting/opening-balance/assets/ — add one legacy fixed-asset line."""
+    model = OpeningBalanceAssetLine
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        input_serializer = OpeningBalanceAssetLineRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        line = OpeningBalanceAssetLine.objects.create(
+            organization=organization, session=session, name=data["name"],
+            current_book_value=data["current_book_value"],
+            remaining_useful_life_months=data["remaining_useful_life_months"],
+        )
+        return Response(
+            {"success": True, "asset_line": OpeningBalanceAssetLineSerializer(line).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OpeningBalanceAssetLineDetailView(TenantScopedAPIView):
+    """DELETE /api/accounting/opening-balance/assets/<pk>/ — same shape as the Part detail view above."""
+    model = OpeningBalanceAssetLine
+
+    def delete(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        line = OpeningBalanceAssetLine.objects.filter(organization=organization, session=session, pk=pk).first()
+        if line is None:
+            return Response({"success": False, "message": "Baris tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        line.delete()
+        return Response({"success": True})
+
+
+class OpeningBalanceReceivableListCreateView(TenantScopedAPIView):
+    """
+    POST /api/accounting/opening-balance/receivables/ — add one
+    legacy customer receivable. customer is resolved against this
+    org's own real Customer rows — never trusted as a bare
+    cross-tenant lookup, same discipline as every other real FK
+    resolution in this codebase.
+    """
+    model = OpeningBalanceReceivable
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        input_serializer = OpeningBalanceReceivableRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        from apps.service.models import Customer
+        customer = Customer.objects.filter(organization=organization, pk=data["customer"]).first()
+        if customer is None:
+            return Response({"success": False, "message": "Pelanggan tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        line = OpeningBalanceReceivable.objects.create(
+            organization=organization, session=session, customer=customer,
+            balance_due=data["balance_due"], due_date=data.get("due_date"),
+            reference=data.get("reference", ""),
+        )
+        return Response(
+            {"success": True, "receivable_line": OpeningBalanceReceivableSerializer(line).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OpeningBalanceReceivableDetailView(TenantScopedAPIView):
+    """DELETE /api/accounting/opening-balance/receivables/<pk>/"""
+    model = OpeningBalanceReceivable
+
+    def delete(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        line = OpeningBalanceReceivable.objects.filter(organization=organization, session=session, pk=pk).first()
+        if line is None:
+            return Response({"success": False, "message": "Baris tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        line.delete()
+        return Response({"success": True})
+
+
+class OpeningBalancePayableListCreateView(TenantScopedAPIView):
+    """Mirrors OpeningBalanceReceivableListCreateView exactly, inverted for suppliers."""
+    model = OpeningBalancePayable
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        input_serializer = OpeningBalancePayableRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        from apps.purchasing.models import Supplier
+        supplier = Supplier.objects.filter(organization=organization, pk=data["supplier"]).first()
+        if supplier is None:
+            return Response({"success": False, "message": "Supplier tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        line = OpeningBalancePayable.objects.create(
+            organization=organization, session=session, supplier=supplier,
+            balance_due=data["balance_due"], due_date=data.get("due_date"),
+            reference=data.get("reference", ""),
+        )
+        return Response(
+            {"success": True, "payable_line": OpeningBalancePayableSerializer(line).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OpeningBalancePayableDetailView(TenantScopedAPIView):
+    """DELETE /api/accounting/opening-balance/payables/<pk>/"""
+    model = OpeningBalancePayable
+
+    def delete(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        line = OpeningBalancePayable.objects.filter(organization=organization, session=session, pk=pk).first()
+        if line is None:
+            return Response({"success": False, "message": "Baris tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        line.delete()
+        return Response({"success": True})
+
+
+class OpeningBalanceOtherLineListCreateView(TenantScopedAPIView):
+    """
+    POST /api/accounting/opening-balance/other/ — the deliberate,
+    honest escape hatch (Owner Capital itself lands here, along with
+    Loans, Tax Payable, or any other non-itemizable category).
+    account_code is NOT validated against a real Account at this
+    layer — same "collect first, validate everything together at
+    post() time" shape as the model's own OpeningBalanceOtherLine
+    docstring establishes; a genuinely invalid code only ever
+    surfaces as a real, clear error from
+    OpeningBalanceSession.post() itself.
+    """
+    model = OpeningBalanceOtherLine
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        input_serializer = OpeningBalanceOtherLineRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        line = OpeningBalanceOtherLine.objects.create(
+            organization=organization, session=session, account_code=data["account_code"],
+            side=data["side"], amount=data["amount"], description=data.get("description", ""),
+        )
+        return Response(
+            {"success": True, "other_line": OpeningBalanceOtherLineSerializer(line).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OpeningBalanceOtherLineDetailView(TenantScopedAPIView):
+    """DELETE /api/accounting/opening-balance/other/<pk>/"""
+    model = OpeningBalanceOtherLine
+
+    def delete(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        line = OpeningBalanceOtherLine.objects.filter(organization=organization, session=session, pk=pk).first()
+        if line is None:
+            return Response({"success": False, "message": "Baris tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        line.delete()
+        return Response({"success": True})
