@@ -1867,6 +1867,40 @@ class WorkOrderIsOverdueTests(WorkOrderAPITestBase):
         self.wo.save(update_fields=["status", "work_started_at"])
         self.assertFalse(self.wo.is_overdue)
 
+    def test_qc_status_past_threshold_is_overdue(self):
+        """
+        3 Sep 2026 — real fix, Made's own confirmed second call on
+        the same QC-dashboard incident: a vehicle stuck in QC past
+        its promised time is exactly the kind of bottleneck this
+        property exists to surface. Before this fix, is_overdue
+        hard-coded status != "IN_PROGRESS" — a job that had genuinely
+        moved on to QC could never be overdue no matter how long it
+        sat there, contradicting the same real-world urgency
+        IN_PROGRESS already gets flagged for.
+        """
+        self.wo.status = "QC"
+        self.wo.work_started_at = timezone.now() - timedelta(hours=3)
+        self.wo.save(update_fields=["status", "work_started_at"])
+        self.assertTrue(self.wo.is_overdue)
+
+    def test_qc_status_recently_entered_is_not_yet_overdue(self):
+        self.wo.status = "QC"
+        self.wo.work_started_at = timezone.now() - timedelta(minutes=30)
+        self.wo.save(update_fields=["status", "work_started_at"])
+        self.assertFalse(self.wo.is_overdue)
+
+    def test_qc_status_with_no_work_started_at_is_not_overdue(self):
+        """
+        Same real precondition as the IN_PROGRESS case above — a
+        WorkOrder that somehow reached QC with no work_started_at on
+        record (e.g. a direct-entry job with no Estimate origin, per
+        mark_started()'s own no-op rule) can't be "overdue" against a
+        duration that was never captured.
+        """
+        self.wo.status = "QC"
+        self.wo.save(update_fields=["status"])
+        self.assertFalse(self.wo.is_overdue)
+
 
 class WorkOrderStageIsOverdueTests(WorkOrderAPITestBase):
 
@@ -2038,6 +2072,24 @@ class DashboardSummaryTests(WorkOrderAPITestBase):
         self.assertEqual(resp.data["work_orders"]["queued"], 1)
         self.assertEqual(resp.data["work_orders"]["in_progress"], 1)
 
+    def test_qc_status_counts_as_in_progress(self):
+        """
+        3 Sep 2026 — real bug fix, found live: a WorkOrder in QC used
+        to be counted in NEITHER bucket, contradicting
+        OPEN_STATUSES' own definition (which already treats QC as a
+        peer of OPEN/IN_PROGRESS, not a separate state). Made's own
+        confirmed call: QC still occupies a bay and real shop
+        capacity, so it belongs under "Dikerjakan" (in_progress),
+        same as IN_PROGRESS.
+        """
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo.status = "QC"
+        wo.save(update_fields=["status"])
+
+        resp = self.client.get("/api/dashboard/summary/")
+        self.assertEqual(resp.data["work_orders"]["queued"], 0)
+        self.assertEqual(resp.data["work_orders"]["in_progress"], 1)
+
     def test_vehicles_cleared_counts_only_done_work_orders_in_period(self):
         wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
         self._ready_to_close(wo)
@@ -2062,6 +2114,37 @@ class DashboardSummaryTests(WorkOrderAPITestBase):
         overdue_ids = [item["id"] for item in resp.data["overdue"]["work_orders"]]
         self.assertIn(str(wo.id), overdue_ids)
         self.assertNotIn(str(not_overdue.id), overdue_ids)
+
+    def test_qc_work_order_appears_in_overdue_list_when_past_threshold(self):
+        """
+        3 Sep 2026 — the real end-to-end proof of Made's second
+        confirmed call on this same fix: a vehicle stuck in QC past
+        its promised time must surface on the dashboard's own overdue
+        alert, same as an IN_PROGRESS one — no special guard
+        excluding it. This is the actual regression test for the gap
+        found live while writing this coverage: widening
+        DashboardSummaryView's in_progress_qs alone was NOT enough —
+        WorkOrder.is_overdue itself still hard-coded IN_PROGRESS only
+        and silently dropped every QC job from this exact list.
+        """
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo.status = "QC"
+        wo.work_started_at = timezone.now() - timedelta(hours=3)
+        wo.save(update_fields=["status", "work_started_at"])
+
+        resp = self.client.get("/api/dashboard/summary/")
+        overdue_ids = [item["id"] for item in resp.data["overdue"]["work_orders"]]
+        self.assertIn(str(wo.id), overdue_ids)
+
+    def test_qc_work_order_recently_entered_is_not_yet_overdue_via_api(self):
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        wo.status = "QC"
+        wo.work_started_at = timezone.now() - timedelta(minutes=10)
+        wo.save(update_fields=["status", "work_started_at"])
+
+        resp = self.client.get("/api/dashboard/summary/")
+        overdue_ids = [item["id"] for item in resp.data["overdue"]["work_orders"]]
+        self.assertNotIn(str(wo.id), overdue_ids)
 
     def test_overdue_stages_list_respects_expected_duration_override(self):
         wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
