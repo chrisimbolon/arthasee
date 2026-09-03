@@ -95,10 +95,17 @@ echo "=== Granting privileges to $APP_ROLE ==="
 "$PSQL_BIN" -U "$DB_OWNER" -d "$DB_NAME" -c "GRANT ALL ON SCHEMA public TO $APP_ROLE;"
 
 echo "=== Running migrations ==="
-(cd "$BACKEND_DIR" && python manage.py migrate)
+if [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
+  PYTHON_BIN="$BACKEND_DIR/.venv/bin/python"
+else
+  echo "❌ No venv found at $BACKEND_DIR/.venv — refusing to fall back to a bare 'python'"
+  echo "❌ (a fresh script subshell has no activated venv, even if your interactive shell does)."
+  exit 1
+fi
+(cd "$BACKEND_DIR" && "$PYTHON_BIN" manage.py migrate)
 
 echo "=== Verifying the database is genuinely empty ==="
-ORG_COUNT=$(cd "$BACKEND_DIR" && python manage.py shell -c "
+ORG_COUNT=$(cd "$BACKEND_DIR" && "$PYTHON_BIN" manage.py shell -c "
 from apps.organizations.models import Organization
 print(Organization.objects.count())
 " | tail -n 1)
