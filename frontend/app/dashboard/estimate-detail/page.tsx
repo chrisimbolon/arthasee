@@ -110,7 +110,7 @@ function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid var(--line)" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid var(--line)" }}>
         <div>
           <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>Pelanggan</div>
           <div style={{ fontSize: 15, fontWeight: 600 }}>{estimate.customer_name}</div>
@@ -118,6 +118,18 @@ function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName
         <div>
           <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>Nomor Plat</div>
           <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{estimate.vehicle_plate}</div>
+        </div>
+        {/* 3 Sep 2026 — KM Saat Masuk added to the printed/PDF
+            quotation, matching OdometerCard's own real field
+            (estimate.odometer_km_intake) — the data already existed,
+            captured at intake, it just never made it onto the actual
+            document a customer sees. Nullable, same "—" fallback
+            OdometerCard's own read-only view already uses. */}
+        <div>
+          <div style={{ fontSize: 11, color: "var(--steel)", textTransform: "uppercase" }}>KM Saat Masuk</div>
+          <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>
+            {estimate.odometer_km_intake != null ? `${estimate.odometer_km_intake.toLocaleString("id-ID")} km` : "—"}
+          </div>
         </div>
       </div>
 
