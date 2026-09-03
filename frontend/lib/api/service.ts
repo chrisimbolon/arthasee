@@ -54,6 +54,8 @@ export interface ServiceRecord {
   // went through the estimate flow. Purely a reference point at
   // invoice-creation time, never enforced against the real invoice.
   original_estimate_total: string | null;
+  estimate_id:     string | null;
+  estimate_number: string | null;
   // Set when this record was produced by WorkOrder.close() — null
   // for any record predating WorkOrder, or created some other way in
   // the future. Drives the "WO #N" link on the Riwayat Servis card,

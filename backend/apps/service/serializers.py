@@ -42,6 +42,20 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
     # never stored), so this is read-only all the way down.
     invoice_total      = serializers.SerializerMethodField()
     original_estimate_total = serializers.SerializerMethodField()
+    # 3 Sep 2026 — real UX gap found live: once a WorkOrder progresses
+    # (or an Estimate's quotation needs re-checking against what was
+    # actually charged), there was no way back to the original
+    # Estimate document from the Riwayat Servis timeline — only its
+    # TOTAL was ever surfaced (original_estimate_total above), never
+    # its ID/number to actually link to. Same getattr-on-reverse-
+    # OneToOne traversal that field already proves out
+    # (ServiceRecord -> WorkOrder -> Estimate, entirely via reverse
+    # accessors) — this is the exact same chain, just returning the
+    # estimate's own identity instead of a computed sum. No schema
+    # change: Estimate.work_order (a real OneToOneField, related_name
+    # "estimate") already makes this reverse link free.
+    estimate_id     = serializers.SerializerMethodField()
+    estimate_number = serializers.SerializerMethodField()
     # Sansan's "two disconnected sections" review, resolved: rather
     # than merging WorkOrder/ServiceRecord into one data model (which
     # was explicitly ruled out — see PROJECT_STATE, "existing
@@ -61,12 +75,14 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
             "id", "vehicle", "service_date", "odometer_km",
             "issue_description", "parts_replaced", "notes", "part_usages",
             "invoice_id", "invoice_total", "original_estimate_total",
+            "estimate_id", "estimate_number",
             "work_order_id", "work_order_number",
             "created_by", "created_by_name", "created_at",
         ]
         read_only_fields = [
             "id", "created_by", "created_by_name", "created_at",
             "part_usages", "invoice_id", "invoice_total", "original_estimate_total",
+            "estimate_id", "estimate_number",
             "work_order_id", "work_order_number",
         ]
 
@@ -80,26 +96,38 @@ class ServiceRecordSerializer(serializers.ModelSerializer):
             for pu in obj.part_usages.select_related("part").all()
         ]
 
-    def get_original_estimate_total(self, obj):
-        # Traces ServiceRecord -> WorkOrder -> Estimate entirely via
-        # reverse accessors (WorkOrder.service_record and
-        # Estimate.work_order are both the forward side of their
-        # OneToOneFields) — apps.service imports nothing from
-        # apps.workorders or apps.estimates to do this. getattr with
-        # a default is the correct way to probe each reverse
-        # OneToOne: Django's RelatedObjectDoesNotExist is deliberately
-        # a subclass of AttributeError specifically so this works,
-        # for a record that never went through a Work Order at all,
-        # or one that did but was never quoted first (both entirely
-        # normal — this field surfaces the reference only when it
-        # genuinely exists, never fabricates one).
+    def _get_estimate(self, obj):
+        # Shared traversal — same reverse-accessor chain
+        # get_original_estimate_total already established, factored
+        # out so estimate_id/estimate_number don't each re-walk it
+        # independently. getattr with a default is the correct way
+        # to probe each reverse OneToOne: Django's
+        # RelatedObjectDoesNotExist is deliberately a subclass of
+        # AttributeError specifically so this works, for a record
+        # that never went through a Work Order at all, or one that
+        # did but was never quoted first (both entirely normal).
         work_order = getattr(obj, "work_order", None)
         if work_order is None:
             return None
-        estimate = getattr(work_order, "estimate", None)
+        return getattr(work_order, "estimate", None)
+
+    def get_original_estimate_total(self, obj):
+        estimate = self._get_estimate(obj)
         if estimate is None:
             return None
         return sum((li.subtotal for li in estimate.line_items.all()), Decimal("0"))
+
+    def get_estimate_id(self, obj):
+        estimate = self._get_estimate(obj)
+        return estimate.id if estimate else None
+
+    def get_estimate_number(self, obj):
+        # Split into its own field rather than overloading
+        # estimate_id's presence — same reasoning as work_order_number
+        # existing purely so the frontend gets the human-readable
+        # number ("EST #33") for display without a second lookup.
+        estimate = self._get_estimate(obj)
+        return estimate.number if estimate else None
 
     def get_invoice_id(self, obj):
         # apps.invoicing.Invoice's OneToOneField reverse accessor —

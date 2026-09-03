@@ -530,6 +530,22 @@ function TimelineEntry({ record, isLast, onInvoice }: { record: ServiceRecord; i
                   <ClipboardList size={11} /> WO #{record.work_order_number}
                 </Link>
               )}
+              {/* 3 Sep 2026 — same real gap fix as EST-linking on
+                  service.ts: mirrors the WO #N link immediately
+                  above, one level further back in the same chain.
+                  Lets a shop trace a service entry back to the
+                  original quotation the customer approved, even
+                  once the job has moved well past Estimasi. */}
+              {record.estimate_number && (
+                <Link
+                  href={`/dashboard/estimate-detail?id=${record.estimate_id}`}
+                  className="btn-ghost"
+                  style={{ fontSize: 11, padding: "2px 8px", display: "inline-flex", alignItems: "center", gap: 4 }}
+                >
+                  <FileText size={11} /> EST #{record.estimate_number}
+                </Link>
+              )}
+
             </div>
             <span className="mono" style={{ fontSize: 13, color: "var(--steel)" }}>{record.odometer_km.toLocaleString("id-ID")} km</span>
           </div>
