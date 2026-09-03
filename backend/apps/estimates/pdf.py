@@ -32,6 +32,12 @@ was written in (no network access to install xhtml2pdf and render a
 real PDF). The HTML/CSS below deliberately stays inside xhtml2pdf's
 well-documented, safe subset, but this genuinely needs a real local
 render-and-open check before being trusted blind.
+
+3 Sep 2026 — KM Saat Masuk added to the info table, matching the
+frontend's own on-screen PrintableQuotation fix: estimate.
+odometer_km_intake was already captured at intake (Chris's own
+framing, 31 Jul: "estimasi is like a gate"), it just never made it
+onto either rendering of the actual document a customer sees.
 """
 from decimal import Decimal
 from io import BytesIO
@@ -71,6 +77,20 @@ def _format_rupiah(value):
     with period thousands-separators, no decimals shown."""
     whole = int(Decimal(value).to_integral_value())
     return f"Rp {whole:,}".replace(",", ".")
+
+
+def _format_km(value):
+    """
+    Mirrors OdometerCard's own read-only display exactly — period
+    thousands-separator, "km" suffix, and the same "—" fallback for
+    an estimate whose intake reading was never recorded (e.g. one
+    created before this field existed). value may be None, an int,
+    or a Decimal depending on the caller — never assumed to be a
+    specific numeric type.
+    """
+    if value is None:
+        return "—"
+    return f"{int(value):,}".replace(",", ".") + " km"
 
 
 def _line_rows(items):
@@ -188,13 +208,17 @@ def build_quotation_pdf(estimate, org_name):
 
         <table class="info-table">
             <tr>
-                <td style="width: 50%;">
+                <td style="width: 34%;">
                     <div class="label">Pelanggan</div>
                     <div class="value">{estimate.vehicle.customer.name}</div>
                 </td>
-                <td style="width: 50%;">
+                <td style="width: 33%;">
                     <div class="label">Nomor Plat</div>
                     <div class="value">{estimate.vehicle.plate_number}</div>
+                </td>
+                <td style="width: 33%;">
+                    <div class="label">KM Saat Masuk</div>
+                    <div class="value">{_format_km(estimate.odometer_km_intake)}</div>
                 </td>
             </tr>
         </table>
