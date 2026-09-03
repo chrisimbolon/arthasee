@@ -14,7 +14,10 @@ data without going through HTTP.
 from datetime import date, timedelta
 from decimal import Decimal
 
-from apps.accounting.models import Account, AccountingPeriod, JournalEntry
+from apps.accounting.models import (Account, AccountingPeriod, JournalEntry,
+                                    OpeningBalancePayable,
+                                    OpeningBalanceReceivable,
+                                    OpeningBalanceSession)
 from apps.invoicing.models import Invoice
 from apps.purchasing.models import SupplierInvoice
 
@@ -364,6 +367,27 @@ def aging_ar(organization, *, as_of=None) -> dict:
     has no separate "issued_at" timestamp (only issued_event_id, a
     reference, not a date), so created_at is the closest real proxy
     for "when this became a receivable" (Chris's own explicit call).
+
+    3 Sep 2026 — Opening Balance onboarding. A legacy receivable from
+    before the shop used Arthasee is real, outstanding money owed —
+    Made's own Piutang card must reflect it from Day 1, not just
+    invoices Arthasee itself created (Sansan's own signed-off Option
+    B: OpeningBalanceReceivable is a lightweight, dedicated row, not
+    forced through the full Invoice schema — see that model's own
+    docstring). Only rows belonging to a POSTED session count — a
+    DRAFT session's line items are still wizard scratch data, not a
+    real financial fact yet.
+
+    Aged from the session's own start_date, not any invoice-style
+    timestamp — the one honest anchor this lightweight model actually
+    has: "the day the shop told Arthasee this was already owed,"
+    since there's no earlier real date on record for a legacy debt.
+
+    Every row now carries a "source" field ("invoice" or
+    "opening_balance") — a real, honest distinction a future consumer
+    needs before treating every row as linkable to an Invoice detail
+    page; an opening-balance row has no such page. Purely additive —
+    existing consumers that don't read this key are unaffected.
     """
     as_of = as_of or date.today()
     invoices = Invoice.objects.filter(organization=organization, status="ISSUED")
@@ -385,9 +409,32 @@ def aging_ar(organization, *, as_of=None) -> dict:
             "balance_due": balance_due,
             "age_days": age_days,
             "bucket": bucket,
+            "source": "invoice",
         })
         buckets[bucket] += balance_due
         total_outstanding += balance_due
+
+    opening_receivables = (
+        OpeningBalanceReceivable.objects
+        .filter(organization=organization, session__status=OpeningBalanceSession.Status.POSTED)
+        .select_related("customer", "session")
+    )
+    for ar_line in opening_receivables:
+        if ar_line.balance_due <= Decimal("0"):
+            continue
+        age_days = (as_of - ar_line.session.start_date).days
+        bucket = _age_bucket(age_days)
+        rows.append({
+            "id": str(ar_line.id),
+            "number": ar_line.reference or "Saldo Awal",
+            "customer_name": ar_line.customer.name,
+            "balance_due": ar_line.balance_due,
+            "age_days": age_days,
+            "bucket": bucket,
+            "source": "opening_balance",
+        })
+        buckets[bucket] += ar_line.balance_due
+        total_outstanding += ar_line.balance_due
 
     return {
         "as_of": as_of,
@@ -403,6 +450,16 @@ def aging_ap(organization, *, as_of=None) -> dict:
     aging_ar() above. Ages from due_date when set, falling back to
     invoice_date when it isn't (due_date is nullable on
     SupplierInvoice).
+
+    3 Sep 2026 — mirrors aging_ar()'s own Opening Balance union
+    exactly, inverted for legacy supplier debt (OpeningBalancePayable
+    — Sansan's own signed-off Option B, same lightweight-row
+    reasoning). Ages from due_date when the owner actually entered
+    one at onboarding, falling back to the session's own start_date
+    otherwise — the same due_date-or-fallback shape SupplierInvoice
+    rows already use, just substituting the one real anchor date this
+    lightweight model actually has for invoice_date. Same "source"
+    field addition and same POSTED-only filter as aging_ar().
     """
     as_of = as_of or date.today()
     invoices = SupplierInvoice.objects.filter(organization=organization, status="UNPAID").select_related("supplier")
@@ -422,9 +479,33 @@ def aging_ap(organization, *, as_of=None) -> dict:
             "amount": invoice.amount,
             "age_days": age_days,
             "bucket": bucket,
+            "source": "invoice",
         })
         buckets[bucket] += invoice.amount
         total_outstanding += invoice.amount
+
+    opening_payables = (
+        OpeningBalancePayable.objects
+        .filter(organization=organization, session__status=OpeningBalanceSession.Status.POSTED)
+        .select_related("supplier", "session")
+    )
+    for ap_line in opening_payables:
+        if ap_line.balance_due <= Decimal("0"):
+            continue
+        reference_date = ap_line.due_date or ap_line.session.start_date
+        age_days = (as_of - reference_date).days
+        bucket = _age_bucket(age_days)
+        rows.append({
+            "id": str(ap_line.id),
+            "number": ap_line.reference or "Saldo Awal",
+            "supplier_name": ap_line.supplier.name,
+            "amount": ap_line.balance_due,
+            "age_days": age_days,
+            "bucket": bucket,
+            "source": "opening_balance",
+        })
+        buckets[bucket] += ap_line.balance_due
+        total_outstanding += ap_line.balance_due
 
     return {
         "as_of": as_of,
@@ -444,6 +525,10 @@ def dashboard_financial_summary(organization, *, as_of=None) -> dict:
     (everything outside "0-30") — safe to do, because Invoice ages
     from created_at, which can never be in the future relative to
     as_of, so that bucket boundary means what it looks like it means.
+    3 Sep 2026 — this also means the AR side of this function picks
+    up Opening Balance receivables automatically, for free, the
+    moment aging_ar() itself unions them in — no separate code
+    needed here.
 
     AP's callout is deliberately NOT built the same way. aging_ap()
     ages from due_date, which CAN be in the future — a real,
@@ -454,7 +539,11 @@ def dashboard_financial_summary(organization, *, as_of=None) -> dict:
     a month." Made's own framing is explicitly forward-looking
     ("due within the current week"), so this builds a fresh,
     explicit due_date <= as_of + 7 days filter instead of reusing
-    aging_ap()'s bucket at all.
+    aging_ap()'s bucket at all. Because of that, Opening Balance
+    payables need the identical union applied a SECOND time, here,
+    explicitly — they are NOT automatically covered by aging_ap()'s
+    own fix, since this function's AP side never calls aging_ap() at
+    all.
 
     Both detail lists are capped at 5 rows, sorted by what matters
     most (AR: highest balance first; AP: soonest due first) — this
@@ -482,7 +571,25 @@ def dashboard_financial_summary(organization, *, as_of=None) -> dict:
                 "id": str(invoice.id), "number": invoice.number,
                 "supplier_name": invoice.supplier.name,
                 "amount": invoice.amount, "due_date": reference_date,
+                "source": "invoice",
             })
+
+    opening_payables = (
+        OpeningBalancePayable.objects
+        .filter(organization=organization, session__status=OpeningBalanceSession.Status.POSTED)
+        .select_related("supplier", "session")
+    )
+    for ap_line in opening_payables:
+        ap_total_outstanding += ap_line.balance_due
+        reference_date = ap_line.due_date or ap_line.session.start_date
+        if reference_date <= ap_week_cutoff:
+            ap_due_soon_rows.append({
+                "id": str(ap_line.id), "number": ap_line.reference or "Saldo Awal",
+                "supplier_name": ap_line.supplier.name,
+                "amount": ap_line.balance_due, "due_date": reference_date,
+                "source": "opening_balance",
+            })
+
     ap_due_soon_rows.sort(key=lambda r: r["due_date"])
     ap_due_soon_total = sum((r["amount"] for r in ap_due_soon_rows), Decimal("0"))
 
