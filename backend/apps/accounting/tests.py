@@ -29,6 +29,7 @@ from apps.authentication.models import CustomUser
 from apps.core.events.bus import default_bus
 from apps.core.models import Outbox
 from apps.inventory.events import PartConsumed
+from apps.inventory.models import Part, StockAdjustment
 from apps.invoicing.events import InvoiceIssued
 from apps.invoicing.models import Invoice
 from apps.invoicing.tests import InvoicingAPITestBase
@@ -46,7 +47,10 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
-                     JournalEntry, JournalLine)
+                     JournalEntry, JournalLine, OpeningBalanceAssetLine,
+                     OpeningBalanceCashLine, OpeningBalanceOtherLine,
+                     OpeningBalancePartLine, OpeningBalancePayable,
+                     OpeningBalanceReceivable, OpeningBalanceSession)
 
 
 def _seed_all_months(org, year):
@@ -1879,3 +1883,721 @@ class DailyCashActivityAPITests(APITestCase):
 
         resp = self.client.get("/api/accounting/daily-cash-activity/")
         self.assertEqual(resp.data["activities"], [])
+
+
+# =============================================================================
+# Opening Balance — new-workshop onboarding (3 Sep 2026)
+# =============================================================================
+"""
+Real coverage for the whole Opening Balance feature — session
+lifecycle, the six line-item categories, the reports.py union work,
+and every API endpoint. Mirrors the rigor of
+AccountingPeriodCloseTests/DepreciationRunExecuteTests above: every
+test here proves a real guarantee the design review established, not
+incidental behavior.
+
+A REAL GAP WAS FOUND WHILE WRITING THESE TESTS, not before — Sansan's
+own approved §5 ("trigger ensure_period_for_org() synchronously at
+signup/posting time to bridge [start_date -> current_date]") was
+signed off during the architecture review but never actually
+implemented in the original build. OpeningBalanceSession.post() now
+includes that backfill loop (see models.py) — the fix that made
+test_backfills_periods_from_start_date_through_today below possible
+to write honestly, rather than skipped or faked.
+"""
+
+def _months_before_today(n):
+    """
+    Pure Python month arithmetic, no external dependency — same
+    discipline already established by apps.service.models._add_months
+    elsewhere in this codebase. Returns the 1st of the month N months
+    before the current real month.
+    """
+    today = date.today()
+    total = today.year * 12 + (today.month - 1) - n
+    year, month = divmod(total, 12)
+    return date(year, month + 1, 1)
+
+
+class OpeningBalanceTestBase(TestCase):
+    """
+    Shared setUp for every Opening Balance model-layer test class
+    below. start_date is deliberately 3 real months before today,
+    not "today" itself — a start_date landing inside whatever period
+    seed_coa already created would never actually exercise the
+    backfill loop OpeningBalanceSession.post() now runs.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.openingbalance@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.start_date = _months_before_today(3)
+
+
+class OpeningBalanceSessionPostTests(OpeningBalanceTestBase):
+    """
+    The real core of the whole feature — OpeningBalanceSession.
+    post(). Every category gets its own dedicated test for the real,
+    itemized side effect it's supposed to produce; the unbalanced-
+    session test is the single most important one in this whole
+    file section — the real, structural proof behind Sansan's own
+    "no mystery plug" doctrine.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.session = OpeningBalanceSession.objects.create(
+            organization=self.org, start_date=self.start_date, created_by=self.owner,
+        )
+
+    def test_backfills_periods_from_start_date_through_today(self):
+        """
+        The actual regression test for the gap found live while
+        writing this class — before the fix, this would raise
+        ValueError ("no period covers this date") for a start_date
+        predating whatever single period seed_coa already created.
+        """
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("1000000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("1000000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        self.assertTrue(
+            AccountingPeriod.objects.filter(
+                organization=self.org, year=self.start_date.year, month=self.start_date.month,
+            ).exists()
+        )
+        today = date.today()
+        self.assertTrue(
+            AccountingPeriod.objects.filter(organization=self.org, year=today.year, month=today.month).exists()
+        )
+
+    def test_cash_lines_post_as_debit_to_real_accounts(self):
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("2000000"),
+        )
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1101", amount=Decimal("500000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("2500000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("2000000.00"))
+        self.assertEqual(bank.balance(), Decimal("500000.00"))
+
+    def test_part_line_creates_real_part_via_audited_stock_adjustment(self):
+        """
+        The real fix this whole design review existed to force — NOT
+        a raw current_stock write. Part is created at 0, then a real,
+        audited StockAdjustment(reason="opening_balance") brings it
+        to the real starting count, the same mechanism every other
+        stock-increasing path in this codebase uses.
+        """
+        OpeningBalancePartLine.objects.create(
+            organization=self.org, session=self.session, part_name="Busi NGK",
+            sku="BSK-001", unit="pcs", quantity=Decimal("20"), cost_price=Decimal("15000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("300000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        part = Part.objects.get(organization=self.org, name="Busi NGK")
+        self.assertEqual(part.current_stock, Decimal("20"))
+        self.assertEqual(part.cost_price, Decimal("15000"))
+
+        adjustment = StockAdjustment.objects.get(organization=self.org, part=part)
+        self.assertEqual(adjustment.reason, "opening_balance")
+        self.assertEqual(adjustment.quantity_change, Decimal("20"))
+
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        self.assertEqual(inventory.balance(), Decimal("300000.00"))
+
+        line = OpeningBalancePartLine.objects.get(session=self.session)
+        self.assertEqual(line.part_id, part.id)
+
+    def test_asset_line_creates_real_asset_with_no_separate_acquisition_entry(self):
+        """
+        The single most important test for this category — proves
+        post_acquisition_entry=False actually worked as designed.
+        Before that fix, Asset.record()'s own default behavior would
+        have posted a SECOND, separate Dr 1401 / Cr Cash-or-Bank
+        entry — this must NOT happen; the asset's value must appear
+        ONLY as one line inside the single consolidated opening
+        entry, never as a second JournalEntry of its own.
+        """
+        OpeningBalanceAssetLine.objects.create(
+            organization=self.org, session=self.session, name="Kompresor",
+            current_book_value=Decimal("3000000"), remaining_useful_life_months=24,
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("3000000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        asset = Asset.objects.get(organization=self.org, name="Kompresor")
+        self.assertEqual(asset.cost, Decimal("3000000"))
+        self.assertEqual(asset.acquisition_date, self.start_date)
+        self.assertEqual(asset.useful_life_months, 24)
+
+        # Real proof: exactly ONE JournalEntry exists for this whole
+        # session, not two — the asset's value never got its own
+        # separate acquisition posting.
+        self.assertEqual(JournalEntry.objects.filter(organization=self.org).count(), 1)
+
+        fixed_assets = Account.objects.get(organization=self.org, code="1401")
+        self.assertEqual(fixed_assets.balance(), Decimal("3000000.00"))
+
+        line = OpeningBalanceAssetLine.objects.get(session=self.session)
+        self.assertEqual(line.asset_id, asset.id)
+
+    def test_legacy_asset_depreciates_remaining_value_starting_month_after_onboarding(self):
+        """
+        The real, end-to-end proof the current_book_value +
+        remaining_useful_life_months reframing works exactly as
+        designed — the legacy asset depreciates its REMAINING value
+        over its REMAINING life, starting cleanly the month after
+        onboarding, never double-counting real wear that already
+        happened before the shop used Arthasee.
+        """
+        OpeningBalanceAssetLine.objects.create(
+            organization=self.org, session=self.session, name="Kompresor",
+            current_book_value=Decimal("1000000"), remaining_useful_life_months=3,
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("1000000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        asset = Asset.objects.get(organization=self.org, name="Kompresor")
+        next_year, next_month = self.start_date.year, self.start_date.month + 1
+        if next_month > 12:
+            next_year, next_month = next_year + 1, 1
+        next_period = AccountingPeriod.objects.get(organization=self.org, year=next_year, month=next_month)
+
+        run = DepreciationRun.execute(organization=self.org, accounting_period=next_period)
+        self.assertEqual(run.total_amount, Decimal("333333.33"))
+        self.assertEqual(asset.depreciation_entries.count(), 1)
+
+    def test_receivable_line_posts_to_ar_and_row_survives_untouched(self):
+        from apps.service.models import Customer
+        customer = Customer.objects.create(organization=self.org, name="Yono")
+        OpeningBalanceReceivable.objects.create(
+            organization=self.org, session=self.session, customer=customer, balance_due=Decimal("500000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("500000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        ar = Account.objects.get(organization=self.org, code="1201")
+        self.assertEqual(ar.balance(), Decimal("500000.00"))
+        # Sansan's own Option B — the row itself is never converted
+        # into a real Invoice, it just survives as-is for reports.py's
+        # own union to pick up.
+        self.assertTrue(OpeningBalanceReceivable.objects.filter(session=self.session, customer=customer).exists())
+
+    def test_payable_line_posts_to_ap(self):
+        from apps.purchasing.models import Supplier
+        supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+        OpeningBalancePayable.objects.create(
+            organization=self.org, session=self.session, supplier=supplier, balance_due=Decimal("400000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.DEBIT, amount=Decimal("400000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        ap = Account.objects.get(organization=self.org, code="2001")
+        self.assertEqual(ap.balance(), Decimal("400000.00"))
+
+    def test_other_line_posts_to_its_own_explicit_side(self):
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("1000000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("1000000"),
+            description="Modal awal pemilik",
+        )
+        self.session.post(posted_by=self.owner)
+
+        owner_capital = Account.objects.get(organization=self.org, code="3001")
+        self.assertEqual(owner_capital.balance(), Decimal("1000000.00"))
+
+    def test_full_doctrine_example_balances_exactly(self):
+        """
+        The exact worked example from Sansan's own canonical
+        onboarding doctrine document — Dr Cash 20m, Dr Bank 80m, Dr
+        Inventory 35m, Dr AR 15m, Dr Fixed Assets 100m, Cr AP 40m, Cr
+        Bank Loan 60m, Cr Owner/Equity 150m. Total debits = total
+        credits = 250m. If this doesn't balance, nothing this whole
+        review process was built around actually works end-to-end.
+        """
+        from apps.purchasing.models import Supplier
+        from apps.service.models import Customer
+
+        OpeningBalanceCashLine.objects.create(organization=self.org, session=self.session, account_code="1001", amount=Decimal("20000000"))
+        OpeningBalanceCashLine.objects.create(organization=self.org, session=self.session, account_code="1101", amount=Decimal("80000000"))
+        OpeningBalancePartLine.objects.create(
+            organization=self.org, session=self.session, part_name="Stok Campuran",
+            quantity=Decimal("1"), cost_price=Decimal("35000000"),
+        )
+        customer = Customer.objects.create(organization=self.org, name="Pelanggan Lama")
+        OpeningBalanceReceivable.objects.create(organization=self.org, session=self.session, customer=customer, balance_due=Decimal("15000000"))
+        OpeningBalanceAssetLine.objects.create(
+            organization=self.org, session=self.session, name="Peralatan Bengkel",
+            current_book_value=Decimal("100000000"), remaining_useful_life_months=60,
+        )
+        supplier = Supplier.objects.create(organization=self.org, name="Supplier Lama")
+        OpeningBalancePayable.objects.create(organization=self.org, session=self.session, supplier=supplier, balance_due=Decimal("40000000"))
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="2101",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("60000000"), description="Pinjaman Bank",
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("150000000"),
+        )
+
+        entry = self.session.post(posted_by=self.owner)
+        total_debit = sum((l.debit_amount for l in entry.lines.all()), Decimal("0"))
+        total_credit = sum((l.credit_amount for l in entry.lines.all()), Decimal("0"))
+        self.assertEqual(total_debit, Decimal("250000000.00"))
+        self.assertEqual(total_credit, Decimal("250000000.00"))
+        self.assertEqual(entry.source, JournalEntry.Source.OPENING_BALANCE)
+
+    def test_unbalanced_session_rolls_back_everything_no_mystery_plug(self):
+        """
+        THE single most important test in this whole section — the
+        real, structural proof behind Sansan's own "no mystery plug"
+        doctrine. An unbalanced session must not leave ANY trace: no
+        Part, no StockAdjustment, no Asset, no JournalEntry — the
+        entire operation rolls back as one atomic unit, not a
+        partial success.
+        """
+        OpeningBalancePartLine.objects.create(
+            organization=self.org, session=self.session, part_name="Busi NGK",
+            quantity=Decimal("10"), cost_price=Decimal("15000"),
+        )
+        OpeningBalanceAssetLine.objects.create(
+            organization=self.org, session=self.session, name="Kompresor",
+            current_book_value=Decimal("1000000"), remaining_useful_life_months=12,
+        )
+        # Deliberately NO balancing credit line at all.
+
+        with self.assertRaises(ValueError):
+            self.session.post(posted_by=self.owner)
+
+        self.assertFalse(Part.objects.filter(organization=self.org).exists())
+        self.assertFalse(StockAdjustment.objects.filter(organization=self.org).exists())
+        self.assertFalse(Asset.objects.filter(organization=self.org).exists())
+        self.assertFalse(JournalEntry.objects.filter(organization=self.org).exists())
+
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.status, OpeningBalanceSession.Status.DRAFT)
+        self.assertIsNone(self.session.journal_entry)
+
+    def test_cannot_post_an_already_posted_session(self):
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("100000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("100000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        with self.assertRaises(ValueError):
+            self.session.post(posted_by=self.owner)
+
+    def test_zero_amount_line_rejected_before_anything_is_written(self):
+        """
+        The real pre-flight validation — a genuinely non-sane
+        individual line (zero quantity) is caught BEFORE post() even
+        attempts to assemble the journal, matching Sansan's own "no
+        mystery plug" doctrine applied to individual lines too, not
+        just the total.
+        """
+        OpeningBalancePartLine.objects.create(
+            organization=self.org, session=self.session, part_name="Busi NGK",
+            quantity=Decimal("0"), cost_price=Decimal("15000"),
+        )
+        with self.assertRaises(ValueError):
+            self.session.post(posted_by=self.owner)
+        self.assertFalse(Part.objects.filter(organization=self.org).exists())
+
+    def test_status_and_metadata_set_correctly_on_success(self):
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("100000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("100000"),
+        )
+        entry = self.session.post(posted_by=self.owner)
+
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.status, OpeningBalanceSession.Status.POSTED)
+        self.assertEqual(self.session.journal_entry_id, entry.id)
+        self.assertIsNotNone(self.session.posted_at)
+        self.assertEqual(self.session.posted_by_id, self.owner.id)
+
+
+class OpeningBalanceReportsUnionTests(OpeningBalanceTestBase):
+    """
+    Real coverage for the aging_ar()/aging_ap()/dashboard_financial_
+    summary() union work — proves posted Opening Balance rows
+    actually surface on Made's Piutang/Utang cards from Day 1, and
+    that a DRAFT session's rows correctly do NOT (still wizard
+    scratch data, not a real financial fact yet).
+    """
+
+    def setUp(self):
+        super().setUp()
+        from apps.purchasing.models import Supplier
+        from apps.service.models import Customer
+        self.customer = Customer.objects.create(organization=self.org, name="Yono")
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+        self.session = OpeningBalanceSession.objects.create(
+            organization=self.org, start_date=self.start_date, created_by=self.owner,
+        )
+
+    def _post_balanced_ar_ap(self, ar_amount=Decimal("500000"), ap_amount=Decimal("300000")):
+        OpeningBalanceReceivable.objects.create(
+            organization=self.org, session=self.session, customer=self.customer, balance_due=ar_amount,
+        )
+        OpeningBalancePayable.objects.create(
+            organization=self.org, session=self.session, supplier=self.supplier, balance_due=ap_amount,
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=ar_amount - ap_amount,
+        )
+        self.session.post(posted_by=self.owner)
+
+    def test_posted_receivable_appears_in_aging_ar(self):
+        self._post_balanced_ar_ap()
+        data = reports.aging_ar(self.org, as_of=date.today())
+        row = next(r for r in data["invoices"] if r["source"] == "opening_balance")
+        self.assertEqual(row["customer_name"], "Yono")
+        self.assertEqual(row["balance_due"], Decimal("500000"))
+        self.assertEqual(data["total_outstanding"], Decimal("500000"))
+
+    def test_draft_session_receivable_does_not_appear_in_aging_ar(self):
+        """
+        The real, easy-to-miss correctness detail — a DRAFT session's
+        line items are still wizard scratch data, never a real
+        financial fact until post() actually succeeds.
+        """
+        OpeningBalanceReceivable.objects.create(
+            organization=self.org, session=self.session, customer=self.customer, balance_due=Decimal("999999"),
+        )
+        data = reports.aging_ar(self.org, as_of=date.today())
+        self.assertEqual(data["invoices"], [])
+        self.assertEqual(data["total_outstanding"], Decimal("0"))
+
+    def test_posted_payable_appears_in_aging_ap(self):
+        self._post_balanced_ar_ap()
+        data = reports.aging_ap(self.org, as_of=date.today())
+        row = next(r for r in data["supplier_invoices"] if r["source"] == "opening_balance")
+        self.assertEqual(row["supplier_name"], "PT Sparepart Jaya")
+        self.assertEqual(row["amount"], Decimal("300000"))
+
+    def test_opening_payable_due_soon_appears_on_dashboard_summary(self):
+        """
+        The real proof of the deliberate SECOND union in
+        dashboard_financial_summary() — its own AP side never calls
+        aging_ap() at all (see that function's own docstring), so
+        this coverage does not come for free from the aging_ap()
+        test above.
+        """
+        OpeningBalancePayable.objects.create(
+            organization=self.org, session=self.session, supplier=self.supplier,
+            balance_due=Decimal("250000"), due_date=date.today() + timedelta(days=3),
+        )
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("250000"),
+        )
+        self.session.post(posted_by=self.owner)
+
+        data = reports.dashboard_financial_summary(self.org, as_of=date.today())
+        self.assertEqual(data["ap_due_soon_count"], 1)
+        self.assertEqual(data["ap_due_soon_total"], Decimal("250000"))
+        self.assertEqual(data["ap_due_soon_invoices"][0]["source"], "opening_balance")
+
+    def test_opening_receivable_aged_from_session_start_date(self):
+        self._post_balanced_ar_ap()
+        data = reports.aging_ar(self.org, as_of=date.today())
+        row = next(r for r in data["invoices"] if r["source"] == "opening_balance")
+        expected_age = (date.today() - self.start_date).days
+        self.assertEqual(row["age_days"], expected_age)
+
+
+class OpeningBalanceSessionAPITests(APITestCase):
+    """
+    Real coverage for GET/POST /api/accounting/opening-balance/ —
+    session creation (owner-only, one per org ever), and the null-
+    vs-nested-data GET shape.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.obapi@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.staff = CustomUser.objects.create_user(
+            email="staff.obapi@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_get_returns_null_when_no_session_exists(self):
+        """
+        Same real, honest "hasn't happened yet" precedent
+        DepreciationRunDetailView's own null response already
+        establishes — never a 404 for a state that's genuinely
+        normal, just not yet reached.
+        """
+        resp = self.client.get("/api/accounting/opening-balance/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["opening_balance_session"])
+
+    def test_owner_can_create_session(self):
+        resp = self.client.post("/api/accounting/opening-balance/", {"start_date": "2026-01-01"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["opening_balance_session"]["status"], "DRAFT")
+
+    def test_non_owner_cannot_create_session(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post("/api/accounting/opening-balance/", {"start_date": "2026-01-01"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_create_a_second_session(self):
+        self.client.post("/api/accounting/opening-balance/", {"start_date": "2026-01-01"}, format="json")
+        resp = self.client.post("/api/accounting/opening-balance/", {"start_date": "2026-02-01"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_get_returns_full_nested_session_with_live_totals(self):
+        self.client.post("/api/accounting/opening-balance/", {"start_date": "2026-01-01"}, format="json")
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+
+        resp = self.client.get("/api/accounting/opening-balance/")
+        session = resp.data["opening_balance_session"]
+        self.assertEqual(len(session["cash_lines"]), 1)
+        self.assertEqual(session["total_debit"], Decimal("500000"))
+        self.assertEqual(session["total_credit"], Decimal("0"))
+        self.assertFalse(session["is_balanced"])
+
+    def test_session_scoped_to_organization(self):
+        self.client.post("/api/accounting/opening-balance/", {"start_date": "2026-01-01"}, format="json")
+
+        other_org = Organization.objects.create(name="Bengkel Lain Opening Balance")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.ob@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/opening-balance/")
+        self.assertIsNone(resp.data["opening_balance_session"])
+
+
+class OpeningBalanceLineItemAPITests(APITestCase):
+    """
+    Real coverage for the six line-item endpoints — upsert semantics
+    for cash, add+delete for the other five, cross-tenant FK
+    resolution for receivables/payables, and the shared DRAFT-only
+    guard every one of these depends on identically.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.oblines@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.client.post("/api/accounting/opening-balance/", {"start_date": str(date.today())}, format="json")
+
+    def test_cash_upsert_creates_then_updates_same_row(self):
+        first = self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        line_id = first.data["cash_line"]["id"]
+
+        second = self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "750000"}, format="json")
+        self.assertEqual(second.data["cash_line"]["id"], line_id)
+        self.assertEqual(Decimal(second.data["cash_line"]["amount"]), Decimal("750000"))
+        self.assertEqual(OpeningBalanceCashLine.objects.filter(organization=self.org).count(), 1)
+
+    def test_add_and_delete_part_line(self):
+        create = self.client.post("/api/accounting/opening-balance/parts/", {
+            "part_name": "Busi NGK", "quantity": "10", "cost_price": "15000",
+        }, format="json")
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+        line_id = create.data["part_line"]["id"]
+
+        delete = self.client.delete(f"/api/accounting/opening-balance/parts/{line_id}/")
+        self.assertEqual(delete.status_code, status.HTTP_200_OK)
+        self.assertFalse(OpeningBalancePartLine.objects.filter(id=line_id).exists())
+
+    def test_add_and_delete_asset_line(self):
+        create = self.client.post("/api/accounting/opening-balance/assets/", {
+            "name": "Kompresor", "current_book_value": "3000000", "remaining_useful_life_months": "24",
+        }, format="json")
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+        line_id = create.data["asset_line"]["id"]
+
+        delete = self.client.delete(f"/api/accounting/opening-balance/assets/{line_id}/")
+        self.assertEqual(delete.status_code, status.HTTP_200_OK)
+
+    def test_add_and_delete_receivable_line(self):
+        from apps.service.models import Customer
+        customer = Customer.objects.create(organization=self.org, name="Yono")
+        create = self.client.post("/api/accounting/opening-balance/receivables/", {
+            "customer": str(customer.id), "balance_due": "500000",
+        }, format="json")
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create.data["receivable_line"]["customer_name"], "Yono")
+        line_id = create.data["receivable_line"]["id"]
+
+        delete = self.client.delete(f"/api/accounting/opening-balance/receivables/{line_id}/")
+        self.assertEqual(delete.status_code, status.HTTP_200_OK)
+
+    def test_cannot_add_receivable_for_customer_in_another_org(self):
+        from apps.service.models import Customer
+        other_org = Organization.objects.create(name="Bengkel Lain OB Lines")
+        foreign_customer = Customer.objects.create(organization=other_org, name="Orang Asing")
+        resp = self.client.post("/api/accounting/opening-balance/receivables/", {
+            "customer": str(foreign_customer.id), "balance_due": "500000",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_add_and_delete_payable_line(self):
+        from apps.purchasing.models import Supplier
+        supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+        create = self.client.post("/api/accounting/opening-balance/payables/", {
+            "supplier": str(supplier.id), "balance_due": "300000",
+        }, format="json")
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+        line_id = create.data["payable_line"]["id"]
+
+        delete = self.client.delete(f"/api/accounting/opening-balance/payables/{line_id}/")
+        self.assertEqual(delete.status_code, status.HTTP_200_OK)
+
+    def test_add_and_delete_other_line(self):
+        create = self.client.post("/api/accounting/opening-balance/other/", {
+            "account_code": "3001", "side": "credit", "amount": "1000000",
+        }, format="json")
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+        line_id = create.data["other_line"]["id"]
+
+        delete = self.client.delete(f"/api/accounting/opening-balance/other/{line_id}/")
+        self.assertEqual(delete.status_code, status.HTTP_200_OK)
+
+    def test_delete_nonexistent_line_returns_404(self):
+        resp = self.client.delete(f"/api/accounting/opening-balance/parts/{uuid.uuid4()}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_line_endpoints_blocked_once_session_is_posted(self):
+        """
+        The real proof of the shared DRAFT-only guard —
+        _get_draft_session_or_response() — every one of the six line
+        endpoints depends on it identically.
+        """
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+        self.client.post("/api/accounting/opening-balance/other/", {
+            "account_code": "3001", "side": "credit", "amount": "500000",
+        }, format="json")
+        self.client.post("/api/accounting/opening-balance/post/")
+
+        resp = self.client.post("/api/accounting/opening-balance/parts/", {
+            "part_name": "Busi NGK", "quantity": "1", "cost_price": "1000",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+
+class OpeningBalancePostAPITests(APITestCase):
+    """
+    Real coverage for POST /api/accounting/opening-balance/post/ —
+    the final, irreversible action. Authorization and balance
+    validation are already proven at the model layer above; this
+    confirms the thin view surfaces both correctly through a real
+    HTTP call, same discipline as ManualJournalAPITests elsewhere in
+    this file.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.obpost@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.staff = CustomUser.objects.create_user(
+            email="staff.obpost@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.client.post("/api/accounting/opening-balance/", {"start_date": str(date.today())}, format="json")
+
+    def test_non_owner_cannot_post(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post("/api/accounting/opening-balance/post/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unbalanced_session_rejected_with_400(self):
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+        resp = self.client.post("/api/accounting/opening-balance/post/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_owner_can_post_a_balanced_session(self):
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+        self.client.post("/api/accounting/opening-balance/other/", {
+            "account_code": "3001", "side": "credit", "amount": "500000",
+        }, format="json")
+
+        resp = self.client.post("/api/accounting/opening-balance/post/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["opening_balance_session"]["status"], "POSTED")
+        self.assertIsNotNone(resp.data["opening_balance_session"]["journal_entry_id"])
+
+    def test_posting_without_a_session_returns_404(self):
+        other_org = Organization.objects.create(name="Bengkel Lain OB Post")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.obpost@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.post("/api/accounting/opening-balance/post/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
