@@ -881,7 +881,7 @@ class DashboardSummaryView(TenantScopedAPIView):
         # ever touches a DONE WorkOrder again after that point.
 
         queued = WorkOrder.objects.filter(organization=org, status="OPEN").count()
-        in_progress_qs = WorkOrder.objects.filter(organization=org, status="IN_PROGRESS").select_related("vehicle")
+        in_progress_qs = WorkOrder.objects.filter(organization=org, status__in=("IN_PROGRESS", "QC")).select_related("vehicle")
         in_progress = in_progress_qs.count()
 
         # is_overdue is a Python property, not a DB column — filtered
