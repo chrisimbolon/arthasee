@@ -96,6 +96,7 @@ function InvoiceDetailContent() {
   const [invoice, setInvoice] = useState<Invoice | null>(null);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [orgName, setOrgName] = useState<string | null>(null);
+  const [orgAddress, setOrgAddress] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
@@ -124,7 +125,9 @@ function InvoiceDetailContent() {
     if (invoiceId) load();
   }, [invoiceId]);
   useEffect(() => {
-    organizationsApi.mine().then((res) => { if (res) setOrgName(res.organization.name); });
+        organizationsApi.mine().then((res) => {
+      if (res) { setOrgName(res.organization.name); setOrgAddress(res.organization.address); }
+    });
   }, []);
 
   const changeStatus = async (status: InvoiceStatus) => {
