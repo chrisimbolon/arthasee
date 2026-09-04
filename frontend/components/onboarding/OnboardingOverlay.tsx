@@ -20,20 +20,22 @@
 // exit paths (a posted OpeningBalanceSession, or "Bengkel Baru" for
 // a shop with no prior history to record).
 //
-// KNOWN, DELIBERATE GAP: Receivable/Payable line entry is not yet
-// wired into this wizard — both need a real Customer/Supplier
-// picker, and this file was built before those components had been
-// reviewed. The backend endpoints already exist (openingBalanceApi.
-// addReceivable/addPayable in lib/api/accounting.ts) — this is a
-// real, scoped follow-up, not an oversight. A shop can still balance
-// their opening entry entirely via Cash/Part/Asset/Other in the
-// meantime (Owner Capital itself lives in "Other").
+// Receivable/Payable line entry uses a real, inline "pick or create"
+// combobox for Customer/Supplier — the same established pattern
+// already used elsewhere in this app (e.g. picking/adding a Customer
+// while creating a Vehicle), not a new one invented for this wizard.
+// customersApi.list() supports real server-side search;
+// suppliersApi.list() does not (no search param at all), so
+// SupplierPicker filters client-side instead — a deliberate, small
+// asymmetry between the two pickers, not an oversight.
 // =============================================================================
 import {
   OpeningBalanceActionResult, OpeningBalanceOtherSide,
   OpeningBalanceSessionResponse, openingBalanceApi,
 } from "@/lib/api/accounting";
 import { Organization, organizationsApi } from "@/lib/api/organizations";
+import { Supplier, suppliersApi } from "@/lib/api/purchasing";
+import { Customer, customersApi } from "@/lib/api/service";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 
@@ -403,6 +405,249 @@ function OtherSection({ session, onChange, setError }: SectionProps) {
   );
 }
 
+// ── Customer / Supplier pickers — inline pick-or-create ─────────
+
+function CustomerPicker({ value, onChange }: { value: Customer | null; onChange: (c: Customer | null) => void }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Customer[]>([]);
+  const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    if (!open || !query.trim()) { setResults([]); return; }
+    let cancelled = false;
+    customersApi.list({ search: query.trim() })
+      .then((rows) => { if (!cancelled) setResults(rows); })
+      .catch(() => { if (!cancelled) setResults([]); });
+    return () => { cancelled = true; };
+  }, [query, open]);
+
+  if (value) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="input" style={{ flex: 1, display: "flex", alignItems: "center" }}>{value.name}</div>
+        <button type="button" className="btn-ghost" onClick={() => onChange(null)}>Ganti</button>
+      </div>
+    );
+  }
+
+  const exactMatch = results.some((c) => c.name.toLowerCase() === query.trim().toLowerCase());
+
+  const handleCreate = async () => {
+    if (!query.trim()) return;
+    setCreating(true);
+    try {
+      const customer = await customersApi.create({ name: query.trim() });
+      onChange(customer);
+    } finally {
+      setCreating(false);
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        className="input" placeholder="Cari atau tambah pelanggan..." value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+      />
+      {open && query.trim() && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "var(--paper)", border: "1px solid var(--line)", borderRadius: 6, marginTop: 4, maxHeight: 180, overflowY: "auto", zIndex: 10, boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}>
+          {results.map((c) => (
+            <div
+              key={c.id} onMouseDown={() => { onChange(c); setOpen(false); }}
+              style={{ padding: "8px 10px", cursor: "pointer", fontSize: 13 }}
+            >
+              {c.name}
+            </div>
+          ))}
+          {!exactMatch && (
+            <div
+              onMouseDown={handleCreate}
+              style={{ padding: "8px 10px", cursor: "pointer", fontSize: 13, color: "var(--rust)", borderTop: results.length ? "1px solid var(--line)" : "none" }}
+            >
+              {creating ? "Menyimpan..." : `+ Tambah pelanggan baru: "${query.trim()}"`}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SupplierPicker({ value, onChange }: { value: Supplier | null; onChange: (s: Supplier | null) => void }) {
+  const [query, setQuery] = useState("");
+  const [all, setAll] = useState<Supplier[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    // suppliersApi.list() has no search param — fetched once,
+    // filtered client-side below, unlike CustomerPicker's own real
+    // server-side search.
+    if (open && all === null) {
+      suppliersApi.list().then(setAll).catch(() => setAll([]));
+    }
+  }, [open, all]);
+
+  if (value) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="input" style={{ flex: 1, display: "flex", alignItems: "center" }}>{value.name}</div>
+        <button type="button" className="btn-ghost" onClick={() => onChange(null)}>Ganti</button>
+      </div>
+    );
+  }
+
+  const results = (all || []).filter((s) => s.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const exactMatch = results.some((s) => s.name.toLowerCase() === query.trim().toLowerCase());
+
+  const handleCreate = async () => {
+    if (!query.trim()) return;
+    setCreating(true);
+    try {
+      const supplier = await suppliersApi.create({ name: query.trim() });
+      onChange(supplier);
+    } finally {
+      setCreating(false);
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        className="input" placeholder="Cari atau tambah supplier..." value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+      />
+      {open && query.trim() && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "var(--paper)", border: "1px solid var(--line)", borderRadius: 6, marginTop: 4, maxHeight: 180, overflowY: "auto", zIndex: 10, boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}>
+          {results.map((s) => (
+            <div
+              key={s.id} onMouseDown={() => { onChange(s); setOpen(false); }}
+              style={{ padding: "8px 10px", cursor: "pointer", fontSize: 13 }}
+            >
+              {s.name}
+            </div>
+          ))}
+          {!exactMatch && (
+            <div
+              onMouseDown={handleCreate}
+              style={{ padding: "8px 10px", cursor: "pointer", fontSize: 13, color: "var(--rust)", borderTop: results.length ? "1px solid var(--line)" : "none" }}
+            >
+              {creating ? "Menyimpan..." : `+ Tambah supplier baru: "${query.trim()}"`}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReceivableSection({ session, onChange, setError }: SectionProps) {
+  const [customer, setCustomer] = useState<Customer | null>(null);
+  const [balanceDue, setBalanceDue] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const canAdd = customer && balanceDue.trim();
+
+  const handleAdd = async () => {
+    if (!customer || !balanceDue.trim()) return;
+    setSaving(true); setError(null);
+    const result = await openingBalanceApi.addReceivable({
+      customer: customer.id, balance_due: balanceDue, due_date: dueDate || undefined,
+    });
+    setSaving(false);
+    if (!result.success) { setError(result.message || null); return; }
+    setCustomer(null); setBalanceDue(""); setDueDate("");
+    onChange();
+  };
+
+  const handleDelete = async (id: string) => {
+    setError(null);
+    const result = await openingBalanceApi.deleteReceivable(id);
+    if (!result.success) { setError(result.message || null); return; }
+    onChange();
+  };
+
+  return (
+    <SectionCard title="Piutang Pelanggan" hint="Tagihan pelanggan yang belum lunas dari sebelum pakai Arthasee.">
+      {session.receivable_lines.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          {session.receivable_lines.map((l) => (
+            <LineRow key={l.id} label={l.customer_name} sub={l.reference || undefined} amount={toNumber(l.balance_due)} onDelete={() => handleDelete(l.id)} />
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ flex: "2 1 180px" }}>
+          <CustomerPicker value={customer} onChange={setCustomer} />
+        </div>
+        <input className="input" placeholder="Jumlah (Rp)" value={balanceDue} onChange={(e) => setBalanceDue(e.target.value)} style={{ width: 130 }} />
+        <input type="date" className="input" value={dueDate} onChange={(e) => setDueDate(e.target.value)} style={{ width: 140 }} title="Jatuh tempo (opsional)" />
+        <button type="button" className="btn-ghost" onClick={handleAdd} disabled={saving || !canAdd} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {saving ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Plus size={14} />}
+        </button>
+      </div>
+    </SectionCard>
+  );
+}
+
+function PayableSection({ session, onChange, setError }: SectionProps) {
+  const [supplier, setSupplier] = useState<Supplier | null>(null);
+  const [balanceDue, setBalanceDue] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const canAdd = supplier && balanceDue.trim();
+
+  const handleAdd = async () => {
+    if (!supplier || !balanceDue.trim()) return;
+    setSaving(true); setError(null);
+    const result = await openingBalanceApi.addPayable({
+      supplier: supplier.id, balance_due: balanceDue, due_date: dueDate || undefined,
+    });
+    setSaving(false);
+    if (!result.success) { setError(result.message || null); return; }
+    setSupplier(null); setBalanceDue(""); setDueDate("");
+    onChange();
+  };
+
+  const handleDelete = async (id: string) => {
+    setError(null);
+    const result = await openingBalanceApi.deletePayable(id);
+    if (!result.success) { setError(result.message || null); return; }
+    onChange();
+  };
+
+  return (
+    <SectionCard title="Utang Supplier" hint="Tagihan dari supplier yang belum dibayar dari sebelum pakai Arthasee.">
+      {session.payable_lines.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          {session.payable_lines.map((l) => (
+            <LineRow key={l.id} label={l.supplier_name} sub={l.reference || undefined} amount={toNumber(l.balance_due)} onDelete={() => handleDelete(l.id)} />
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ flex: "2 1 180px" }}>
+          <SupplierPicker value={supplier} onChange={setSupplier} />
+        </div>
+        <input className="input" placeholder="Jumlah (Rp)" value={balanceDue} onChange={(e) => setBalanceDue(e.target.value)} style={{ width: 130 }} />
+        <input type="date" className="input" value={dueDate} onChange={(e) => setDueDate(e.target.value)} style={{ width: 140 }} title="Jatuh tempo (opsional)" />
+        <button type="button" className="btn-ghost" onClick={handleAdd} disabled={saving || !canAdd} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {saving ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Plus size={14} />}
+        </button>
+      </div>
+    </SectionCard>
+  );
+}
+
 function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState<OpeningBalanceSessionResponse | null>(null);
@@ -552,6 +797,8 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
       <CashSection session={session} onChange={refresh} setError={setError} />
       <PartSection session={session} onChange={refresh} setError={setError} />
       <AssetSection session={session} onChange={refresh} setError={setError} />
+      <ReceivableSection session={session} onChange={refresh} setError={setError} />
+      <PayableSection session={session} onChange={refresh} setError={setError} />
       <OtherSection session={session} onChange={refresh} setError={setError} />
 
       <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
