@@ -25,12 +25,6 @@ export interface Organization {
   created_at:   string;
 }
 
-export interface CompleteOnboardingPayload {
-  phone: string;
-  address: string;
-  invoice_code: string;
-}
-
 export const organizationsApi = {
   async mine(): Promise<{ organization: Organization; role: string } | null> {
     try {
@@ -48,17 +42,28 @@ export const organizationsApi = {
   // phone/address added 29 Aug 2026 — same "everything gathered at
   // onboarding stays editable in Settings afterward" philosophy
   // already established for invoice_code.
+  //
+  // 3 Sep 2026 — this is now ALSO the real save path for onboarding's
+  // own Step 1 (see OnboardingOverlay.tsx) — completeOnboarding()
+  // below no longer saves these fields itself.
   async update(payload: { name?: string; invoice_code?: string; phone?: string; address?: string }): Promise<Organization> {
     const { data } = await api.patch("/api/organizations/mine/", payload);
     return data.organization;
   },
 
   // 29 Aug 2026 — the real, single action behind the mandatory
-  // first-login welcome gate. All three fields required — this call
-  // is only ever made from the onboarding overlay itself, never a
-  // partial/optional context.
-  async completeOnboarding(payload: CompleteOnboardingPayload): Promise<Organization> {
-    const { data } = await api.post("/api/organizations/mine/complete-onboarding/", payload);
+  // first-login welcome gate.
+  //
+  // 3 Sep 2026 — REDESIGNED to take NO payload, matching the
+  // backend's own redesign for the Opening Balance wizard becoming a
+  // genuine mandatory Step 2: this used to save phone/address/
+  // invoice_code AND flip the flag in one call, which left nothing
+  // persisted for a mid-Step-2 refresh to resume from. Step 1 now
+  // saves via update() above; this call's only remaining job is the
+  // final flag flip. Called identically from both of Step 2's real
+  // exit paths (a posted OpeningBalanceSession, or "Bengkel Baru").
+  async completeOnboarding(): Promise<Organization> {
+    const { data } = await api.post("/api/organizations/mine/complete-onboarding/");
     return data.organization;
   },
 };
