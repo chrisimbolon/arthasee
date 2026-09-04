@@ -1633,7 +1633,13 @@ class AccountingPeriodCloseTests(TestCase):
         333.333,33 real depreciation expense = 666.666,67 net income,
         not 1.000.000.
         """
-        self._close_prior_months(2)
+        # Real ordering fix, caught live via a real test run: the
+        # asset itself must be created (and revenue posted) WHILE
+        # January is still open for posting — Asset.record() calls
+        # assert_open_for_posting() for its own acquisition_date, so
+        # closing January first would incorrectly block creating an
+        # asset dated inside it. _close_prior_months() only runs
+        # AFTER every real posting this test needs is already down.
         Asset.record(
             organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
             cost=Decimal("1000000"), useful_life_months=3,
@@ -1642,6 +1648,7 @@ class AccountingPeriodCloseTests(TestCase):
             organization=self.org, posting_date=date(2026, 2, 10), source=JournalEntry.Source.MANUAL,
             lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
         )
+        self._close_prior_months(2)
 
         period = self._period(2)
         closing_entry, net_income = period.close(closed_by=None)
@@ -1683,11 +1690,13 @@ class AccountingPeriodCloseTests(TestCase):
         usage, since close() itself blocks first, at the very top of
         the method.
         """
-        self._close_prior_months(2)
+        # Same real ordering fix as the test above — the asset must
+        # be created while January is still open.
         Asset.record(
             organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
             cost=Decimal("1000000"), useful_life_months=3,
         )
+        self._close_prior_months(2)
         period = self._period(2)
         period.close(closed_by=None)
 
