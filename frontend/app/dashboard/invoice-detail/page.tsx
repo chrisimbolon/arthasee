@@ -248,7 +248,10 @@ function InvoiceDetailContent() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
           <div>
             <div className="display" style={{ fontSize: 22 }}>{orgName || "Arthasee"}</div>
-            <div style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>INVOICE</div>
+            {orgAddress && (
+              <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 2, maxWidth: 280, lineHeight: 1.4 }}>{orgAddress}</div>
+            )}
+            <div style={{ fontSize: 13, color: "var(--steel)", marginTop: 6 }}>INVOICE</div>
           </div>
           <div style={{ textAlign: "right" }}>
             <div className="mono" style={{ fontSize: 15, fontWeight: 700 }}>{invoice.number}</div>
