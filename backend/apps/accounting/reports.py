@@ -248,11 +248,38 @@ def cash_conversion_cycle(organization, *, since, as_of) -> dict:
         "ccc": ccc,
     }
 
-def _current_period_start(organization, as_of):
-    period = AccountingPeriod.objects.filter(
-        organization=organization, start_date__lte=as_of, end_date__gte=as_of,
-    ).first()
-    return period.start_date if period else None
+def _unclosed_earnings_start(organization, as_of):
+    """
+    4 Sep 2026 — real fix, found via a careful design-review trace,
+    not a live incident: the previous version of this function
+    (_current_period_start) only ever returned the start date of the
+    ONE AccountingPeriod covering `as_of` — correct for a shop that
+    closes every period promptly, silently wrong the moment MORE
+    THAN ONE period sits open at once. That's now a real, common
+    state — Opening Balance onboarding can backdate a shop's real
+    history by months, and nothing forces every earlier period
+    closed before reaching the current one. balance_sheet()'s own
+    current_year_earnings would then only capture the CURRENT
+    period's own slice of Revenue/COGS/Expense, silently dropping
+    every earlier unclosed period's real net income out of Equity —
+    breaking Assets == Liabilities + Equity the moment real activity
+    spans more than the single most-recent open month.
+
+    Real fix: find the most recently CLOSED period (by end_date) for
+    this org, strictly before as_of, and return the day right after
+    it — the true start of ALL unclosed activity, not just whatever
+    the current period alone covers. Returns None (all-time) if this
+    org has never closed a single period — every unclosed-until-now
+    real posting genuinely belongs in current_year_earnings in that
+    case, same honest "no period found -> full history" fallback the
+    old function already had for the rarer historical-as_of case.
+    """
+    most_recently_closed = AccountingPeriod.objects.filter(
+        organization=organization, is_closed=True, end_date__lt=as_of,
+    ).order_by("-end_date").first()
+    if most_recently_closed is None:
+        return None
+    return most_recently_closed.end_date + timedelta(days=1)
 
 
 def balance_sheet(organization, *, as_of=None) -> dict:
@@ -266,11 +293,17 @@ def balance_sheet(organization, *, as_of=None) -> dict:
     report balance honestly rather than pretending the gap doesn't
     exist.
 
-    period_start comes from the real AccountingPeriod covering
-    as_of (Task 4.3's own concept) — if none is found (e.g. a
-    historical as_of predating period tracking), falls back to
-    since=None (all-time net income) rather than crashing a report
-    over an out-of-range date.
+    period_start comes from the most recently CLOSED period's own
+    end_date + 1 day (_unclosed_earnings_start(), fixed 4 Sep 2026 —
+    see that function's own docstring for the real gap this closed:
+    the old version only used the CURRENT period's own start,
+    silently dropping earlier unclosed periods' real net income out
+    of Equity whenever more than one period sits open at once — a
+    real, common state now that Opening Balance onboarding can
+    backdate a shop's history by months). Falls back to since=None
+    (all-time net income) when this org has never closed a single
+    period — every unclosed-until-now posting genuinely belongs in
+    current_year_earnings in that case.
     """
     as_of = as_of or date.today()
 
@@ -309,7 +342,7 @@ def balance_sheet(organization, *, as_of=None) -> dict:
     equity_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in equity]
     total_equity_accounts = sum((r["balance"] for r in equity_rows), Decimal("0"))
 
-    period_start = _current_period_start(organization, as_of)
+    period_start = _unclosed_earnings_start(organization, as_of)
     period = AccountingPeriod.objects.filter(
         organization=organization, start_date__lte=as_of, end_date__gte=as_of,
     ).first()
