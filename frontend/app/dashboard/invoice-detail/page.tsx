@@ -279,29 +279,61 @@ function InvoiceDetailContent() {
           </div>
         </div>
 
-        <table className="data-table" style={{ width: "100%", marginBottom: 20 }}>
-          <thead>
-            <tr>
-              <th>Deskripsi</th>
-              <th style={{ textAlign: "right" }}>Jml</th>
-              <th style={{ textAlign: "right" }}>Harga Satuan</th>
-              <th style={{ textAlign: "right" }}>Subtotal</th>
-            </tr>
-          </thead>
-          <tbody>
-            {invoice.line_items.map((li) => (
-              <tr key={li.id}>
-                <td>{li.description}</td>
-                <td className="mono" style={{ textAlign: "right" }}>{li.quantity}</td>
-                <td className="mono" style={{ textAlign: "right" }}>{money(li.unit_price)}</td>
-                <td className="mono" style={{ textAlign: "right" }}>{money(li.subtotal)}</td>
-              </tr>
-            ))}
-            {invoice.line_items.length === 0 && (
-              <tr><td colSpan={4} style={{ textAlign: "center", padding: 20, color: "var(--steel)" }}>Belum ada item.</td></tr>
-            )}
-          </tbody>
-        </table>
+        {/* 4 Sep 2026 — real fix: Invoice already had the exact same
+            kind field ("part"/"labor") EstimateLineItem uses to split
+            Parts/Jasa — this page just never read it, rendering every
+            invoice as one flat list while its own source estimate
+            showed the real, expected split. No backend change needed
+            — invoicing/models.py's own InvoiceLineItem.kind was
+            already there. */}
+        {(() => {
+          const partItems = invoice.line_items.filter((li) => li.kind === "part");
+          const laborItems = invoice.line_items.filter((li) => li.kind === "labor");
+          const partTotal = partItems.reduce((sum, li) => sum + Number(li.subtotal), 0);
+          const laborTotal = laborItems.reduce((sum, li) => sum + Number(li.subtotal), 0);
+
+          const renderTable = (items: typeof invoice.line_items) => (
+            <table className="data-table" style={{ width: "100%" }}>
+              <thead>
+                <tr>
+                  <th>Deskripsi</th>
+                  <th style={{ textAlign: "right" }}>Jml</th>
+                  <th style={{ textAlign: "right" }}>Harga Satuan</th>
+                  <th style={{ textAlign: "right" }}>Subtotal</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((li) => (
+                  <tr key={li.id}>
+                    <td>{li.description}</td>
+                    <td className="mono" style={{ textAlign: "right" }}>{li.quantity}</td>
+                    <td className="mono" style={{ textAlign: "right" }}>{money(li.unit_price)}</td>
+                    <td className="mono" style={{ textAlign: "right" }}>{money(li.subtotal)}</td>
+                  </tr>
+                ))}
+                {items.length === 0 && (
+                  <tr><td colSpan={4} style={{ textAlign: "center", padding: 16, color: "var(--steel)" }}>Belum ada item.</td></tr>
+                )}
+              </tbody>
+            </table>
+          );
+
+          return (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--steel)", textTransform: "uppercase", marginBottom: 8 }}>Parts</div>
+              {renderTable(partItems)}
+              <div style={{ textAlign: "right", fontSize: 13, color: "var(--steel)", padding: "8px 0 20px" }}>
+                Total Parts&nbsp;&nbsp;<span className="mono" style={{ fontWeight: 700, color: "var(--ink)" }}>{money(partTotal)}</span>
+              </div>
+
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--steel)", textTransform: "uppercase", marginBottom: 8 }}>Jasa</div>
+              {renderTable(laborItems)}
+              <div style={{ textAlign: "right", fontSize: 13, color: "var(--steel)", padding: "8px 0" }}>
+                Total Jasa&nbsp;&nbsp;<span className="mono" style={{ fontWeight: 700, color: "var(--ink)" }}>{money(laborTotal)}</span>
+              </div>
+            </div>
+          );
+        })()}
 
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <div style={{ width: 260 }}>
