@@ -461,3 +461,260 @@ export const depreciationRunApi = {
     }
   },
 };
+
+// =============================================================================
+// Opening Balance — new-workshop onboarding (3 Sep 2026)
+// =============================================================================
+// Mirrors the real backend serializer shapes exactly (see
+// backend/apps/accounting/serializers.py) — a plain read row per
+// category, matching what OpeningBalanceSessionSerializer nests
+// under the session. Write payloads are separate, smaller types,
+// same split as RecordAssetPayload/Asset above.
+
+export interface OpeningBalanceCashLineRow {
+  id: string;
+  account_code: "1001" | "1101";
+  amount: string | number;
+  created_at: string;
+}
+
+export interface OpeningBalancePartLineRow {
+  id: string;
+  part_name: string;
+  sku: string;
+  unit: string;
+  quantity: string | number;
+  cost_price: string | number;
+  // Null until the session is actually posted — see that model's
+  // own docstring: never fabricated before the real Part exists.
+  part_id: string | null;
+  created_at: string;
+}
+
+export interface OpeningBalanceAssetLineRow {
+  id: string;
+  name: string;
+  current_book_value: string | number;
+  remaining_useful_life_months: number;
+  asset_id: string | null;
+  created_at: string;
+}
+
+export interface OpeningBalanceReceivableRow {
+  id: string;
+  customer: string;
+  customer_name: string;
+  balance_due: string | number;
+  due_date: string | null;
+  reference: string;
+  created_at: string;
+}
+
+export interface OpeningBalancePayableRow {
+  id: string;
+  supplier: string;
+  supplier_name: string;
+  balance_due: string | number;
+  due_date: string | null;
+  reference: string;
+  created_at: string;
+}
+
+export type OpeningBalanceOtherSide = "debit" | "credit";
+
+export interface OpeningBalanceOtherLineRow {
+  id: string;
+  account_code: string;
+  // Best-effort on the backend — null if account_code doesn't
+  // (yet) resolve to a real Account. See that serializer's own
+  // docstring: only ever validated for real at post() time.
+  account_name: string | null;
+  side: OpeningBalanceOtherSide;
+  amount: string | number;
+  description: string;
+  created_at: string;
+}
+
+export interface OpeningBalanceSessionResponse {
+  id: string;
+  start_date: string;
+  status: "DRAFT" | "POSTED";
+  cash_lines: OpeningBalanceCashLineRow[];
+  part_lines: OpeningBalancePartLineRow[];
+  asset_lines: OpeningBalanceAssetLineRow[];
+  receivable_lines: OpeningBalanceReceivableRow[];
+  payable_lines: OpeningBalancePayableRow[];
+  other_lines: OpeningBalanceOtherLineRow[];
+  // Live PREVIEW totals, computed the same way post() itself
+  // assembles the real journal — see OpeningBalanceSessionSerializer's
+  // own docstring for why this is a client-facing preview, not the
+  // same code path as the real balance check inside post().
+  total_debit: string | number;
+  total_credit: string | number;
+  is_balanced: boolean;
+  difference: string | number;
+  journal_entry_id: string | null;
+  posted_at: string | null;
+  posted_by: string | null;
+  posted_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OpeningBalanceActionResult {
+  success: boolean;
+  message?: string;
+  opening_balance_session?: OpeningBalanceSessionResponse;
+}
+
+function extractErrorMessage(err: unknown, fallback: string): string {
+  const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+  return message || fallback;
+}
+
+export const openingBalanceApi = {
+  // Returns null when no session exists yet for this org — a real,
+  // honest "hasn't started yet" state (the endpoint itself returns
+  // {opening_balance_session: null} with a 200, not a 404), same
+  // precedent as depreciationRunApi.forPeriod() above. Also returns
+  // null on any real request failure (e.g. no organization) — same
+  // "collapse to null, let the page render its own empty state"
+  // convention as every other read in this file.
+  async getSession(): Promise<OpeningBalanceSessionResponse | null> {
+    try {
+      const { data } = await api.get("/api/accounting/opening-balance/");
+      return data.opening_balance_session;
+    } catch {
+      return null;
+    }
+  },
+
+  async createSession(payload: { start_date: string }): Promise<OpeningBalanceActionResult> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal membuat sesi saldo awal.") };
+    }
+  },
+
+  // The real, final, irreversible action.
+  async post(): Promise<OpeningBalanceActionResult> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/post/");
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal memposting saldo awal.") };
+    }
+  },
+
+  // Real upsert — a second call for the same account_code updates
+  // the existing amount, matching the backend's own
+  // update_or_create() behavior. No delete counterpart exists (by
+  // backend design — see OpeningBalanceCashLine's own
+  // unique_together) — correcting a cash/bank line means calling
+  // this again with the right amount, not removing and re-adding.
+  async upsertCash(payload: { account_code: "1001" | "1101"; amount: string | number }):
+    Promise<{ success: boolean; message?: string; cash_line?: OpeningBalanceCashLineRow }> {
+    try {
+      const { data } = await api.put("/api/accounting/opening-balance/cash/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menyimpan saldo kas/bank.") };
+    }
+  },
+
+  async addPart(payload: { part_name: string; sku?: string; unit?: string; quantity: string | number; cost_price: string | number }):
+    Promise<{ success: boolean; message?: string; part_line?: OpeningBalancePartLineRow }> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/parts/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menambah item stok.") };
+    }
+  },
+  async deletePart(id: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      await api.delete(`/api/accounting/opening-balance/parts/${id}/`);
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menghapus item stok.") };
+    }
+  },
+
+  async addAsset(payload: { name: string; current_book_value: string | number; remaining_useful_life_months: number }):
+    Promise<{ success: boolean; message?: string; asset_line?: OpeningBalanceAssetLineRow }> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/assets/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menambah aset.") };
+    }
+  },
+  async deleteAsset(id: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      await api.delete(`/api/accounting/opening-balance/assets/${id}/`);
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menghapus aset.") };
+    }
+  },
+
+  // customer is a real Customer UUID, resolved server-side against
+  // the acting org — never a bare name. See this module's own
+  // pending follow-up note in OnboardingOverlay.tsx for the
+  // Customer-picker UI this is waiting on.
+  async addReceivable(payload: { customer: string; balance_due: string | number; due_date?: string; reference?: string }):
+    Promise<{ success: boolean; message?: string; receivable_line?: OpeningBalanceReceivableRow }> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/receivables/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menambah piutang.") };
+    }
+  },
+  async deleteReceivable(id: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      await api.delete(`/api/accounting/opening-balance/receivables/${id}/`);
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menghapus piutang.") };
+    }
+  },
+
+  async addPayable(payload: { supplier: string; balance_due: string | number; due_date?: string; reference?: string }):
+    Promise<{ success: boolean; message?: string; payable_line?: OpeningBalancePayableRow }> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/payables/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menambah utang.") };
+    }
+  },
+  async deletePayable(id: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      await api.delete(`/api/accounting/opening-balance/payables/${id}/`);
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menghapus utang.") };
+    }
+  },
+
+  async addOther(payload: { account_code: string; side: OpeningBalanceOtherSide; amount: string | number; description?: string }):
+    Promise<{ success: boolean; message?: string; other_line?: OpeningBalanceOtherLineRow }> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/other/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menambah entri.") };
+    }
+  },
+  async deleteOther(id: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      await api.delete(`/api/accounting/opening-balance/other/${id}/`);
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal menghapus entri.") };
+    }
+  },
+};
