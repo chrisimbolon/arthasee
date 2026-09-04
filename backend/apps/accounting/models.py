@@ -350,6 +350,42 @@ class AccountingPeriod(TenantScopedModel):
                 "untuk koreksi lebih lanjut."
             )
 
+        # 4 Sep 2026 — real, hard chronological-order guard, found
+        # necessary via a careful design-review trace, not a live
+        # incident. Closing periods out of order silently broke TWO
+        # separate things that both quietly assumed strict
+        # chronological closing:
+        #   - balance_sheet()'s own current_year_earnings — an
+        #     earlier, still-open period's real income would be
+        #     DISCARDED ENTIRELY once a later period closed and its
+        #     own "is the period covering as_of closed" branch fired,
+        #     not just miscounted (see reports.py's own
+        #     _unclosed_earnings_start() docstring for the full
+        #     trace).
+        #   - DepreciationRun.execute()'s own entries_so_far logic —
+        #     an asset would silently post only ONE month of
+        #     depreciation on an out-of-order close, not however many
+        #     months should genuinely have accrued since its last
+        #     real entry.
+        # Rather than patch each downstream symptom separately, this
+        # blocks the real root cause at its source: a period can
+        # never close while an earlier period for the same
+        # organization is still open. Matches how real bookkeeping
+        # already works — January closes before February, never the
+        # reverse. A period that was closed and later reopened (see
+        # reopen() below) counts as open again here too — its own
+        # closed_at being set in the past does not exempt it; only
+        # is_closed, the real current state, matters for this check.
+        earlier_open_period = AccountingPeriod.objects.filter(
+            organization=self.organization, start_date__lt=self.start_date, is_closed=False,
+        ).order_by("start_date").first()
+        if earlier_open_period is not None:
+            raise ValueError(
+                f"Periode {earlier_open_period.start_date}–{earlier_open_period.end_date} "
+                f"masih belum ditutup — tutup periode-periode sebelumnya secara "
+                f"berurutan terlebih dahulu."
+            )
+
         with transaction.atomic():
             DepreciationRun.execute(organization=self.organization, accounting_period=self, run_by=closed_by)
 
