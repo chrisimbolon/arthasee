@@ -1575,11 +1575,31 @@ class AccountingPeriodCloseTests(TestCase):
         self.revenue = Account.objects.get(organization=self.org, code="4001")
         self.ar = Account.objects.get(organization=self.org, code="1201")
 
+    def _period(self, month):
+        return AccountingPeriod.objects.get(organization=self.org, year=2026, month=month)
+
+    def _close_prior_months(self, target_month):
+        """
+        Real prerequisite for most tests below, added 4 Sep 2026 —
+        AccountingPeriod.close() now enforces strict chronological
+        closing order (see that method's own docstring). Every test
+        below that closes a month other than 1 originally closed its
+        own target month directly, with earlier months left open —
+        exactly the out-of-order state the new guard exists to
+        block. Closing every earlier month first (each with zero
+        real activity, which closes cleanly and posts nothing) is
+        real, valid test setup now required by the guard, not a
+        workaround around it.
+        """
+        for month in range(1, target_month):
+            self._period(month).close(closed_by=None)
+
     def test_close_with_zero_activity_posts_nothing_but_still_closes(self):
         """Matches the existing WorkOrderCompleted "$0 -> post
         nothing" precedent — a genuinely quiet month closes cleanly
         with no journal entry at all."""
-        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=2)
+        self._close_prior_months(2)
+        period = self._period(2)
         closing_entry, net_income = period.close(closed_by=None)
         self.assertIsNone(closing_entry)
         self.assertEqual(net_income, Decimal("0"))
@@ -1588,11 +1608,12 @@ class AccountingPeriodCloseTests(TestCase):
         self.assertIsNotNone(period.closed_at)
 
     def test_close_posts_real_pl_entry_and_updates_retained_earnings(self):
+        self._close_prior_months(3)
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 3, 10), source=JournalEntry.Source.MANUAL,
             lines=[{"account": self.ar, "debit": Decimal("2000000")}, {"account": self.revenue, "credit": Decimal("2000000")}],
         )
-        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=3)
+        period = self._period(3)
         closing_entry, net_income = period.close(closed_by=None)
 
         self.assertEqual(net_income, Decimal("2000000"))
@@ -1612,6 +1633,7 @@ class AccountingPeriodCloseTests(TestCase):
         333.333,33 real depreciation expense = 666.666,67 net income,
         not 1.000.000.
         """
+        self._close_prior_months(2)
         Asset.record(
             organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
             cost=Decimal("1000000"), useful_life_months=3,
@@ -1621,7 +1643,7 @@ class AccountingPeriodCloseTests(TestCase):
             lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
         )
 
-        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=2)
+        period = self._period(2)
         closing_entry, net_income = period.close(closed_by=None)
 
         self.assertEqual(net_income, Decimal("666666.67"))
@@ -1630,7 +1652,8 @@ class AccountingPeriodCloseTests(TestCase):
         self.assertEqual(depreciation_run.total_amount, Decimal("333333.33"))
 
     def test_reclose_blocked_even_after_reopen(self):
-        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=4)
+        self._close_prior_months(4)
+        period = self._period(4)
         period.close(closed_by=None)
         period.reopen(reopened_by=None)
 
@@ -1638,7 +1661,8 @@ class AccountingPeriodCloseTests(TestCase):
             period.close(closed_by=None)
 
     def test_reopen_flips_is_closed_false_but_keeps_closed_at(self):
-        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=5)
+        self._close_prior_months(5)
+        period = self._period(5)
         period.close(closed_by=None)
         original_closed_at = period.closed_at
 
@@ -1659,11 +1683,12 @@ class AccountingPeriodCloseTests(TestCase):
         usage, since close() itself blocks first, at the very top of
         the method.
         """
+        self._close_prior_months(2)
         Asset.record(
             organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
             cost=Decimal("1000000"), useful_life_months=3,
         )
-        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=2)
+        period = self._period(2)
         period.close(closed_by=None)
 
         self.assertEqual(DepreciationRun.objects.filter(organization=self.org, accounting_period=period).count(), 1)
@@ -1672,6 +1697,74 @@ class AccountingPeriodCloseTests(TestCase):
             period.close(closed_by=None)
 
         self.assertEqual(DepreciationRun.objects.filter(organization=self.org, accounting_period=period).count(), 1)
+
+    # ── Chronological-order guard — 4 Sep 2026 ──────────────────
+    # The actual regression coverage for the gap found via the
+    # Balance Sheet design-review trace: closing periods out of
+    # order silently broke both balance_sheet()'s own
+    # current_year_earnings computation and DepreciationRun's own
+    # entries_so_far logic — see AccountingPeriod.close()'s own
+    # docstring for the full reasoning behind blocking this at the
+    # source instead of patching each downstream symptom.
+
+    def test_cannot_close_out_of_order(self):
+        """THE real regression test — closing a later period while
+        an earlier one is still open must be blocked outright, not
+        silently accepted and left to corrupt downstream reports."""
+        period_2 = self._period(2)
+        with self.assertRaises(ValueError):
+            period_2.close(closed_by=None)
+        period_2.refresh_from_db()
+        self.assertFalse(period_2.is_closed)
+
+    def test_can_close_periods_in_correct_chronological_order(self):
+        self._period(1).close(closed_by=None)
+        self._period(2).close(closed_by=None)
+        self.assertTrue(self._period(1).is_closed)
+        self.assertTrue(self._period(2).is_closed)
+
+    def test_the_actual_earliest_period_closes_without_any_prerequisite(self):
+        """The real base case — a period with genuinely nothing
+        earlier on record must never be blocked by its own guard."""
+        self._period(1).close(closed_by=None)
+        self.assertTrue(self._period(1).is_closed)
+
+    def test_error_names_the_real_earliest_open_period(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._period(3).close(closed_by=None)
+        self.assertIn(str(self._period(1).start_date), str(ctx.exception))
+
+    def test_guard_scoped_to_organization(self):
+        """A different org's own open earlier period must never
+        block this org's real close — same tenant-isolation
+        discipline as every other real guard in this codebase."""
+        other_org = Organization.objects.create(name="Bengkel Lain Period Order")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        # other_org's own January period exists and is deliberately
+        # left open here — irrelevant to self.org's own close below.
+
+        self._period(1).close(closed_by=None)
+        period_2 = self._period(2)
+        period_2.close(closed_by=None)
+        period_2.refresh_from_db()
+        self.assertTrue(period_2.is_closed)
+
+    def test_reopening_an_earlier_period_blocks_closing_a_later_one_past_it(self):
+        """
+        Real, subtle case: periods 1 and 2 both close in order, then
+        1 is reopened for a correction — period 3 must now be
+        blocked from closing too, since period 1 is genuinely open
+        again, even though it was briefly closed before. is_closed
+        (the real current state), not closed_at (a permanent past
+        marker — see close()'s own docstring), is what this guard
+        checks.
+        """
+        self._period(1).close(closed_by=None)
+        self._period(2).close(closed_by=None)
+        self._period(1).reopen(reopened_by=None)
+
+        with self.assertRaises(ValueError):
+            self._period(3).close(closed_by=None)
 
 
 class DailyCashActivityReportTests(TestCase):
