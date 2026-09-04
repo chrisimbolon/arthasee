@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .serializers import (OnboardingCompleteSerializer, OrganizationSerializer,
+from .serializers import (OrganizationSerializer,
                           OrganizationSettingsUpdateSerializer)
 
 
@@ -20,6 +20,11 @@ class MyOrganizationView(APIView):
     Organization._generate_invoice_code() produced at signup. See
     that method's own docstring for why registration itself never
     asks for this field at all.
+
+    3 Sep 2026 — this is now ALSO the real save path for onboarding's
+    own Step 1 (phone/address/invoice_code) — see
+    OrganizationOnboardingCompleteView's own docstring below for why
+    that responsibility moved here.
     """
     permission_classes = [IsAuthenticated]
 
@@ -68,21 +73,33 @@ class MyOrganizationView(APIView):
 
 class OrganizationOnboardingCompleteView(APIView):
     """
-    POST /api/organizations/mine/complete-onboarding/
+    POST /api/organizations/mine/complete-onboarding/ — no payload.
 
-    29 Aug 2026 — the real, single, atomic action behind the
-    mandatory first-login welcome gate (Chris's own confirmed
-    design): phone/address get saved, invoice_code gets confirmed or
-    overridden from its own auto-generated value, and
-    onboarding_completed flips to True — all at once, one real
-    action, not three separate PATCH calls the frontend would need
-    to sequence itself.
+    3 Sep 2026 — REDESIGNED for the Opening Balance wizard becoming a
+    real, mandatory Step 2 after the profile step (Chris's own
+    confirmed direction). Previously this single call both saved
+    phone/address/invoice_code AND flipped onboarding_completed —
+    correct for a one-step gate, but a real gap once a genuine Step 2
+    existed: a browser refresh mid-Step-2 would have nothing
+    persisted to tell the gate "Step 1 is already done, skip straight
+    to Step 2" — it would just re-show Step 1 from scratch, or worse,
+    with the OLD contract, there was no Step 2 to return to at all.
 
-    Same owner-only role check as MyOrganizationView.patch() above —
-    real defense in depth, even though in practice the ONLY
-    membership that could exist at this exact moment (right after
-    registration, before anyone else has been invited) is the
-    owner's own.
+    Real fix: Step 1 now saves phone/address/invoice_code via the
+    existing, plain MyOrganizationView.patch() path (through
+    OrganizationSettingsUpdateSerializer, already proven, no new
+    serializer needed) — WITHOUT touching onboarding_completed. This
+    endpoint's only remaining job is the final, explicit flag flip,
+    guarded by a real check that Step 1's own data genuinely exists
+    first. Called identically from BOTH of Step 2's real exit paths
+    (a posted OpeningBalanceSession, or the "Bengkel Baru — Mulai
+    dari Nol" path for a shop with no prior history) — which path
+    happened is entirely orthogonal to this call; neither passes a
+    payload, and neither needs to.
+
+    OnboardingCompleteSerializer is now dead code, removed — its one
+    real job (require + save phone/address/invoice_code in the same
+    call as the flag flip) no longer matches how this flow works.
     """
     permission_classes = [IsAuthenticated]
 
@@ -100,12 +117,25 @@ class OrganizationOnboardingCompleteView(APIView):
                 {"success": False, "message": "Hanya pemilik bengkel yang bisa menyelesaikan pengaturan awal."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        serializer = OnboardingCompleteSerializer(
-            membership.organization, data=request.data, partial=False,
-        )
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+
+        org = membership.organization
+        # Real, server-side guard — not just trusted from frontend
+        # step ordering. A Step 2 call arriving with Step 1's own
+        # data genuinely missing (e.g. a stray direct API call, or a
+        # future frontend bug skipping straight to Step 2) must never
+        # silently complete onboarding for a shop with no real
+        # profile on record — same "a real business rule deserves a
+        # real server-side guarantee" reasoning the original 29 Aug
+        # design already established for this exact endpoint.
+        if not (org.phone and org.address and org.invoice_code):
+            return Response(
+                {"success": False, "message": "Lengkapi profil bengkel (Langkah 1) terlebih dahulu."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        org.onboarding_completed = True
+        org.save(update_fields=["onboarding_completed"])
         return Response({
             "success":      True,
-            "organization": OrganizationSerializer(membership.organization).data,
+            "organization": OrganizationSerializer(org).data,
         })

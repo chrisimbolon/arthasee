@@ -188,3 +188,114 @@ class MyOrganizationSettingsUpdateAPITests(APITestCase):
         resp = self.client.get("/api/organizations/mine/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn("invoice_code", resp.data["organization"])
+
+
+class OrganizationOnboardingCompleteAPITests(APITestCase):
+    """
+    3 Sep 2026 — real, fresh coverage for the REDESIGNED complete-
+    onboarding endpoint (no prior tests existed for the old
+    contract). No payload anymore — Step 1's own data is expected to
+    already be saved via MyOrganizationView.patch() before this is
+    ever called; this endpoint's only real job is the final flag
+    flip, guarded by a server-side check that Step 1 genuinely
+    happened first.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="CV. Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.onboardcomplete@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.staff = CustomUser.objects.create_user(
+            email="staff.onboardcomplete@test.id", password="pass12345!",
+            full_name="SA Staff",
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.staff, role="member", is_active=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def _complete_step_one(self):
+        """
+        Real Step 1 — via the plain, already-proven PATCH path, not
+        the old complete-onboarding contract. Deliberately does NOT
+        assert onboarding_completed here — that is exactly the real
+        behavior change this whole redesign exists to prove: Step 1
+        alone must never flip the flag.
+        """
+        return self.client.patch("/api/organizations/mine/", {
+            "phone": "0812-3456-7890", "address": "Jl. Merdeka No. 1", "invoice_code": "AM",
+        }, format="json")
+
+    def test_step_one_alone_does_not_complete_onboarding(self):
+        """
+        THE core regression test for the whole redesign — the actual
+        gap found live during the architecture review. Before this
+        fix, a single call did both jobs; now Step 1 must leave
+        onboarding_completed False, so a mid-Step-2 refresh has
+        something real to resume from.
+        """
+        self._complete_step_one()
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.onboarding_completed)
+
+    def test_complete_onboarding_requires_no_payload(self):
+        self._complete_step_one()
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["organization"]["onboarding_completed"])
+        self.org.refresh_from_db()
+        self.assertTrue(self.org.onboarding_completed)
+
+    def test_rejected_when_step_one_data_is_missing(self):
+        """
+        The real server-side guard — a bare call with no prior
+        profile data on record must never silently complete
+        onboarding for a shop with nothing actually saved.
+        """
+        # self.org has no phone/address set at all — Organization.
+        # objects.create(name=...) in setUp() never touched them.
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.onboarding_completed)
+
+    def test_non_owner_cannot_complete_onboarding(self):
+        self._complete_step_one()
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.onboarding_completed)
+
+    def test_no_membership_returns_404(self):
+        outsider = CustomUser.objects.create_user(
+            email="outsider.onboardcomplete@test.id", password="pass12345!",
+            full_name="No Org",
+        )
+        self.client.force_authenticate(user=outsider)
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_callable_again_after_already_completed_without_error(self):
+        """
+        Real, deliberate leniency — this endpoint is called from two
+        different Step 2 exit paths (a posted OpeningBalanceSession,
+        or "Bengkel Baru"), and there is no real state corruption risk
+        in it succeeding a second time; a stray double-call should
+        never surface a confusing error to the owner.
+        """
+        self._complete_step_one()
+        self.client.post("/api/organizations/mine/complete-onboarding/")
+        second = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+
+    def test_response_includes_full_organization_data(self):
+        self._complete_step_one()
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.data["organization"]["phone"], "0812-3456-7890")
+        self.assertEqual(resp.data["organization"]["invoice_code"], "AM")
