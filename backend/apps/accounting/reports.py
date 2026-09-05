@@ -11,6 +11,7 @@ params, call a function, return a Response), the actual accounting
 logic lives here where it can be tested directly against real ledger
 data without going through HTTP.
 """
+import calendar
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -171,6 +172,73 @@ def profit_and_loss_comparison(organization, *, since, as_of) -> dict:
         "gross_profit_delta": _delta(current["gross_profit"],  prior["gross_profit"]),
         "net_income_delta":   _delta(current["net_income"],    prior["net_income"]),
     }
+
+
+def profit_and_loss_trend(organization, *, end_date=None, months=6) -> dict:
+    """
+    5 Sep 2026 — Made's own direct, confirmed request (a real phone
+    call, not a hypothetical persona ask): a real multi-month P&L
+    trend, not just a single-period-vs-prior-period comparison — "is
+    this a real trend, or was last month just a blip?"
+
+    Genuine thin wrapper, exactly as scoped and approved — calls the
+    already-proven profit_and_loss() once per real calendar month in
+    the requested window, no new posting logic, no new query pattern
+    beyond what that function already does per call. `months` is
+    deliberately restricted to {3, 6, 12} by the calling view, not an
+    open integer range — those are the only three real preset
+    buttons Made's own confirmed UI design offers; anything else
+    would render a table shape nobody actually designed for.
+
+    Anchored to the calendar MONTH containing end_date (defaults to
+    today) — Chris's own confirmed call: "if the picker is set to
+    August 2026 and he selects 6 Months, it renders March–August
+    2026," regardless of whatever exact since/as_of range the
+    existing single-period comparison happens to be showing at the
+    same time. Pure Python month arithmetic via the stdlib calendar
+    module — no external dependency, same discipline as every other
+    real month-walking helper already established in this codebase
+    (apps.service.models._add_months, _seed_all_months in this very
+    test file).
+    """
+    end_date = end_date or date.today()
+
+    # Walk backward `months` calendar months from end_date's own
+    # month, then reverse into chronological order (oldest first) —
+    # the real, natural reading order for a left-to-right trend
+    # table.
+    cursor_year, cursor_month = end_date.year, end_date.month
+    raw_months = []
+    for _ in range(months):
+        raw_months.append((cursor_year, cursor_month))
+        if cursor_month == 1:
+            cursor_year, cursor_month = cursor_year - 1, 12
+        else:
+            cursor_month -= 1
+    raw_months.reverse()
+
+    month_rows = []
+    for year, month in raw_months:
+        last_day = calendar.monthrange(year, month)[1]
+        month_start = date(year, month, 1)
+        month_end = date(year, month, last_day)
+        pl = profit_and_loss(organization, since=month_start, as_of=month_end)
+        month_rows.append({
+            "year": year,
+            "month": month,
+            "total_revenue": pl["total_revenue"],
+            "total_cogs": pl["total_cogs"],
+            "gross_profit": pl["gross_profit"],
+            "total_expenses": pl["total_expenses"],
+            "net_income": pl["net_income"],
+        })
+
+    return {
+        "end_date": end_date,
+        "months": months,
+        "data": month_rows,
+    }
+
 
 def cash_conversion_cycle(organization, *, since, as_of) -> dict:
     """
