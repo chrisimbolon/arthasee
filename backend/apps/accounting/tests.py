@@ -2868,6 +2868,22 @@ class GeneralLedgerReportTests(TestCase):
         data = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 5, 31))
         self.assertIsNone(data["rows"][-1]["reference_event_id"])
 
+    def test_row_carries_the_entrys_real_id_not_just_its_display_number(self):
+        """
+        4 Sep 2026 — real gap found and fixed while building the
+        journal-entry detail endpoint: the row dict originally
+        carried only entry_number (a human-readable display string,
+        "000010"), never the entry's own real UUID — with no real id
+        to call it with, the new single-entry detail endpoint would
+        have had nothing valid to look up from Buku Besar's own rows.
+        """
+        entry = JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 6, 1), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
+        )
+        data = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 6, 30))
+        self.assertEqual(data["rows"][0]["entry_id"], str(entry.id))
+
 
 class TraceForwardResolverTests(TestCase):
     """
@@ -3081,3 +3097,62 @@ class GeneralLedgerAPITests(APITestCase):
         resp = self.client.get("/api/accounting/general-ledger/?account=1001")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["rows"], [])
+
+
+class JournalEntryDetailAPITests(APITestCase):
+    """
+    Real coverage for GET /api/accounting/journal-entries/<pk>/ — the
+    single-entry detail endpoint Buku Besar's own inline row
+    expansion needs (mirroring the Journal page's own existing
+    expand-in-place pattern, not a new drawer component). Reuses
+    JournalEntrySerializer as-is — this class proves the VIEW wiring
+    (lookup, 404, tenant scoping), not the serializer's own shape,
+    which is already proven by JournalEntryAndFailedPostingsAPITests
+    elsewhere in this file.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.jedetail@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.ap   = Account.objects.get(organization=self.org, code="2001")
+
+    def test_returns_the_real_entry_with_every_line(self):
+        entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            memo="Test entry", lines=[
+                {"account": self.cash, "debit": Decimal("1000")},
+                {"account": self.ap, "credit": Decimal("1000")},
+            ],
+        )
+        resp = self.client.get(f"/api/accounting/journal-entries/{entry.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["journal_entry"]["id"], str(entry.id))
+        self.assertEqual(resp.data["journal_entry"]["memo"], "Test entry")
+        self.assertEqual(len(resp.data["journal_entry"]["lines"]), 2)
+
+    def test_returns_404_for_a_real_but_nonexistent_id(self):
+        resp = self.client.get(f"/api/accounting/journal-entries/{uuid.uuid4()}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_scoped_to_organization(self):
+        entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
+        )
+        other_org = Organization.objects.create(name="Bengkel Lain JE Detail")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.jedetail@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get(f"/api/accounting/journal-entries/{entry.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
