@@ -88,7 +88,7 @@ function QuotationLineTable({ title, items }: { title: string; items: Estimate["
   );
 }
 
-function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName: string | null }) {
+function PrintableQuotation({ estimate, orgName, orgAddress }: { estimate: Estimate; orgName: string | null; orgAddress: string | null }) {
   const partItems = estimate.line_items.filter((li) => li.kind === "part");
   const laborItems = estimate.line_items.filter((li) => li.kind === "labor");
 
@@ -97,7 +97,10 @@ function PrintableQuotation({ estimate, orgName }: { estimate: Estimate; orgName
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
         <div>
           <div className="display" style={{ fontSize: 22 }}>{orgName || "Arthasee"}</div>
-          <div style={{ fontSize: 13, color: "var(--steel)", marginTop: 4 }}>QUOTATION / ESTIMASI</div>
+          {orgAddress && (
+            <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 2, maxWidth: 280, lineHeight: 1.4 }}>{orgAddress}</div>
+          )}
+          <div style={{ fontSize: 13, color: "var(--steel)", marginTop: 6 }}>QUOTATION / ESTIMASI</div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div className="mono" style={{ fontSize: 15, fontWeight: 700 }}>EST #{estimate.number}</div>
@@ -424,6 +427,7 @@ function EstimateDetailContent() {
   const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [catalog, setCatalog] = useState<Part[]>([]);
   const [orgName, setOrgName] = useState<string | null>(null);
+  const [orgAddress, setOrgAddress] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -438,7 +442,9 @@ function EstimateDetailContent() {
   useEffect(() => { if (estimateId) load(); }, [estimateId]);
   useEffect(() => { partsApi.list().then(setCatalog); }, []);
   useEffect(() => {
-    organizationsApi.mine().then((res) => { if (res) setOrgName(res.organization.name); });
+    organizationsApi.mine().then((res) => {
+      if (res) { setOrgName(res.organization.name); setOrgAddress(res.organization.address); }
+    });
   }, []);
 
   const handleApprove = async () => {
@@ -589,7 +595,7 @@ function EstimateDetailContent() {
 
       {error && <div className="no-print" style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
-      <PrintableQuotation estimate={estimate} orgName={orgName} />
+        <PrintableQuotation estimate={estimate} orgName={orgName} orgAddress={orgAddress} />
 
       <div className="no-print">
         <OdometerCard ref={odometerRef} estimate={estimate} onUpdated={load} />
