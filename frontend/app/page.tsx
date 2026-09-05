@@ -894,8 +894,8 @@ export default function RootPage() {
               {/* Quote */}
               <p className="mt-3 max-w-[950px] text-[17px] font-medium leading-[1.6] text-[#444444] md:text-[18px] lg:text-[20px]">
                 &quot;Pelanggan itu aset kami. Tanpa pelanggan dan sistem yang
-                mengurus mereka, gudang dan montir sebanyak apa pun tidak ada
-                gunanya. Arthasee mewujudkan impian saya untuk pelanggan dengan sistem yang handal &quot;
+                mengelola mereka, gudang dan montir sebanyak apa pun tidak ada
+                gunanya. Arthasee mewujudkan impian saya untuk mengurus pelanggan dengan sistem yang handal &quot;
               </p>
 
               {/* Customer */}
