@@ -25,11 +25,12 @@
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER, accountingApi,
-  generalLedgerApi, GeneralLedgerResult, GeneralLedgerRow, TrialBalanceAccount,
+  generalLedgerApi, GeneralLedgerResult, GeneralLedgerRow, JournalEntryRow,
+  TrialBalanceAccount,
 } from "@/lib/api/accounting";
-import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import Link from "next/link";
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, Fragment, useEffect, useState } from "react";
 
 function toNumber(value: string | number): number {
   return typeof value === "string" ? parseFloat(value) : value;
@@ -80,6 +81,18 @@ export default function GeneralLedgerPage() {
   const [ledger, setLedger] = useState<GeneralLedgerResult | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // 4 Sep 2026 — inline row expansion, mirroring the Journal page's
+  // own existing expand-in-place pattern exactly, not a new drawer
+  // component (see the design conversation for the full reasoning).
+  // Buku Besar's own rows only ever carry the ONE line touching the
+  // account being viewed — expanding fetches the entry's real, full,
+  // balanced set of lines via the new single-entry detail endpoint,
+  // lazily, once per entry, cached here so re-expanding a row already
+  // opened once doesn't re-fetch.
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [entryDetails, setEntryDetails] = useState<Map<string, JournalEntryRow | null>>(new Map());
+  const [loadingEntryId, setLoadingEntryId] = useState<string | null>(null);
+
   // Account list fetched once — same data Daftar Akun already
   // fetches, no dedicated endpoint for this dropdown. Defaults to
   // Cash (1001) when present, since it's the account an owner most
@@ -111,6 +124,20 @@ export default function GeneralLedgerPage() {
   const handleAccountChange = (e: ChangeEvent<HTMLSelectElement>) => { setAccountCode(e.target.value); setPage(1); };
   const handleSinceChange   = (e: ChangeEvent<HTMLInputElement>) => { setSince(e.target.value); setPage(1); };
   const handleAsOfChange    = (e: ChangeEvent<HTMLInputElement>) => { setAsOf(e.target.value); setPage(1); };
+
+  const toggleEntry = async (entryId: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(entryId)) next.delete(entryId); else next.add(entryId);
+      return next;
+    });
+    if (!entryDetails.has(entryId)) {
+      setLoadingEntryId(entryId);
+      const detail = await accountingApi.journalEntry(entryId);
+      setEntryDetails((prev) => new Map(prev).set(entryId, detail));
+      setLoadingEntryId(null);
+    }
+  };
 
   const grouped = ACCOUNT_TYPE_ORDER.map((type) => ({
     type,
@@ -200,32 +227,84 @@ export default function GeneralLedgerPage() {
               <table className="data-table" style={{ width: "100%" }}>
                 <thead>
                   <tr>
-                    <th>Tanggal</th><th>No. Entri</th><th>Ref Sumber</th><th>Keterangan</th>
+                    <th></th><th>Tanggal</th><th>No. Entri</th><th>Ref Sumber</th><th>Keterangan</th>
                     <th style={{ textAlign: "right" }}>Debit</th>
                     <th style={{ textAlign: "right" }}>Kredit</th>
                     <th style={{ textAlign: "right" }}>Saldo</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {ledger.rows.map((row) => (
-                    <tr key={row.line_id}>
-                      <td>{row.posting_date}</td>
-                      <td className="mono">{row.entry_number}</td>
-                      <td><ReferenceCell row={row} /></td>
-                      <td style={{ fontSize: 13, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {row.memo}
-                      </td>
-                      <td className="mono" style={{ textAlign: "right" }}>
-                        {toNumber(row.debit) > 0 ? formatRupiah(row.debit) : ""}
-                      </td>
-                      <td className="mono" style={{ textAlign: "right" }}>
-                        {toNumber(row.credit) > 0 ? formatRupiah(row.credit) : ""}
-                      </td>
-                      <td className="mono" style={{ textAlign: "right", fontWeight: 600 }}>
-                        {formatRupiah(row.running_balance)}
-                      </td>
-                    </tr>
-                  ))}
+                  {ledger.rows.map((row) => {
+                    const isExpanded = expandedIds.has(row.entry_id);
+                    const detail = entryDetails.get(row.entry_id);
+                    return (
+                      <Fragment key={row.line_id}>
+                        <tr onClick={() => toggleEntry(row.entry_id)} style={{ cursor: "pointer" }}>
+                          <td>{isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</td>
+                          <td>{row.posting_date}</td>
+                          <td className="mono">{row.entry_number}</td>
+                          <td onClick={(e) => e.stopPropagation()}><ReferenceCell row={row} /></td>
+                          <td style={{ fontSize: 13, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {row.memo}
+                          </td>
+                          <td className="mono" style={{ textAlign: "right" }}>
+                            {toNumber(row.debit) > 0 ? formatRupiah(row.debit) : ""}
+                          </td>
+                          <td className="mono" style={{ textAlign: "right" }}>
+                            {toNumber(row.credit) > 0 ? formatRupiah(row.credit) : ""}
+                          </td>
+                          <td className="mono" style={{ textAlign: "right", fontWeight: 600 }}>
+                            {formatRupiah(row.running_balance)}
+                          </td>
+                        </tr>
+                        {isExpanded && (
+                          <tr>
+                            <td colSpan={8} style={{ background: "var(--paper)", padding: "12px 14px 12px 40px" }}>
+                              {loadingEntryId === row.entry_id ? (
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--steel)", fontSize: 13 }}>
+                                  <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Memuat entri...
+                                </div>
+                              ) : !detail ? (
+                                <div style={{ color: "var(--danger)", fontSize: 13 }}>Gagal memuat detail entri.</div>
+                              ) : (
+                                <>
+                                  <table style={{ width: "100%", fontSize: 13 }}>
+                                    <thead>
+                                      <tr style={{ color: "var(--steel)" }}>
+                                        <th style={{ textAlign: "left", fontWeight: 600, padding: "4px 8px" }}>Kode</th>
+                                        <th style={{ textAlign: "left", fontWeight: 600, padding: "4px 8px" }}>Akun</th>
+                                        <th style={{ textAlign: "right", fontWeight: 600, padding: "4px 8px" }}>Debit</th>
+                                        <th style={{ textAlign: "right", fontWeight: 600, padding: "4px 8px" }}>Kredit</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {detail.lines.map((l) => (
+                                        <tr key={l.id}>
+                                          <td className="mono" style={{ padding: "4px 8px" }}>{l.account_code}</td>
+                                          <td style={{ padding: "4px 8px" }}>{l.account_name}</td>
+                                          <td className="mono" style={{ textAlign: "right", padding: "4px 8px" }}>
+                                            {toNumber(l.debit_amount) > 0 ? formatRupiah(l.debit_amount) : ""}
+                                          </td>
+                                          <td className="mono" style={{ textAlign: "right", padding: "4px 8px" }}>
+                                            {toNumber(l.credit_amount) > 0 ? formatRupiah(l.credit_amount) : ""}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                  {detail.created_by_name && (
+                                    <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 8 }}>
+                                      Dibuat oleh {detail.created_by_name}
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
