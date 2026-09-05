@@ -718,3 +718,93 @@ export const openingBalanceApi = {
     }
   },
 };
+
+// =============================================================================
+// General Ledger (Buku Besar) — 4 Sep 2026
+// =============================================================================
+// Mirrors the real backend response shape exactly (reports.
+// general_ledger() + trace_forward.resolve_references() mutating
+// each row's own "reference" key). "reference" carries one of three
+// real states — see trace_forward.py's own module docstring:
+//   - "link"  — a real document with a confirmed frontend detail
+//     page. url is always set when kind is "link".
+//   - "badge" — a real document exists (a real reference number) but
+//     no confirmed detail page to link to yet. url is always null.
+//   - "none"  — no source document at all (MANUAL, PERIOD_CLOSING,
+//     ASSET_ACQUISITION, DEPRECIATION, OPENING_BALANCE), or any
+//     event_type the backend doesn't have a mapping for yet. label
+//     and url are always null.
+
+export type GeneralLedgerReferenceKind = "link" | "badge" | "none";
+
+export interface GeneralLedgerReference {
+  kind: GeneralLedgerReferenceKind;
+  label: string | null;
+  url: string | null;
+}
+
+export interface GeneralLedgerRow {
+  line_id: string;
+  posting_date: string;
+  entry_number: string;
+  event_type: string;
+  source: string;
+  memo: string;
+  debit: string | number;
+  credit: string | number;
+  running_balance: string | number;
+  reference_event_id: string | null;
+  reference: GeneralLedgerReference;
+}
+
+export interface GeneralLedgerAccountInfo {
+  code: string;
+  name: string;
+  account_type: string;
+  normal_balance: "DEBIT" | "CREDIT";
+}
+
+export interface GeneralLedgerData {
+  account: GeneralLedgerAccountInfo;
+  since: string | null;
+  as_of: string;
+  opening_balance: string | number;
+  total_debit: string | number;
+  total_credit: string | number;
+  closing_balance: string | number;
+  total_count: number;
+  page: number;
+  page_size: number;
+  rows: GeneralLedgerRow[];
+}
+
+// Discriminated on `success` — a real 400 (e.g. an invalid account
+// code) must surface its own real message to the user, not silently
+// collapse to an empty/null state the way a plain missing-org read
+// does elsewhere in this file (getOrNull's own convention). Matches
+// the same {success, message} shape every other real WRITE action in
+// this file already uses (closePeriod, reopenPeriod, assetsApi.
+// record) — this GET can genuinely fail with a real, user-facing
+// validation error too, so it gets the same honest treatment.
+export type GeneralLedgerResult =
+  | ({ success: true } & GeneralLedgerData)
+  | { success: false; message: string };
+
+export const generalLedgerApi = {
+  async get(params: {
+    account: string; since?: string; asOf?: string; page?: number; pageSize?: number;
+  }): Promise<GeneralLedgerResult> {
+    try {
+      const { data } = await api.get("/api/accounting/general-ledger/", {
+        params: {
+          account: params.account, since: params.since, as_of: params.asOf,
+          page: params.page, page_size: params.pageSize,
+        },
+      });
+      return data;
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      return { success: false, message: message || "Gagal memuat buku besar." };
+    }
+  },
+};
