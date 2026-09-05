@@ -15,10 +15,14 @@ import { usePathname } from "next/navigation";
 // 1 Sep 2026 — /kas-harian added: Kas Harian, a plain-language daily
 // cash view distinct from /journal (which stays exactly as-is,
 // audit-grade, untouched) — Made's own confirmed real request.
+// 4 Sep 2026 — /general-ledger added: Buku Besar, an account-centric
+// view of the same real ledger /journal shows chronologically. Slotted
+// right after Jurnal, matching the design review's own tab ordering.
 const SUBNAV = [
   { href: "/dashboard/accounting/reports",  label: "Laporan" },
   { href: "/dashboard/accounting/accounts", label: "Daftar Akun" },
   { href: "/dashboard/accounting/journal",  label: "Jurnal" },
+  { href: "/dashboard/accounting/general-ledger", label: "Buku Besar" },
   { href: "/dashboard/accounting/kas-harian", label: "Kas Harian" },
   { href: "/dashboard/accounting/operating-expenses", label: "Beban Operasional" },
   { href: "/dashboard/accounting/assets", label: "Aset Tetap" },
