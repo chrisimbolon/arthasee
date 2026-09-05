@@ -23,6 +23,13 @@ member of the org (data entry during onboarding doesn't need to be
 owner-only — only CREATING the session and the final, irreversible
 POST do, matching the stakes of each action rather than gating
 everything uniformly).
+
+4 Sep 2026 adds a sixth kind — General Ledger (Buku Besar), an
+account-centric view of the same real, already-posted ledger. Same
+thin-view-calls-reports.py shape as every other read-only view here;
+the one real addition is calling trace_forward.resolve_references()
+on the result before returning it, batched once per response, not
+per row.
 """
 from datetime import date
 
@@ -31,7 +38,7 @@ from apps.core.views import TenantScopedAPIView
 from rest_framework import status
 from rest_framework.response import Response
 
-from . import reports
+from . import reports, trace_forward
 from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
                      JournalEntry, OpeningBalanceAssetLine,
                      OpeningBalanceCashLine, OpeningBalanceOtherLine,
@@ -212,6 +219,66 @@ class DashboardFinancialSummaryView(TenantScopedAPIView):
             )
         as_of = _parse_date(request.query_params.get("as_of"))
         data = reports.dashboard_financial_summary(organization, as_of=as_of)
+        return Response({"success": True, **data})
+
+
+class GeneralLedgerView(TenantScopedAPIView):
+    """
+    GET /api/accounting/general-ledger/?account=1001&since=&as_of=&page=1&page_size=50
+
+    4 Sep 2026 — Buku Besar. account query param is required (a
+    plain account CODE, resolved via Account.resolve() the same way
+    every other real posting in this codebase resolves one — never a
+    bare Account UUID lookup). page/page_size are bounded defensively
+    (page >= 1, 1 <= page_size <= 200) — a real ceiling against an
+    abusive or accidental page_size request, not just an unbounded
+    passthrough.
+
+    trace_forward.resolve_references() runs once per response,
+    mutating the already-built rows list in place — this is the one
+    real addition beyond every other thin reporting view in this
+    file, kept as an explicit, separate call rather than folded
+    silently into reports.general_ledger() itself, since that
+    function's own job is computing ledger data, not resolving
+    cross-app references back to source documents.
+    """
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        account_code = request.query_params.get("account")
+        if not account_code:
+            return Response(
+                {"success": False, "message": "Parameter 'account' wajib diisi."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        since = _parse_date(request.query_params.get("since"))
+        as_of = _parse_date(request.query_params.get("as_of"), default=date.today())
+
+        try:
+            page = max(int(request.query_params.get("page", 1)), 1)
+            page_size = min(max(int(request.query_params.get("page_size", 50)), 1), 200)
+        except (TypeError, ValueError):
+            return Response(
+                {"success": False, "message": "Parameter page/page_size tidak valid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            data = reports.general_ledger(
+                organization, account_code=account_code, since=since, as_of=as_of,
+                page=page, page_size=page_size,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        trace_forward.resolve_references(data["rows"])
         return Response({"success": True, **data})
 
 
