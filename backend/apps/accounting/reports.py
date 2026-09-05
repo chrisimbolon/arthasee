@@ -15,11 +15,12 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from apps.accounting.models import (Account, AccountingPeriod, JournalEntry,
-                                    OpeningBalancePayable,
+                                    JournalLine, OpeningBalancePayable,
                                     OpeningBalanceReceivable,
                                     OpeningBalanceSession)
 from apps.invoicing.models import Invoice
 from apps.purchasing.models import SupplierInvoice
+from django.db.models import F, Sum, Window
 
 
 def trial_balance(organization, *, as_of=None) -> dict:
@@ -765,4 +766,124 @@ def daily_cash_activity(organization, *, on_date=None) -> dict:
         "in_count": sum(1 for a in activities if a["direction"] == "in"),
         "out_count": sum(1 for a in activities if a["direction"] == "out"),
         "mutation_count": sum(1 for a in activities if a["direction"] == "mutation"),
+    }
+
+
+# =============================================================================
+# General Ledger (Buku Besar) — 4 Sep 2026
+# =============================================================================
+"""
+Sansan's own "From Journal to General Ledger" architecture proposal,
+reviewed against the real codebase before being built (two visual
+specs corrected during that review — see the design conversation for
+the full reasoning): an account-centric view of the same real,
+already-posted ledger, with a genuine running balance, not a second
+source of truth alongside trial_balance()/the Jurnal page.
+
+Real, deliberate engineering choice: the running balance is computed
+via a Postgres window function (Window(Sum(...))), not a Python
+cumulative loop. A high-volume account (Cash, say) can accumulate
+thousands of lines across a year — a window function computes the
+cumulative sum ONCE, in the database, over the full filtered date
+range; only the requested page is ever pulled into Python. A naive
+loop would need every prior row in memory just to add them up, and
+get slower every month that passes. Opening balance itself reuses
+Account.balance(as_of=...) directly — already-proven, already-tested
+code, not reinvented here.
+
+total_count/total_debit/total_credit are computed from a SEPARATE,
+un-annotated queryset, not derived from the windowed one — counting
+or aggregating a queryset that already carries a window annotation
+would force Postgres to materialize the full window computation just
+to answer a count, real, avoidable overhead this sidesteps entirely.
+"""
+
+def general_ledger(organization, *, account_code, since=None, as_of=None, page=1, page_size=50) -> dict:
+    """
+    One account's own real activity, ordered chronologically, with a
+    genuine running balance column — Buku Besar's own real data
+    source. Raises ValueError (via Account.resolve()) if account_code
+    doesn't resolve to a real, seeded Account for this organization —
+    same real error shape every other account-code lookup in this
+    codebase already produces.
+
+    since=None means "from this account's own inception" — opening_
+    balance is Decimal("0") in that case, matching trial_balance()'s
+    own all-time convention. When since IS given, opening_balance is
+    the real cumulative balance as of the day BEFORE it — the true
+    starting point this range's own running balance builds from, not
+    a range that silently starts from zero and misrepresents the
+    account's real position.
+    """
+    as_of = as_of or date.today()
+    account = Account.resolve(organization, account_code)
+
+    base_qs = JournalLine.objects.filter(account=account, journal_entry__posting_date__lte=as_of)
+    if since is not None:
+        base_qs = base_qs.filter(journal_entry__posting_date__gte=since)
+
+    opening_balance = account.balance(as_of=since - timedelta(days=1)) if since is not None else Decimal("0")
+
+    totals = base_qs.aggregate(total_debit=Sum("debit_amount"), total_credit=Sum("credit_amount"))
+    total_debit = totals["total_debit"] or Decimal("0")
+    total_credit = totals["total_credit"] or Decimal("0")
+
+    sign = 1 if account.normal_balance == Account.NormalBalance.DEBIT else -1
+    closing_balance = opening_balance + (total_debit - total_credit) * sign
+
+    total_count = base_qs.count()
+
+    # Window() requires the queryset's own order_by() to match the
+    # window's internal order_by exactly — a real Django requirement
+    # for any query containing a window function, not a style choice.
+    windowed_qs = (
+        base_qs
+        .annotate(delta=(F("debit_amount") - F("credit_amount")) * sign)
+        .annotate(cumulative=Window(
+            expression=Sum("delta"),
+            order_by=[F("journal_entry__posting_date").asc(), F("created_at").asc(), F("id").asc()],
+        ))
+        .select_related("journal_entry")
+        .order_by("journal_entry__posting_date", "created_at", "id")
+    )
+
+    offset = (page - 1) * page_size
+    page_lines = list(windowed_qs[offset:offset + page_size])
+
+    rows = []
+    for line in page_lines:
+        entry = line.journal_entry
+        rows.append({
+            "line_id": str(line.id),
+            "posting_date": entry.posting_date,
+            "entry_number": entry.entry_number,
+            "event_type": entry.event_type,
+            "source": entry.source,
+            # line.description first — a manual journal can carry a
+            # real per-line description distinct from the entry's
+            # own memo; falls back to the entry-level memo for every
+            # domain-event posting, where individual lines rarely
+            # carry their own separate text.
+            "memo": line.description or entry.memo,
+            "debit": line.debit_amount,
+            "credit": line.credit_amount,
+            "running_balance": opening_balance + line.cumulative,
+            "reference_event_id": str(entry.reference_event_id) if entry.reference_event_id else None,
+        })
+
+    return {
+        "account": {
+            "code": account.code, "name": account.name,
+            "account_type": account.account_type, "normal_balance": account.normal_balance,
+        },
+        "since": since,
+        "as_of": as_of,
+        "opening_balance": opening_balance,
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "closing_balance": closing_balance,
+        "total_count": total_count,
+        "page": page,
+        "page_size": page_size,
+        "rows": rows,
     }
