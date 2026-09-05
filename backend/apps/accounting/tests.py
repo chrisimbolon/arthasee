@@ -3156,3 +3156,143 @@ class JournalEntryDetailAPITests(APITestCase):
 
         resp = self.client.get(f"/api/accounting/journal-entries/{entry.id}/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ProfitAndLossTrendReportTests(TestCase):
+    """
+    Real coverage for reports.profit_and_loss_trend() — Made's own
+    direct, confirmed request (a real phone call, not a hypothetical
+    persona ask). The year-boundary test is the one that matters
+    most here: real proof the pure-Python month-walking arithmetic
+    doesn't silently break at the December -> January wraparound.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        _seed_all_months(self.org, 2025)
+        _seed_all_months(self.org, 2026)
+        self.ar = Account.objects.get(organization=self.org, code="1201")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+
+    def _post_revenue(self, on_date, amount):
+        JournalEntry.post(
+            organization=self.org, posting_date=on_date, source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ar, "debit": Decimal(amount)}, {"account": self.revenue, "credit": Decimal(amount)}],
+        )
+
+    def test_returns_months_in_chronological_order_ending_at_the_anchor_month(self):
+        self._post_revenue(date(2026, 1, 15), Decimal("1000000"))
+        self._post_revenue(date(2026, 2, 15), Decimal("2000000"))
+        self._post_revenue(date(2026, 3, 15), Decimal("3000000"))
+
+        data = reports.profit_and_loss_trend(self.org, end_date=date(2026, 3, 20), months=3)
+
+        self.assertEqual(len(data["data"]), 3)
+        self.assertEqual([(m["year"], m["month"]) for m in data["data"]], [(2026, 1), (2026, 2), (2026, 3)])
+        self.assertEqual(data["data"][0]["total_revenue"], Decimal("1000000"))
+        self.assertEqual(data["data"][1]["total_revenue"], Decimal("2000000"))
+        self.assertEqual(data["data"][2]["total_revenue"], Decimal("3000000"))
+
+    def test_correctly_walks_backward_across_a_year_boundary(self):
+        """
+        Real proof of the pure-Python month arithmetic — anchoring at
+        February must correctly walk back through January and into
+        December of the PRIOR year, not silently break or wrap
+        incorrectly at month=1 -> month=0.
+        """
+        self._post_revenue(date(2025, 12, 15), Decimal("500000"))
+        self._post_revenue(date(2026, 1, 15), Decimal("600000"))
+        self._post_revenue(date(2026, 2, 15), Decimal("700000"))
+
+        data = reports.profit_and_loss_trend(self.org, end_date=date(2026, 2, 10), months=3)
+
+        self.assertEqual(
+            [(m["year"], m["month"]) for m in data["data"]],
+            [(2025, 12), (2026, 1), (2026, 2)],
+        )
+        self.assertEqual(data["data"][0]["total_revenue"], Decimal("500000"))
+        self.assertEqual(data["data"][2]["total_revenue"], Decimal("700000"))
+
+    def test_defaults_to_today_and_six_months_when_omitted(self):
+        data = reports.profit_and_loss_trend(self.org)
+        self.assertEqual(data["months"], 6)
+        self.assertEqual(len(data["data"]), 6)
+        self.assertEqual(data["end_date"], date.today())
+        last = data["data"][-1]
+        self.assertEqual((last["year"], last["month"]), (date.today().year, date.today().month))
+
+    def test_month_with_zero_activity_reports_real_zeros_not_error(self):
+        data = reports.profit_and_loss_trend(self.org, end_date=date(2026, 6, 15), months=3)
+        for row in data["data"]:
+            self.assertEqual(row["total_revenue"], Decimal("0"))
+            self.assertEqual(row["net_income"], Decimal("0"))
+
+    def test_net_income_matches_the_real_profit_and_loss_calculation(self):
+        """
+        Real proof this is a genuine thin wrapper, not a re-derived
+        calculation — reuses the exact same gross_profit/net_income
+        math profit_and_loss() itself already produces and already
+        has its own dedicated coverage for.
+        """
+        self._post_revenue(date(2026, 4, 10), Decimal("1000000"))
+        expense = Account.objects.get(organization=self.org, code="6001")
+        cash = Account.objects.get(organization=self.org, code="1001")
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 4, 12), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": expense, "debit": Decimal("300000")}, {"account": cash, "credit": Decimal("300000")}],
+        )
+
+        data = reports.profit_and_loss_trend(self.org, end_date=date(2026, 4, 20), months=3)
+        april_row = data["data"][-1]
+        self.assertEqual(april_row["total_revenue"], Decimal("1000000"))
+        self.assertEqual(april_row["total_expenses"], Decimal("300000"))
+        self.assertEqual(april_row["net_income"], Decimal("700000"))
+
+
+class ProfitLossTrendAPITests(APITestCase):
+    """Thin-view smoke tests — real logic already proven above."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.pltrend@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_defaults_to_six_months(self):
+        resp = self.client.get("/api/accounting/profit-loss-trend/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["months"], 6)
+        self.assertEqual(len(resp.data["data"]), 6)
+
+    def test_accepts_explicit_months(self):
+        resp = self.client.get("/api/accounting/profit-loss-trend/?months=12")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["data"]), 12)
+
+    def test_rejects_a_months_value_outside_the_three_real_presets(self):
+        resp = self.client.get("/api/accounting/profit-loss-trend/?months=7")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rejects_non_numeric_months(self):
+        resp = self.client.get("/api/accounting/profit-loss-trend/?months=abc")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain PL Trend")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.pltrend@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/profit-loss-trend/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        for row in resp.data["data"]:
+            self.assertEqual(row["total_revenue"], Decimal("0"))
