@@ -22,12 +22,13 @@ from .views import (AccountingPeriodCloseView, AccountingPeriodListView,
                     OpeningBalancePayableListCreateView,
                     OpeningBalancePostView, OpeningBalanceReceivableDetailView,
                     OpeningBalanceReceivableListCreateView,
-                    OpeningBalanceSessionView, ProfitLossView,
-                    TrialBalanceView)
+                    OpeningBalanceSessionView, ProfitLossTrendView,
+                    ProfitLossView, TrialBalanceView)
 
 urlpatterns = [
     path("trial-balance/",   TrialBalanceView.as_view(),           name="trial-balance"),
     path("profit-loss/",     ProfitLossView.as_view(),             name="profit-loss"),
+    path("profit-loss-trend/", ProfitLossTrendView.as_view(),      name="profit-loss-trend"),
     path("balance-sheet/",   BalanceSheetView.as_view(),           name="balance-sheet"),
     path("cash-conversion-cycle/", CashConversionCycleView.as_view(), name="cash-conversion-cycle"),
     path("aging-ar/",        AgingARView.as_view(),                name="aging-ar"),
