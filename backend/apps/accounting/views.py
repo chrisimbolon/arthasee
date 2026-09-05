@@ -410,6 +410,40 @@ class JournalEntryListView(TenantScopedAPIView):
         return Response({"success": True, "journal_entries": JournalEntrySerializer(entries, many=True).data})
 
 
+class JournalEntryDetailView(TenantScopedAPIView):
+    """
+    GET /api/accounting/journal-entries/<uuid:pk>/
+
+    4 Sep 2026 — the real, missing single-entry detail endpoint Buku
+    Besar's own inline row expansion needs (mirroring the Journal
+    page's own existing expand pattern, not a new drawer paradigm —
+    see that design conversation for the full reasoning).
+    general_ledger()'s own row shape deliberately carries only the
+    ONE line touching the specific account being viewed, never every
+    line on the entry — this is what fetches the real, full, balanced
+    entry by its real id. Reuses JournalEntrySerializer as-is — it
+    already nests every line via "lines", the exact same shape
+    JournalEntryListView/ManualJournalListCreateView.get() already
+    return; no second serializer invented for this one view.
+    """
+    model = JournalEntry
+
+    def get(self, request, pk):
+        entry = (
+            self.get_queryset()
+            .filter(pk=pk)
+            .prefetch_related("lines__account")
+            .select_related("created_by")
+            .first()
+        )
+        if entry is None:
+            return Response(
+                {"success": False, "message": "Entri jurnal tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response({"success": True, "journal_entry": JournalEntrySerializer(entry).data})
+
+
 class FailedPostingsView(TenantScopedAPIView):
     """
     GET /api/accounting/failed-postings/?since=&as_of=
