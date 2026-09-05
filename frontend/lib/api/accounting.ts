@@ -65,6 +65,30 @@ export interface ProfitLossComparisonResponse {
   net_income_delta: ReportDelta;
 }
 
+// 5 Sep 2026 — Made's own direct, confirmed request: a real multi-
+// month trend, not just a single-period comparison. Deliberately
+// carries only plain year/month integers per row, no month-name
+// label at all — the frontend already has an established, correct
+// pattern for Indonesian-locale date formatting
+// (toLocaleDateString("id-ID")) elsewhere in this app; inventing a
+// second, backend-side abbreviation list would just be a second
+// source of truth for the same thing.
+export interface ProfitLossTrendMonthRow {
+  year: number;
+  month: number;
+  total_revenue: string | number;
+  total_cogs: string | number;
+  gross_profit: string | number;
+  total_expenses: string | number;
+  net_income: string | number;
+}
+
+export interface ProfitLossTrendResponse {
+  end_date: string;
+  months: number;
+  data: ProfitLossTrendMonthRow[];
+}
+
 export interface BalanceSheetLine {
   code: string;
   name: string;
@@ -315,6 +339,16 @@ export const accountingApi = {
   // instead of relying on a conditional return type.
   profitLossComparison: (since?: string, asOf?: string) =>
     getOrNull<ProfitLossComparisonResponse>("/api/accounting/profit-loss/", { since, as_of: asOf, compare: "1" }),  
+
+  // 5 Sep 2026 — Made's own direct, confirmed request via a real
+  // phone call: a real multi-month trend, not just a single-period
+  // comparison. months is deliberately typed to the three real
+  // preset values the UI offers — same restriction the backend
+  // itself enforces (see ProfitLossTrendView's own docstring).
+  profitLossTrend: (endDate?: string, months?: 3 | 6 | 12) =>
+    getOrNull<ProfitLossTrendResponse>("/api/accounting/profit-loss-trend/", {
+      end_date: endDate, months: months?.toString(),
+    }),
 
   balanceSheet: (asOf?: string) =>
     getOrNull<BalanceSheetResponse>("/api/accounting/balance-sheet/", { as_of: asOf }),
