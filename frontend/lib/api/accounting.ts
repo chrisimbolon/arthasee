@@ -342,6 +342,22 @@ export const accountingApi = {
       source: opts?.source, since: opts?.since, as_of: opts?.asOf,
     }),
 
+  // 4 Sep 2026 — the real, single-entry detail fetch Buku Besar's
+  // own inline row expansion needs — general_ledger()'s own row
+  // shape only ever carries the ONE line touching the account being
+  // viewed, never every line on the entry. Same null-on-failure
+  // convention as depreciationRunApi.forPeriod() below — a real 404
+  // (a stale/deleted id) collapses to null, letting the page render
+  // its own "couldn't load" state rather than throwing.
+  async journalEntry(id: string): Promise<JournalEntryRow | null> {
+    try {
+      const { data } = await api.get(`/api/accounting/journal-entries/${id}/`);
+      return data.journal_entry;
+    } catch {
+      return null;
+    }
+  },
+
   failedPostings: (opts?: { since?: string; asOf?: string }) =>
     getListOrNull<FailedPosting>("/api/accounting/failed-postings/", "failed_postings", {
       since: opts?.since, as_of: opts?.asOf,
@@ -745,6 +761,11 @@ export interface GeneralLedgerReference {
 
 export interface GeneralLedgerRow {
   line_id: string;
+  // 4 Sep 2026 — the entry's own real UUID, distinct from
+  // entry_number (a human-readable display string, "000010") —
+  // needed to actually call accountingApi.journalEntry() for inline
+  // row expansion.
+  entry_id: string;
   posting_date: string;
   entry_number: string;
   event_type: string;
