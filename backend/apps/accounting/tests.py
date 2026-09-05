@@ -23,8 +23,9 @@ isolation rather than requiring the full domain-event fixture chains
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
-from apps.accounting import journal_generator, reports
+from apps.accounting import journal_generator, reports, trace_forward
 from apps.authentication.models import CustomUser
 from apps.core.events.bus import default_bus
 from apps.core.models import Outbox
@@ -36,7 +37,7 @@ from apps.invoicing.tests import InvoicingAPITestBase
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.payments.events import PaymentReceived
 from apps.purchasing.models import Supplier, SupplierInvoice
-from apps.service.models import Vehicle
+from apps.service.models import Customer, Vehicle
 from apps.workorders.events import WorkOrderCompleted
 from apps.workorders.models import WorkOrder, WorkOrderJobLine
 from django.core.management import call_command
@@ -2703,3 +2704,380 @@ class OpeningBalancePostAPITests(APITestCase):
 
         resp = self.client.post("/api/accounting/opening-balance/post/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# =============================================================================
+# General Ledger (Buku Besar) — 4 Sep 2026
+# =============================================================================
+
+class GeneralLedgerReportTests(TestCase):
+    """
+    Real coverage for reports.general_ledger() — the actual
+    justification for its own design gets a dedicated test
+    (test_pagination_preserves_correct_running_balance_across_pages
+    below is the single most important one here, proving the window-
+    function approach doesn't silently reset or corrupt the
+    cumulative sum across a page boundary).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        _seed_all_months(self.org, 2026)
+        self.cash = Account.objects.get(organization=self.org, code="1001")  # debit-normal
+        self.ap   = Account.objects.get(organization=self.org, code="2001")  # credit-normal
+
+    def test_running_balance_accumulates_correctly_with_no_since(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 5), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 10), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("200000")}, {"account": self.ap, "credit": Decimal("200000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 15), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ap, "debit": Decimal("50000")}, {"account": self.cash, "credit": Decimal("50000")}],
+        )
+
+        data = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 1, 31))
+
+        self.assertEqual(data["opening_balance"], Decimal("0"))
+        self.assertEqual(len(data["rows"]), 3)
+        self.assertEqual(data["rows"][0]["running_balance"], Decimal("100000"))
+        self.assertEqual(data["rows"][1]["running_balance"], Decimal("300000"))
+        self.assertEqual(data["rows"][2]["running_balance"], Decimal("250000"))
+        self.assertEqual(data["closing_balance"], Decimal("250000"))
+        self.assertEqual(data["total_debit"], Decimal("300000"))
+        self.assertEqual(data["total_credit"], Decimal("50000"))
+
+    def test_opening_balance_reflects_real_balance_before_since_date(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 5), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 1, 15), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
+        )
+
+        data = reports.general_ledger(
+            self.org, account_code="1001", since=date(2026, 1, 10), as_of=date(2026, 1, 31),
+        )
+
+        # Jan 5 falls BEFORE the window — contributes to opening_balance
+        # only, must not appear as a row.
+        self.assertEqual(data["opening_balance"], Decimal("500000"))
+        self.assertEqual(len(data["rows"]), 1)
+        self.assertEqual(data["rows"][0]["running_balance"], Decimal("600000"))
+        self.assertEqual(data["closing_balance"], Decimal("600000"))
+
+    def test_credit_normal_account_running_balance_direction(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 2, 5), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("300000")}, {"account": self.ap, "credit": Decimal("300000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 2, 10), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.ap, "debit": Decimal("100000")}, {"account": self.cash, "credit": Decimal("100000")}],
+        )
+
+        data = reports.general_ledger(self.org, account_code="2001", as_of=date(2026, 2, 28))
+
+        self.assertEqual(data["rows"][0]["running_balance"], Decimal("300000"))
+        self.assertEqual(data["rows"][1]["running_balance"], Decimal("200000"))
+        self.assertEqual(data["closing_balance"], Decimal("200000"))
+
+    def test_pagination_preserves_correct_running_balance_across_pages(self):
+        """
+        THE single most important test in this class — real proof the
+        window-function approach doesn't reset or corrupt the
+        cumulative sum at a page boundary. 5 entries of 100000 each,
+        page_size=2: page 1 must show running balances 100000/200000;
+        page 2 must CONTINUE from there (300000/400000), not restart
+        from zero just because it's a fresh queryset slice.
+        """
+        for day in range(1, 6):
+            JournalEntry.post(
+                organization=self.org, posting_date=date(2026, 3, day), source=JournalEntry.Source.MANUAL,
+                lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
+            )
+
+        page1 = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 3, 31), page=1, page_size=2)
+        page2 = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 3, 31), page=2, page_size=2)
+        page3 = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 3, 31), page=3, page_size=2)
+
+        self.assertEqual(page1["total_count"], 5)
+        self.assertEqual(page2["total_count"], 5)  # same total regardless of page
+        self.assertEqual([r["running_balance"] for r in page1["rows"]], [Decimal("100000"), Decimal("200000")])
+        self.assertEqual([r["running_balance"] for r in page2["rows"]], [Decimal("300000"), Decimal("400000")])
+        self.assertEqual([r["running_balance"] for r in page3["rows"]], [Decimal("500000")])
+        self.assertEqual(page1["closing_balance"], page2["closing_balance"])
+        self.assertEqual(page2["closing_balance"], Decimal("500000"))
+
+    def test_line_description_falls_back_to_entry_memo_when_blank(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 4, 1), source=JournalEntry.Source.MANUAL,
+            memo="Manual Adjustment",
+            lines=[
+                {"account": self.cash, "debit": Decimal("1000"), "description": "Custom line text"},
+                {"account": self.ap, "credit": Decimal("1000")},  # no description — falls back to memo
+            ],
+        )
+
+        cash_data = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 4, 30))
+        ap_data   = reports.general_ledger(self.org, account_code="2001", as_of=date(2026, 4, 30))
+
+        self.assertEqual(cash_data["rows"][0]["memo"], "Custom line text")
+        self.assertEqual(ap_data["rows"][0]["memo"], "Manual Adjustment")
+
+    def test_invalid_account_code_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            reports.general_ledger(self.org, account_code="9999")
+
+    def test_account_with_zero_activity_returns_empty_rows_not_error(self):
+        data = reports.general_ledger(self.org, account_code="6005")  # Beban Lain-lain, never posted to
+        self.assertEqual(data["rows"], [])
+        self.assertEqual(data["total_count"], 0)
+        self.assertEqual(data["opening_balance"], Decimal("0"))
+        self.assertEqual(data["closing_balance"], Decimal("0"))
+
+    def test_reference_event_id_is_carried_through_for_domain_events(self):
+        """
+        Real integration point with trace_forward — a domain-event-
+        sourced row must carry the real event_id string, so the
+        resolver downstream has something to look up at all.
+        """
+        event = PaymentReceived(
+            organization_id=self.org.id, invoice_id=uuid.uuid4(), payment_id=uuid.uuid4(),
+            amount=Decimal("250000"), method="cash", customer_name="Test Customer",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            default_bus.publish(event)
+
+        data = reports.general_ledger(self.org, account_code="1001", as_of=date.today())
+        self.assertEqual(data["rows"][0]["reference_event_id"], str(event.event_id))
+        self.assertEqual(data["rows"][0]["event_type"], "PaymentReceived")
+
+    def test_manual_entry_has_no_reference_event_id(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date(2026, 5, 1), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
+        )
+        data = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 5, 31))
+        self.assertIsNone(data["rows"][-1]["reference_event_id"])
+
+
+class TraceForwardResolverTests(TestCase):
+    """
+    Real coverage for trace_forward.resolve_references() — each of
+    the three real states, the batching optimization itself (the
+    actual justification for this design, proven via
+    assertNumQueries), and the defensive getattr(obj, "number", None)
+    fallback for a target model that genuinely lacks that field.
+
+    Two tests deliberately use mock.patch.dict() to inject a
+    controlled fake mapping entry rather than trust an unconfirmed
+    real model (QuickPurchase/OperatingExpense/etc. were never
+    directly reviewed for this feature — see trace_forward.py's own
+    module docstring) — this isolates the exact branch logic being
+    tested from any assumption about those specific models' real
+    constructors.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.customer = Customer.objects.create(organization=self.org, name="Yono")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Test Car",
+        )
+
+    def _make_outbox(self, event_type, payload):
+        event_id = uuid.uuid4()
+        Outbox.objects.create(
+            organization=self.org, event_id=event_id, event_type=event_type,
+            payload=payload, occurred_at=timezone.now(), status=Outbox.Status.PROCESSED,
+        )
+        return str(event_id)
+
+    def test_link_state_resolves_a_real_work_order_via_the_real_shipped_mapping(self):
+        """
+        The one real, UN-mocked integration proof — using the actual
+        _TRACE_FORWARD mapping as shipped, not a patched one, for a
+        fully-confirmed event_type/model pair.
+        """
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        event_id = self._make_outbox("WorkOrderCompleted", {"work_order_id": str(wo.id)})
+        rows = [{"event_type": "WorkOrderCompleted", "reference_event_id": event_id}]
+
+        trace_forward.resolve_references(rows)
+
+        self.assertEqual(rows[0]["reference"], {
+            "kind": "link", "label": wo.number, "url": f"/dashboard/work-order-detail?id={wo.id}",
+        })
+
+    def test_none_state_for_source_with_no_reference_event_id(self):
+        rows = [{"event_type": "MANUAL", "reference_event_id": None}]
+        trace_forward.resolve_references(rows)
+        self.assertEqual(rows[0]["reference"], {"kind": "none", "label": None, "url": None})
+
+    def test_none_state_for_event_type_not_in_the_mapping_at_all(self):
+        rows = [{"event_type": "SomeFutureEventType", "reference_event_id": str(uuid.uuid4())}]
+        trace_forward.resolve_references(rows)
+        self.assertEqual(rows[0]["reference"]["kind"], "none")
+
+    def test_none_state_when_no_outbox_row_matches(self):
+        """A reference_event_id with no matching real Outbox row must
+        fail soft, never crash."""
+        rows = [{"event_type": "WorkOrderCompleted", "reference_event_id": str(uuid.uuid4())}]
+        trace_forward.resolve_references(rows)
+        self.assertEqual(rows[0]["reference"]["kind"], "none")
+
+    def test_none_state_when_payload_is_missing_the_expected_id_field(self):
+        event_id = self._make_outbox("WorkOrderCompleted", {"some_other_field": "x"})
+        rows = [{"event_type": "WorkOrderCompleted", "reference_event_id": event_id}]
+        trace_forward.resolve_references(rows)
+        self.assertEqual(rows[0]["reference"]["kind"], "none")
+
+    def test_none_state_when_target_row_no_longer_exists(self):
+        event_id = self._make_outbox("WorkOrderCompleted", {"work_order_id": str(uuid.uuid4())})
+        rows = [{"event_type": "WorkOrderCompleted", "reference_event_id": event_id}]
+        trace_forward.resolve_references(rows)
+        self.assertEqual(rows[0]["reference"]["kind"], "none")
+
+    def test_badge_state_branch_produces_no_url(self):
+        """
+        Real proof of the "badge" branch specifically — a real
+        document with a real .number exists, but has_detail_page=
+        False means no URL is ever built. Uses WorkOrder (fully
+        trusted) with has_detail_page deliberately forced False via a
+        patched mapping entry — isolates the branch logic itself from
+        whichever real event_type currently happens to be flagged
+        that way in the real, shipped mapping.
+        """
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        event_id = self._make_outbox("FakeBadgeEvent", {"work_order_id": str(wo.id)})
+        rows = [{"event_type": "FakeBadgeEvent", "reference_event_id": event_id}]
+
+        fake_mapping = {"FakeBadgeEvent": ("work_order_id", "workorders", "WorkOrder", False)}
+        with patch.dict(trace_forward._TRACE_FORWARD, fake_mapping, clear=True):
+            trace_forward.resolve_references(rows)
+
+        self.assertEqual(rows[0]["reference"], {"kind": "badge", "label": wo.number, "url": None})
+
+    def test_getattr_safe_fallback_when_target_model_genuinely_lacks_a_number_field(self):
+        """
+        The real proof of this module's own defensive design — if a
+        mapping entry ever points at a model with no real .number
+        field (exactly the honest risk flagged for OperatingExpense/
+        InternalCashMutation/StockOpnameSession, none of which were
+        directly confirmed during this feature's build), this must
+        fail soft, never crash the whole ledger page. Customer
+        (service.Customer) is used here specifically because it's a
+        real, fully-confirmed model with NO .number field at all —
+        proving the exact failure mode this guards against, not a
+        hypothetical one.
+        """
+        event_id = self._make_outbox("FakeEventType", {"customer_id": str(self.customer.id)})
+        rows = [{"event_type": "FakeEventType", "reference_event_id": event_id}]
+
+        fake_mapping = {"FakeEventType": ("customer_id", "service", "Customer", False)}
+        with patch.dict(trace_forward._TRACE_FORWARD, fake_mapping, clear=True):
+            trace_forward.resolve_references(rows)
+
+        self.assertEqual(rows[0]["reference"], {"kind": "none", "label": None, "url": None})
+
+    def test_batching_does_not_scale_with_row_count(self):
+        """
+        THE real justification for this whole design — a page with
+        MANY rows sharing the same event_type must cost a constant,
+        small number of queries, not one per row. 5 separate
+        WorkOrders, proven via assertNumQueries rather than just
+        trusting it "ran fine."
+        """
+        work_orders = [
+            WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle) for _ in range(5)
+        ]
+        rows = []
+        for wo in work_orders:
+            event_id = self._make_outbox("WorkOrderCompleted", {"work_order_id": str(wo.id)})
+            rows.append({"event_type": "WorkOrderCompleted", "reference_event_id": event_id})
+
+        # Exactly 2 real queries for this one event_type group,
+        # regardless of row count: one Outbox lookup, one WorkOrder
+        # lookup.
+        with self.assertNumQueries(2):
+            trace_forward.resolve_references(rows)
+
+        for row, wo in zip(rows, work_orders):
+            self.assertEqual(row["reference"]["label"], wo.number)
+
+
+class GeneralLedgerAPITests(APITestCase):
+    """
+    Lean HTTP-level smoke tests — real logic correctness is already
+    proven by GeneralLedgerReportTests/TraceForwardResolverTests
+    above; this layer only proves the thin view is wired correctly,
+    same discipline as ReportingAPITests elsewhere in this file.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.generalledger@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.ap   = Account.objects.get(organization=self.org, code="2001")
+
+    def test_requires_account_param(self):
+        resp = self.client.get("/api/accounting/general-ledger/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_account_code_returns_400(self):
+        resp = self.client.get("/api/accounting/general-ledger/?account=9999")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_valid_request_returns_expected_shape(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
+        )
+        resp = self.client.get("/api/accounting/general-ledger/?account=1001")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["account"]["code"], "1001")
+        self.assertEqual(len(resp.data["rows"]), 1)
+        self.assertIn("reference", resp.data["rows"][0])
+
+    def test_bad_page_param_returns_400(self):
+        resp = self.client.get("/api/accounting/general-ledger/?account=1001&page=abc")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_page_size_is_capped_not_rejected(self):
+        resp = self.client.get("/api/accounting/general-ledger/?account=1001&page_size=9999")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["page_size"], 200)
+
+    def test_scoped_to_organization(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
+        )
+        other_org = Organization.objects.create(name="Bengkel Lain General Ledger")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.gl@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/general-ledger/?account=1001")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [])
