@@ -130,6 +130,49 @@ class ProfitLossView(TenantScopedAPIView):
             data = reports.profit_and_loss(organization, since=since, as_of=as_of)
         return Response({"success": True, **data})
 
+
+class ProfitLossTrendView(TenantScopedAPIView):
+    """
+    GET /api/accounting/profit-loss-trend/?end_date=YYYY-MM-DD&months=6
+
+    5 Sep 2026 — Made's own direct, confirmed request via a real
+    phone call: a real multi-month trend, not just a single-period
+    comparison. Thin view over reports.profit_and_loss_trend() — see
+    that function's own docstring for the real design reasoning.
+
+    months is hard-restricted to {3, 6, 12} — Chris's own confirmed
+    UI design offers exactly three preset buttons, nothing else; an
+    arbitrary integer would render a trend width nobody actually
+    designed the frontend table for.
+    """
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        end_date = _parse_date(request.query_params.get("end_date"), default=date.today())
+
+        try:
+            months = int(request.query_params.get("months", 6))
+        except (TypeError, ValueError):
+            return Response(
+                {"success": False, "message": "Parameter 'months' tidak valid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if months not in (3, 6, 12):
+            return Response(
+                {"success": False, "message": "Parameter 'months' harus 3, 6, atau 12."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = reports.profit_and_loss_trend(organization, end_date=end_date, months=months)
+        return Response({"success": True, **data})
+
+
 class CashConversionCycleView(TenantScopedAPIView):
     """
     GET /api/accounting/cash-conversion-cycle/?since=YYYY-MM-DD&as_of=YYYY-MM-DD
