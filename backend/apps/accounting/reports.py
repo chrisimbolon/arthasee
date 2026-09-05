@@ -855,6 +855,7 @@ def general_ledger(organization, *, account_code, since=None, as_of=None, page=1
         entry = line.journal_entry
         rows.append({
             "line_id": str(line.id),
+            "entry_id": str(entry.id),
             "posting_date": entry.posting_date,
             "entry_number": entry.entry_number,
             "event_type": entry.event_type,
