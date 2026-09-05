@@ -9,7 +9,8 @@ from .views import (AccountingPeriodCloseView, AccountingPeriodListView,
                     CashConversionCycleView, DailyCashActivityView,
                     DashboardFinancialSummaryView, DepreciationRunDetailView,
                     FailedPostingsView, GeneralLedgerView,
-                    JournalEntryListView, ManualJournalListCreateView,
+                    JournalEntryDetailView, JournalEntryListView,
+                    ManualJournalListCreateView,
                     OpeningBalanceAssetLineDetailView,
                     OpeningBalanceAssetLineListCreateView,
                     OpeningBalanceCashLineView,
@@ -38,6 +39,7 @@ urlpatterns = [
     path("general-ledger/", GeneralLedgerView.as_view(), name="general-ledger"),
     path("manual-journals/", ManualJournalListCreateView.as_view(), name="manual-journal-list-create"),
     path("journal-entries/", JournalEntryListView.as_view(),       name="journal-entry-list"),
+    path("journal-entries/<uuid:pk>/", JournalEntryDetailView.as_view(), name="journal-entry-detail"),
     path("failed-postings/", FailedPostingsView.as_view(),         name="failed-postings-list"),
     # 28 Aug 2026 — real month-end period control (Made's own
     # confirmed requirement, via his tax & accounting consultant).
