@@ -10,7 +10,7 @@ import {
   AgingReportResponse, BalanceSheetResponse, CashConversionCycleResponse,
   depreciationRunApi,
   ProfitLossComparisonResponse,
-  ProfitLossResponse, ReportDelta, ReportLine, TrialBalanceResponse,
+  ProfitLossResponse, ProfitLossTrendResponse, ReportDelta, ReportLine, TrialBalanceResponse,
 } from "@/lib/api/accounting";
 import { Loader2, Lock, TriangleAlert, Unlock } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -227,9 +227,109 @@ function TrialBalancePanel() {
   );
 }
 
+//  -- Profit and Loss trend 
+
+const TREND_MONTH_OPTIONS = [3, 6, 12] as const;
+
+function ProfitLossTrendPanel({ anchorDate }: { anchorDate: string }) {
+  const [months, setMonths] = useState<3 | 6 | 12>(6);
+  const [data, setData] = useState<ProfitLossTrendResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    accountingApi.profitLossTrend(anchorDate, months).then((res) => { setData(res); setLoading(false); });
+  }, [anchorDate, months]);
+
+  if (loading) return <LoadingState />;
+  if (!data) return <EmptyState />;
+
+  // Frontend owns the month-name formatting, deliberately — see
+  // accounting.ts's own note on ProfitLossTrendMonthRow for why the
+  // backend only ever sends plain year/month integers.
+  const monthLabel = (year: number, month: number) =>
+    new Date(year, month - 1, 1).toLocaleDateString("id-ID", { month: "short" });
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 20 }}>
+        {TREND_MONTH_OPTIONS.map((m) => (
+          <button
+            key={m} type="button" onClick={() => setMonths(m)}
+            className={months === m ? "btn-rust" : "btn-ghost"}
+          >
+            {m} Bulan
+          </button>
+        ))}
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="data-table" style={{ width: "100%", minWidth: 560 }}>
+          <thead>
+            <tr>
+              <th></th>
+              {data.data.map((row) => (
+                <th key={`${row.year}-${row.month}`} style={{ textAlign: "right" }}>
+                  {monthLabel(row.year, row.month)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style={{ color: "var(--ink-soft)" }}>Pendapatan</td>
+              {data.data.map((row) => (
+                <td key={`${row.year}-${row.month}-rev`} className="mono" style={{ textAlign: "right" }}>
+                  {formatRupiah(row.total_revenue)}
+                </td>
+              ))}
+            </tr>
+            <tr>
+              <td style={{ color: "var(--ink-soft)" }}>HPP</td>
+              {data.data.map((row) => (
+                <td key={`${row.year}-${row.month}-cogs`} className="mono" style={{ textAlign: "right" }}>
+                  {formatRupiah(row.total_cogs)}
+                </td>
+              ))}
+            </tr>
+            <tr>
+              <td style={{ color: "var(--ink-soft)" }}>Beban Operasional</td>
+              {data.data.map((row) => (
+                <td key={`${row.year}-${row.month}-exp`} className="mono" style={{ textAlign: "right" }}>
+                  {formatRupiah(row.total_expenses)}
+                </td>
+              ))}
+            </tr>
+            <tr style={{ fontWeight: 700, borderTop: "1.5px solid var(--line)" }}>
+              <td style={{ padding: "8px 0 0" }}>Laba Bersih</td>
+              {data.data.map((row) => {
+                const n = toNumber(row.net_income);
+                return (
+                  <td
+                    key={`${row.year}-${row.month}-ni`} className="mono"
+                    style={{ textAlign: "right", padding: "8px 0 0", color: n >= 0 ? "var(--workshop)" : "var(--rust)" }}
+                  >
+                    {formatRupiah(row.net_income)}
+                  </td>
+                );
+              })}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ── Profit & Loss ────────────────────────────────────────────────
 
 function ProfitLossPanel() {
+  // 5 Sep 2026 — Single Period / Trend View toggle, Chris's own
+  // confirmed placement: kept inside this existing tab, not a new
+  // top-level tab of its own. Trend view anchors to `asOf` — the
+  // SAME "Sampai Tanggal" value this panel already has, per Chris's
+  // own confirmed anchoring rule ("if the picker is set to August
+  // 2026 and he selects 6 Months, it renders March–August 2026").
+  const [view, setView] = useState<"single" | "trend">("single");
   const today = new Date().toISOString().slice(0, 10);
   const [since, setSince] = useState(`${new Date().getFullYear()}-01-01`);
   const [asOf, setAsOf] = useState(today);
@@ -237,17 +337,45 @@ function ProfitLossPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (view !== "single") return;
     setLoading(true);
     accountingApi.profitLoss(since, asOf).then((res) => { setData(res); setLoading(false); });
-  }, [since, asOf]);
-
-  if (loading) return <LoadingState />;
-  if (!data) return <EmptyState />;
-
-  const netIncome = toNumber(data.net_income);
+  }, [since, asOf, view]);
 
   return (
     <div className="card">
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 20 }}>
+        <button type="button" onClick={() => setView("single")} className={view === "single" ? "btn-rust" : "btn-ghost"}>
+          Single Period
+        </button>
+        <button type="button" onClick={() => setView("trend")} className={view === "trend" ? "btn-rust" : "btn-ghost"}>
+          Trend View
+        </button>
+      </div>
+
+      {view === "trend" ? (
+        <ProfitLossTrendPanel anchorDate={asOf} />
+      ) : loading ? (
+        <LoadingState />
+      ) : !data ? (
+        <EmptyState />
+      ) : (
+        <SinglePeriodProfitLoss data={data} since={since} asOf={asOf} setSince={setSince} setAsOf={setAsOf} />
+      )}
+    </div>
+  );
+}
+
+function SinglePeriodProfitLoss({
+  data, since, asOf, setSince, setAsOf,
+}: {
+  data: ProfitLossResponse; since: string; asOf: string;
+  setSince: (v: string) => void; setAsOf: (v: string) => void;
+}) {
+  const netIncome = toNumber(data.net_income);
+
+  return (
+    <>
       <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
         <div style={{ flex: 1 }}>
           <div className="label">Dari Tanggal</div>
@@ -286,7 +414,7 @@ function ProfitLossPanel() {
           {formatRupiah(data.net_income)}
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
