@@ -88,6 +88,34 @@ function formatPct(pct: string | number | null): string {
   return `${sign}${n.toFixed(1)}%`;
 }
 
+// 5 Sep 2026 — real gap found live: change_pct is null whenever the
+// prior period was genuinely zero (see profit_and_loss_comparison()'s
+// own docstring — "can't compute a percentage from zero" is
+// deliberate, not a bug). The old DeltaRow rendering only ever read
+// change_pct, collapsing this real, common case (a new revenue line
+// with nothing in the prior period) to a bare "—" even though
+// delta.change (the raw rupiah difference) is ALWAYS computed by the
+// backend regardless. Deliberately does NOT fabricate a percentage
+// here either (e.g. "+100%" for a 0 -> anything jump) — going from
+// zero is mathematically undefined, not "doubled"; showing +100%
+// would assert a specific, wrong number, not an honest approximation.
+function formatDeltaChange(change: string | number): string {
+  const n = toNumber(change);
+  // formatRupiah() already renders its own leading "-" for a
+  // negative value — prepending our own sign there too would double
+  // it up ("--Rp..."). Only ever add "+" for a non-negative value;
+  // a negative value is left entirely to formatRupiah's own native
+  // rendering.
+  return n >= 0 ? `+${formatRupiah(n)}` : formatRupiah(n);
+}
+
+function formatDelta(change: string | number, pct: string | number | null): string {
+  if (pct !== null) return formatPct(pct);
+  const changeNum = toNumber(change);
+  if (changeNum === 0) return "—";  // genuinely no change at all — both periods were zero
+  return `${formatDeltaChange(change)} (Baru)`;
+}
+
 function DeltaRow({ label, current, prior, delta }: {
   label: string; current: string | number; prior: string | number; delta: ReportDelta;
 }) {
@@ -99,7 +127,7 @@ function DeltaRow({ label, current, prior, delta }: {
       <span className="mono" style={{ fontSize: 13, textAlign: "right" }}>{formatRupiah(current)}</span>
       <span className="mono" style={{ fontSize: 13, color: "var(--steel)", textAlign: "right" }}>{formatRupiah(prior)}</span>
       <span className="mono" style={{ fontSize: 13, fontWeight: 700, color, textAlign: "right" }}>
-        {formatPct(delta.change_pct)}
+        {formatDelta(delta.change, delta.change_pct)}
       </span>
     </div>
   );
