@@ -971,3 +971,92 @@ class StockOpnameSessionTests(InventoryAPITestBase):
         total_debit  = sum((l.debit_amount or Decimal("0")) for l in lines)
         total_credit = sum((l.credit_amount or Decimal("0")) for l in lines)
         self.assertEqual(total_debit, total_credit)
+
+    def test_complete_values_variance_at_cost_price_not_selling_price(self):
+        """
+        6 Sep 2026 — THE real regression test for the actual defect
+        found via a design-review trace, not a live incident:
+        StockOpnameSession.complete() used to value variance at
+        Part.unit_price (SELLING price) unconditionally, then post
+        that exact figure straight into Account 1301 (Inventory) —
+        the SAME account GoodsReceived/PartConsumed correctly
+        denominate in COST. A stock-opname correction was silently
+        mixing retail-priced money into a cost-basis ledger account.
+
+        part_a is deliberately given a real cost_price DIFFERENT
+        from its own unit_price (25000 cost vs 40000 sell) — the
+        existing test_complete_posts_one_balanced_journal_entry_with_
+        both_shortage_and_surplus above never exercises this
+        distinction at all, since neither of ITS parts ever sets
+        cost_price (both default to 0), so both fall back to
+        unit_price either way and would pass identically whether
+        this fix existed or not — it proves the entry is balanced,
+        not that the VALUATION BASIS is correct.
+        """
+        from apps.accounting.coa import seed_chart_of_accounts
+        from apps.accounting.models import JournalEntry
+        from apps.accounting.periods import ensure_current_month_period
+
+        seed_chart_of_accounts(self.org)
+        ensure_current_month_period(self.org)
+
+        self.part_a.cost_price = Decimal("25000.00")
+        self.part_a.unit_price = Decimal("40000.00")  # deliberately different from cost_price
+        self.part_a.save(update_fields=["cost_price", "unit_price"])
+
+        session_id = self._start(part_ids=[str(self.part_a.id)]).data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},  # shortage of 2
+            format="json",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        entry = JournalEntry.objects.get(organization=self.org, event_type="StockOpnameCompleted")
+        # 2 * cost_price (25000) = 50000 — NOT 2 * unit_price (40000)
+        # = 80000. If this ever regresses back to unit_price, this
+        # assertion fails loudly with 80000.00 instead of silently
+        # passing either way.
+        debit_5004  = entry.lines.get(account__code="5004")
+        credit_1301 = entry.lines.get(account__code="1301")
+        self.assertEqual(debit_5004.debit_amount, Decimal("50000.00"))
+        self.assertEqual(credit_1301.credit_amount, Decimal("50000.00"))
+
+    def test_complete_falls_back_to_unit_price_when_cost_price_is_still_zero(self):
+        """
+        Real proof of the deliberate fallback — a part with no real
+        GRN history yet (cost_price still at its own real default of
+        0) must still value its stock-opname variance sensibly, using
+        unit_price, rather than silently valuing a real, counted
+        shortage/surplus at zero. Same established meaning cost_
+        price=0 already has elsewhere in this codebase
+        (WorkOrderMaterialLine.save()'s own identical fallback).
+        part_a here is used exactly as setUp() created it — cost_
+        price untouched, still 0 — confirming this is genuinely the
+        fallback path, not a coincidence.
+        """
+        from apps.accounting.coa import seed_chart_of_accounts
+        from apps.accounting.models import JournalEntry
+        from apps.accounting.periods import ensure_current_month_period
+
+        seed_chart_of_accounts(self.org)
+        ensure_current_month_period(self.org)
+
+        self.assertEqual(self.part_a.cost_price, Decimal("0.00"))
+
+        session_id = self._start(part_ids=[str(self.part_a.id)]).data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},  # shortage of 2
+            format="json",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        entry = JournalEntry.objects.get(organization=self.org, event_type="StockOpnameCompleted")
+        # 2 * unit_price (25000, part_a's own real setUp value) = 50000.
+        debit_5004 = entry.lines.get(account__code="5004")
+        self.assertEqual(debit_5004.debit_amount, Decimal("50000.00"))

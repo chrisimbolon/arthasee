@@ -482,11 +482,36 @@ class StockOpnameSession(TenantScopedModel):
         variance to measure (genuinely unknown, not "zero").
 
         Valuation basis for the event's Rupiah totals is
-        Part.unit_price — the same basis
-        apps.inventory.reports.stock_summary() already uses for every
-        other Inventory-adjacent figure in this system (Roadmap Open
-        Decision #5's known, accepted gap against the ledger's true
-        cost basis — not a new, third valuation basis introduced here).
+        Part.cost_price ("Last Cost"), falling back to Part.unit_price
+        only when cost_price is still 0 (no real GRN history yet for
+        this part — the same established meaning that value already
+        has, same soft-fallback discipline WorkOrderMaterialLine.
+        save() applies for the identical reason: a brand-new part
+        consumed before its first official GRN must not be blocked
+        or silently valued at zero).
+
+        6 Sep 2026 — real fix, found via a design-review trace, not
+        a live incident: this used to be Part.unit_price
+        unconditionally, which meant a stock-opname correction posted
+        SELLING-price money directly into Account 1301 (Inventory) —
+        the same account GoodsReceived/PartConsumed correctly
+        denominate in COST. A real posting defect, not just a
+        reporting imprecision — the ledger's own cost basis for 1301
+        was being silently contaminated by retail figures.
+
+        Honest, known divergence this fix creates, not resolved here:
+        apps.inventory.reports.stock_summary() was NOT reviewed or
+        changed as part of this fix — if it still values on-hand
+        stock at unit_price (this docstring's own prior framing
+        called that "Roadmap Open Decision #5's known, accepted
+        gap"), that report and this GL posting now deliberately use
+        DIFFERENT bases for genuinely different questions:
+        stock_summary() likely still answers "what is this stock
+        worth at retail," while the GL correctly answers "what did
+        this stock actually cost." Worth a deliberate, direct look at
+        that function before assuming it needs the same change — a
+        report showing retail value may be exactly what's wanted
+        there, unlike a GL posting, which must always be cost.
         """
         if self.status == self.Status.COMPLETED:
             raise ValueError("Sesi Stock Opname ini sudah diselesaikan.")
@@ -508,7 +533,16 @@ class StockOpnameSession(TenantScopedModel):
                 if variance_qty == 0:
                     continue
 
-                variance_value = abs(variance_qty) * line.part.unit_price
+                # Real fix — see this method's own docstring above
+                # for the full incident. cost_price is the correct
+                # basis for a GL-facing posting; unit_price is only
+                # ever a fallback for a part with no real cost basis
+                # yet (cost_price == 0), never the default.
+                effective_cost = (
+                    line.part.cost_price if line.part.cost_price > Decimal("0")
+                    else line.part.unit_price
+                )
+                variance_value = abs(variance_qty) * effective_cost
                 if variance_qty < 0:
                     shortage_amount += variance_value
                 else:
