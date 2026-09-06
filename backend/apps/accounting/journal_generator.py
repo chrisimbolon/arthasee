@@ -18,6 +18,7 @@ that promise is actually kept for accounting postings.
 from apps.accounting import posting_engine
 from apps.accounting.models import Account, JournalEntry
 from apps.organizations.models import Organization
+from django.utils import timezone
 
 
 def post_for_event(event) -> JournalEntry | None:
@@ -65,13 +66,40 @@ def post_for_event(event) -> JournalEntry | None:
     # PurchaseReturned's own debit_account_code already established)
     # — falls back to occurred_at for every event that doesn't set
     # it, so this is fully backward compatible with every existing
-    # event class. Flagged directly, not silently expanded here:
-    # WorkOrderCompleted/GoodsReceived/QuickPurchaseRecorded likely
-    # have this same real gap (their own real business dates —
-    # service_date/received_at/purchased_at — are never frozen into
-    # their events either) — a separate, real audit, not bundled
-    # into this fix blind.
-    posting_date = getattr(event, "transaction_date", None) or event.occurred_at.date()
+    # event class.
+    #
+    # 5 Sep 2026 — real, SECOND bug found via a design-review trace
+    # (Sansan's own "midnight boundary" question), not a live
+    # incident: the fallback branch called occurred_at.date()
+    # directly — under USE_TZ=True (confirmed: this project's own
+    # TIME_ZONE is "Asia/Jakarta", UTC+7), occurred_at is stored and
+    # compared as a UTC-aware datetime, so .date() extracts the UTC
+    # CALENDAR DATE, not the shop's real local one. A transaction
+    # occurring between local midnight and 7am would silently
+    # extract the PREVIOUS day's date — exactly the kind of
+    # off-by-one-period bug a real reconciliation near a month
+    # boundary would surface as a mismatch nobody could explain.
+    # timezone.localtime() is the correct, purpose-built Django
+    # utility for converting a stored UTC-aware datetime back to the
+    # project's configured local zone before extracting a plain
+    # date — fixes this for EVERY event type that falls through to
+    # this branch, not just the ones with their own transaction_date
+    # (WorkOrderCompleted/GoodsReceived/InvoiceIssued/PartConsumed
+    # among them) — a real, separate, scoped audit of whether any of
+    # those genuinely need their own frozen transaction_date field
+    # too, not silently assumed here.
+    # timezone.is_aware() guard: timezone.localtime() requires an
+    # AWARE datetime and raises ValueError on a naive one. occurred_at
+    # is expected to always be aware (populated via timezone.now()
+    # under USE_TZ=True), but this defensively falls back to the raw
+    # date rather than crash if that assumption is ever wrong for some
+    # caller this review didn't see.
+    if getattr(event, "transaction_date", None):
+        posting_date = event.transaction_date
+    elif timezone.is_aware(event.occurred_at):
+        posting_date = timezone.localtime(event.occurred_at).date()
+    else:
+        posting_date = event.occurred_at.date()
 
     return JournalEntry.post(
         organization=organization,
