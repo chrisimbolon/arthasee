@@ -480,6 +480,46 @@ def aging_ar(organization, *, as_of=None) -> dict:
     reference, not a date), so created_at is the closest real proxy
     for "when this became a receivable" (Chris's own explicit call).
 
+    5 Sep 2026 — real point-in-time fix, found via a design-review
+    trace, not a live incident: the previous version filtered by
+    status="ISSUED" (today's CURRENT status) and read balance_due
+    (which sums EVERY real Payment ever, with no date boundary) —
+    both silently wrong for any as_of other than "today." A fully-
+    paid invoice from three months ago would vanish entirely from a
+    report re-run for that same historical date, even though it
+    genuinely was outstanding then — the exact trust-destroying gap
+    a real reconciliation or audit of an old month would hit.
+
+    Real fix: issued_event_id__isnull=False replaces the status
+    filter — that field is set ONLY at the real DRAFT -> ISSUED
+    transition and is PERMANENT once set, unlike status (which
+    mutates forward to PAID/CANCELLED). This correctly re-includes
+    invoices now showing PAID or CANCELLED that genuinely were real
+    receivables as of an earlier as_of. balance_due is replaced with
+    a real date-bounded payment sum (Payment.received_at <= as_of),
+    never Invoice.balance_due's own lifetime total.
+
+    Known, honest, narrow limitation: a CURRENTLY-cancelled invoice
+    is excluded from historical aging entirely, for every as_of, not
+    only for as_of on/after its real cancellation date. Invoice
+    stores no cancellation timestamp at all (only issued_event_id —
+    there is no cancelled_event_id or cancelled_at field anywhere on
+    this model), so there is no way to know whether a given as_of
+    falls before or after the real cancellation. This is the
+    deliberately SAFE direction to be wrong in: it only under-
+    reports for an as_of that genuinely falls inside the narrow
+    window between a real issue and a real cancellation (and
+    InvoiceCancelled only ever fires for a ZERO-PAYMENT invoice —
+    see that event's own docstring — so this window is real but
+    low-stakes). The alternative this replaces — showing a cancelled
+    invoice as outstanding forever, for any as_of after cancellation
+    — was a far more common and more damaging failure. A fully
+    correct fix needs either a stored cancellation date on Invoice,
+    or deriving one from the GL via the InvoiceCancelled event's own
+    posting_date (the same technique trace_forward.py already uses)
+    — real, separate, scoped follow-up work, not silently attempted
+    here.
+
     3 Sep 2026 — Opening Balance onboarding. A legacy receivable from
     before the shop used Arthasee is real, outstanding money owed —
     Made's own Piutang card must reflect it from Day 1, not just
@@ -502,29 +542,47 @@ def aging_ar(organization, *, as_of=None) -> dict:
     existing consumers that don't read this key are unaffected.
     """
     as_of = as_of or date.today()
-    invoices = Invoice.objects.filter(organization=organization, status="ISSUED")
+    invoices = (
+        Invoice.objects
+        .filter(organization=organization, issued_event_id__isnull=False)
+        .exclude(status="CANCELLED")
+        .prefetch_related("payments")
+    )
 
     rows = []
     buckets = {"0-30": Decimal("0"), "31-60": Decimal("0"), "61-90": Decimal("0"), "90+": Decimal("0")}
     total_outstanding = Decimal("0")
 
     for invoice in invoices:
-        balance_due = invoice.balance_due
-        if balance_due <= Decimal("0"):
-            continue  # fully covered by payments already, not really outstanding
+        if invoice.created_at.date() > as_of:
+            continue  # not yet issued as of this historical date
+
+        # Date-bounded sum, computed in Python over the already-
+        # prefetched payments — a real, deliberate choice to avoid
+        # one extra filtered query per invoice (N+1), same
+        # performance discipline Invoice.total_paid's own "sum on
+        # read" already follows.
+        paid_as_of = sum(
+            (p.amount for p in invoice.payments.all() if p.received_at.date() <= as_of),
+            Decimal("0"),
+        )
+        balance_due_as_of = invoice.total - invoice.deposit_amount - paid_as_of
+        if balance_due_as_of <= Decimal("0"):
+            continue  # fully covered by payments as of this date, not really outstanding
+
         age_days = (as_of - invoice.created_at.date()).days
         bucket = _age_bucket(age_days)
         rows.append({
             "id": str(invoice.id),
             "number": invoice.number,
             "customer_name": invoice.customer_name_snapshot,
-            "balance_due": balance_due,
+            "balance_due": balance_due_as_of,
             "age_days": age_days,
             "bucket": bucket,
             "source": "invoice",
         })
-        buckets[bucket] += balance_due
-        total_outstanding += balance_due
+        buckets[bucket] += balance_due_as_of
+        total_outstanding += balance_due_as_of
 
     opening_receivables = (
         OpeningBalanceReceivable.objects
@@ -563,6 +621,20 @@ def aging_ap(organization, *, as_of=None) -> dict:
     invoice_date when it isn't (due_date is nullable on
     SupplierInvoice).
 
+    5 Sep 2026 — real point-in-time fix, same class of bug as
+    aging_ar() above, but structurally CLEANER here: SupplierInvoice
+    has NO cancellation state at all (STATUS_CHOICES is only UNPAID/
+    PAID — confirmed directly against that model) and has a real
+    invoice_date field of its own — the actual business date, not a
+    created-at proxy. status="UNPAID" (a mutable current flag) is
+    replaced entirely with a real date-bounded payment sum
+    (SupplierPayment.paid_at <= as_of) — a supplier invoice paid
+    today, queried for a date before that real payment, now
+    correctly still shows as outstanding for that historical date.
+    No known gaps remain on this side, unlike aging_ar()'s own
+    honest cancellation limitation above — there is nothing
+    analogous to reverse here.
+
     3 Sep 2026 — mirrors aging_ar()'s own Opening Balance union
     exactly, inverted for legacy supplier debt (OpeningBalancePayable
     — Sansan's own signed-off Option B, same lightweight-row
@@ -574,13 +646,26 @@ def aging_ap(organization, *, as_of=None) -> dict:
     field addition and same POSTED-only filter as aging_ar().
     """
     as_of = as_of or date.today()
-    invoices = SupplierInvoice.objects.filter(organization=organization, status="UNPAID").select_related("supplier")
+    invoices = (
+        SupplierInvoice.objects
+        .filter(organization=organization, invoice_date__lte=as_of)
+        .select_related("supplier")
+        .prefetch_related("supplier_payments")
+    )
 
     rows = []
     buckets = {"0-30": Decimal("0"), "31-60": Decimal("0"), "61-90": Decimal("0"), "90+": Decimal("0")}
     total_outstanding = Decimal("0")
 
     for invoice in invoices:
+        paid_as_of = sum(
+            (p.amount for p in invoice.supplier_payments.all() if p.paid_at.date() <= as_of),
+            Decimal("0"),
+        )
+        balance_due_as_of = invoice.amount - paid_as_of
+        if balance_due_as_of <= Decimal("0"):
+            continue
+
         reference_date = invoice.due_date or invoice.invoice_date
         age_days = (as_of - reference_date).days
         bucket = _age_bucket(age_days)
@@ -588,13 +673,13 @@ def aging_ap(organization, *, as_of=None) -> dict:
             "id": str(invoice.id),
             "number": invoice.number,
             "supplier_name": invoice.supplier.name,
-            "amount": invoice.amount,
+            "amount": balance_due_as_of,
             "age_days": age_days,
             "bucket": bucket,
             "source": "invoice",
         })
-        buckets[bucket] += invoice.amount
-        total_outstanding += invoice.amount
+        buckets[bucket] += balance_due_as_of
+        total_outstanding += balance_due_as_of
 
     opening_payables = (
         OpeningBalancePayable.objects
