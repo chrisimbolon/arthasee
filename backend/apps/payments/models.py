@@ -102,30 +102,61 @@ class Payment(TenantScopedModel):
         balance_due actually reaches zero after this payment is
         recorded — re-derived from the DB-backed aggregate, not by
         trusting arithmetic on the in-memory `amount` argument alone.
+
+        6 Sep 2026 — real, hard concurrency guard added (Sansan's own
+        "double-payment race" question, Q50), not a live incident:
+        the OLD version read invoice.status/invoice.balance_due
+        BEFORE ever entering transaction.atomic(), against whatever
+        was already loaded into memory — no row lock at all. Two
+        near-simultaneous payment requests for the same invoice (a
+        genuine double-click, or a frontend retry after a network
+        timeout) could both read the same pre-payment balance_due,
+        both pass validation, and both create a full, real Payment
+        row — a genuine double payment, silently reducing AR twice
+        for money that only came in once.
+
+        Real fix, same proven pattern already established for
+        OpeningBalanceSession.post(): select_for_update() re-fetches
+        the invoice with a real row-level lock INSIDE the atomic
+        block, and every business-critical check (status,
+        balance_due) re-runs against that locked, authoritative copy
+        — not the possibly-stale invoice object the caller happened
+        to pass in. The second concurrent request blocks here until
+        the first one's transaction commits, then re-checks against
+        the FRESH, post-payment balance_due and correctly rejects the
+        overpayment, instead of racing. amount>0 is checked BEFORE
+        acquiring the lock — pure input validation with no DB
+        dependency, no reason to hold a row lock just to reject a
+        trivially malformed amount.
         """
-        if invoice.status != "ISSUED":
-            raise ValueError(
-                f"Tidak bisa mencatat pembayaran untuk invoice berstatus "
-                f"'{invoice.get_status_display()}' — invoice harus berstatus "
-                f"'Diterbitkan' terlebih dahulu."
-            )
         if amount is None or amount <= Decimal("0"):
             raise ValueError("Jumlah pembayaran harus lebih dari nol.")
-        if amount > invoice.balance_due:
-            raise ValueError(
-                f"Jumlah pembayaran ({amount}) melebihi sisa tagihan "
-                f"({invoice.balance_due}) — kelebihan bayar belum didukung."
-            )
 
         with transaction.atomic():
+            from apps.invoicing.models import Invoice
+            locked_invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+
+            if locked_invoice.status != "ISSUED":
+                raise ValueError(
+                    f"Tidak bisa mencatat pembayaran untuk invoice berstatus "
+                    f"'{locked_invoice.get_status_display()}' — invoice harus "
+                    f"berstatus 'Diterbitkan' terlebih dahulu."
+                )
+            if amount > locked_invoice.balance_due:
+                raise ValueError(
+                    f"Jumlah pembayaran ({amount}) melebihi sisa tagihan "
+                    f"({locked_invoice.balance_due}) — kelebihan bayar belum "
+                    f"didukung."
+                )
+
             # 5 Sep 2026 — real fix: resolved ONCE, reused for both
             # the real stored received_at AND the event's own frozen
             # transaction_date — the same value, never two
             # independent reads that could theoretically drift apart.
             received_at_resolved = received_at or timezone.now()
             payment = cls.objects.create(
-                organization=invoice.organization,
-                invoice=invoice,
+                organization=locked_invoice.organization,
+                invoice=locked_invoice,
                 amount=amount,
                 method=method,
                 received_at=received_at_resolved,
@@ -145,8 +176,8 @@ class Payment(TenantScopedModel):
             from apps.core.events.bus import default_bus
             from apps.payments.events import PaymentReceived
             default_bus.publish(PaymentReceived(
-                organization_id=invoice.organization_id,
-                invoice_id=invoice.id,
+                organization_id=locked_invoice.organization_id,
+                invoice_id=locked_invoice.id,
                 payment_id=payment.id,
                 amount=amount,
                 method=method,
@@ -154,16 +185,20 @@ class Payment(TenantScopedModel):
                 # field on Invoice, threaded one hop further into the
                 # event payload — no new query, no new source of
                 # truth. See PaymentReceived's own docstring.
-                customer_name=invoice.customer_name_snapshot,
+                customer_name=locked_invoice.customer_name_snapshot,
                 # 5 Sep 2026 — real fix: the actual business date this
                 # payment happened on, not publish-time. See
                 # PaymentReceived.transaction_date's own docstring.
                 transaction_date=transaction_date,
             ))
 
-            if invoice.balance_due <= Decimal("0"):
-                invoice.status = "PAID"
-                invoice.save(update_fields=["status"])
+            # locked_invoice.balance_due re-queries payments.all()
+            # fresh — the just-created row above is already visible
+            # within this same transaction (read-your-own-writes),
+            # so this correctly reflects the real, post-payment state.
+            if locked_invoice.balance_due <= Decimal("0"):
+                locked_invoice.status = "PAID"
+                locked_invoice.save(update_fields=["status"])
 
         return payment
 
