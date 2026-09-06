@@ -118,16 +118,29 @@ class Payment(TenantScopedModel):
             )
 
         with transaction.atomic():
+            # 5 Sep 2026 — real fix: resolved ONCE, reused for both
+            # the real stored received_at AND the event's own frozen
+            # transaction_date — the same value, never two
+            # independent reads that could theoretically drift apart.
+            received_at_resolved = received_at or timezone.now()
             payment = cls.objects.create(
                 organization=invoice.organization,
                 invoice=invoice,
                 amount=amount,
                 method=method,
-                received_at=received_at or timezone.now(),
+                received_at=received_at_resolved,
                 reference=reference,
                 notes=notes,
                 received_by=received_by,
             )
+
+            # timezone.is_aware() guard — localtime() requires an
+            # aware datetime; falls back to the raw date rather than
+            # crash if received_at was ever passed in naive.
+            if timezone.is_aware(received_at_resolved):
+                transaction_date = timezone.localtime(received_at_resolved).date()
+            else:
+                transaction_date = received_at_resolved.date()
 
             from apps.core.events.bus import default_bus
             from apps.payments.events import PaymentReceived
@@ -142,6 +155,10 @@ class Payment(TenantScopedModel):
                 # event payload — no new query, no new source of
                 # truth. See PaymentReceived's own docstring.
                 customer_name=invoice.customer_name_snapshot,
+                # 5 Sep 2026 — real fix: the actual business date this
+                # payment happened on, not publish-time. See
+                # PaymentReceived.transaction_date's own docstring.
+                transaction_date=transaction_date,
             ))
 
             if invoice.balance_due <= Decimal("0"):
@@ -305,16 +322,26 @@ class SupplierPayment(TenantScopedModel):
         amount = supplier_invoice.amount
 
         with transaction.atomic():
+            # 5 Sep 2026 — real fix: resolved ONCE, reused for the
+            # period-open check, the real stored paid_at, AND the
+            # event's own frozen transaction_date below — same value
+            # everywhere, never independently re-derived.
+            paid_at_resolved = paid_at or timezone.now()
+
             from apps.accounting.models import AccountingPeriod
+            if timezone.is_aware(paid_at_resolved):
+                paid_at_local_date = timezone.localtime(paid_at_resolved).date()
+            else:
+                paid_at_local_date = paid_at_resolved.date()
             AccountingPeriod.assert_open_for_posting(
-                supplier_invoice.organization, (paid_at or timezone.now()).date()
+                supplier_invoice.organization, paid_at_local_date
             )
             payment = cls.objects.create(
                 organization=supplier_invoice.organization,
                 supplier_invoice=supplier_invoice,
                 amount=amount,
                 method=method,
-                paid_at=paid_at or timezone.now(),
+                paid_at=paid_at_resolved,
                 reference=reference,
                 notes=notes,
                 paid_by=paid_by,
@@ -337,6 +364,10 @@ class SupplierPayment(TenantScopedModel):
                 # moment of payment, captured once. See
                 # SupplierPaymentMade's own docstring.
                 supplier_name=supplier_invoice.supplier.name,
+                # 5 Sep 2026 — real fix: the actual business date this
+                # payment happened on. See SupplierPaymentMade.
+                # transaction_date's own docstring.
+                transaction_date=paid_at_local_date,
             ))
 
         return payment
