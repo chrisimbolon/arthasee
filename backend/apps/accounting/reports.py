@@ -34,7 +34,17 @@ def trial_balance(organization, *, as_of=None) -> dict:
     internally consistent, not just a label attached after the fact.
     """
     as_of = as_of or date.today()
-    accounts = Account.objects.filter(organization=organization, is_active=True).order_by("code")
+    # 5 Sep 2026 — real fix: is_active must never gate a REPORTING
+    # query. There is no account-deactivation feature anywhere in
+    # this codebase today (is_active is only ever set once, at
+    # seed_coa time), so this changes nothing about current behavior
+    # — it closes a real, latent trap for whenever deactivation IS
+    # eventually built: a deactivated account's real, past history
+    # must never silently vanish from a re-generated historical
+    # report. is_active should only ever gate whether an account can
+    # be SELECTED for a new posting going forward, never whether its
+    # already-posted history still counts.
+    accounts = Account.objects.filter(organization=organization).order_by("code")
 
     rows = []
     total_debit = Decimal("0")
@@ -78,7 +88,7 @@ def _period_totals(organization, account_type, *, since, as_of):
     Account.balance()'s own docstring for the full story.
     """
     accounts = Account.objects.filter(
-        organization=organization, account_type=account_type, is_active=True,
+        organization=organization, account_type=account_type,
     ).order_by("code")
     rows = []
     total = Decimal("0")
@@ -376,7 +386,7 @@ def balance_sheet(organization, *, as_of=None) -> dict:
     """
     as_of = as_of or date.today()
 
-    assets = Account.objects.filter(organization=organization, account_type=Account.AccountType.ASSET, is_active=True).order_by("code")
+    assets = Account.objects.filter(organization=organization, account_type=Account.AccountType.ASSET).order_by("code")
     asset_rows = [
         {"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of), "normal_balance": a.normal_balance}
         for a in assets
@@ -403,11 +413,11 @@ def balance_sheet(organization, *, as_of=None) -> dict:
         Decimal("0"),
     )
 
-    liabilities = Account.objects.filter(organization=organization, account_type=Account.AccountType.LIABILITY, is_active=True).order_by("code")
+    liabilities = Account.objects.filter(organization=organization, account_type=Account.AccountType.LIABILITY).order_by("code")
     liability_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in liabilities]
     total_liabilities = sum((r["balance"] for r in liability_rows), Decimal("0"))
 
-    equity = Account.objects.filter(organization=organization, account_type=Account.AccountType.EQUITY, is_active=True).order_by("code")
+    equity = Account.objects.filter(organization=organization, account_type=Account.AccountType.EQUITY).order_by("code")
     equity_rows = [{"code": a.code, "name": a.name, "balance": a.balance(as_of=as_of)} for a in equity]
     total_equity_accounts = sum((r["balance"] for r in equity_rows), Decimal("0"))
 
