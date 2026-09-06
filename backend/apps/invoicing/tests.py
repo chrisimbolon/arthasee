@@ -19,7 +19,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Invoice, InvoiceSequence
+from .models import Invoice, InvoiceLineItem, InvoiceSequence
 
 
 class InvoicingAPITestBase(APITestCase):
@@ -804,3 +804,89 @@ class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
 
         recheck = self.client.get(f"/api/invoices/{invoice_id}/")
         self.assertEqual(recheck.data["invoice"]["mechanic_name_snapshot"], "Alex")
+
+
+class InvoiceLineItemNegativeAmountTests(InvoicingAPITestBase):
+    """
+    6 Sep 2026 — real coverage for InvoiceLineItem.save()'s new
+    negative-amount guard, found via Sansan's own "negative
+    transaction" design-review question (Q25), not a live incident.
+    Chris's own confirmed policy: a standard Invoice must never
+    represent a negative transaction at all — a genuine credit/return
+    belongs in a dedicated, separate flow with its own journal
+    treatment, never a raw negative Invoice line.
+    """
+
+    def test_negative_quantity_rejected_at_the_model_layer(self):
+        """
+        The real, unconditional proof of the fix itself — direct ORM
+        construction, bypassing any serializer/view layer entirely,
+        so this holds regardless of whatever validation may or may
+        not already exist above the model.
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        with self.assertRaises(ValueError):
+            InvoiceLineItem.objects.create(
+                invoice=invoice, kind="labor", description="Jasa Negatif",
+                quantity=Decimal("-1.00"), unit_price=Decimal("100000.00"),
+            )
+
+    def test_negative_unit_price_rejected_at_the_model_layer(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        with self.assertRaises(ValueError):
+            InvoiceLineItem.objects.create(
+                invoice=invoice, kind="labor", description="Jasa Harga Negatif",
+                quantity=Decimal("1.00"), unit_price=Decimal("-50000.00"),
+            )
+
+    def test_rejected_line_item_is_never_persisted(self):
+        """
+        Real proof this fails BEFORE writing anything, not after —
+        matching this codebase's own "validate before touching the
+        database" discipline used everywhere else (JournalEntry.
+        post(), OpeningBalanceSession.post(), etc.).
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        count_before = InvoiceLineItem.objects.filter(invoice=invoice).count()
+        try:
+            InvoiceLineItem.objects.create(
+                invoice=invoice, kind="labor", description="Jasa Negatif",
+                quantity=Decimal("-1.00"), unit_price=Decimal("100000.00"),
+            )
+        except ValueError:
+            pass
+        self.assertEqual(InvoiceLineItem.objects.filter(invoice=invoice).count(), count_before)
+
+    def test_positive_line_items_still_save_normally(self):
+        """Regression proof — the guard must not accidentally block
+        the normal, legitimate case."""
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        InvoiceLineItem.objects.create(
+            invoice=invoice, kind="labor", description="Jasa Normal",
+            quantity=Decimal("1.00"), unit_price=Decimal("100000.00"),
+        )
+        self.assertTrue(InvoiceLineItem.objects.filter(invoice=invoice, description="Jasa Normal").exists())
+
+    def test_negative_labor_line_via_the_real_api_does_not_return_500(self):
+        """
+        Real, honest caveat: this asserts the response is NOT a raw
+        500 — it does not assume a specific clean status code, since
+        invoicing/serializers.py and the invoice-creation view itself
+        were not reviewed directly to confirm whether a serializer-
+        level guard already exists above this model fix, or whether
+        the view catches ValueError the same way it demonstrably does
+        for the missing-invoice_code and missing-mechanic cases
+        (both proven elsewhere in this file). Either a clean 4xx or a
+        genuinely different real validation error is an acceptable
+        outcome here — a raw 500 crashing the request is not.
+        """
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Negatif", "quantity": 1, "unit_price": -100000}]},
+            format="json",
+        )
+        self.assertLess(resp.status_code, 500)

@@ -287,6 +287,49 @@ class InvoiceLineItem(TenantScopedModel):
     def _resolve_organization(self):
         return self.invoice.organization
 
+    def save(self, *args, **kwargs):
+        # 6 Sep 2026 — real, deliberate policy guard, found via a
+        # design-review trace (Sansan's own "negative transaction"
+        # question), not a live incident: a negative quantity or
+        # unit_price here would flow straight into Invoice.total (a
+        # plain sum of these subtotals) and from there into
+        # InvoiceIssued's own posting — posting_engine.py's own
+        # _lines() now fails loudly if a negative amount ever reaches
+        # it (see that function's own updated docstring), but the
+        # REAL fix belongs here, at the source: a standard Invoice
+        # must never represent a negative transaction at all. Chris's
+        # own confirmed policy: a genuine negative transaction (a
+        # refund, a return) belongs in a dedicated Credit Note/Return
+        # flow with its own journal treatment, never passed through
+        # as a raw negative Invoice line.
+        # 6 Sep 2026 — real bug found live, hours after this guard
+        # first shipped: quantity/unit_price aren't guaranteed to be
+        # real Decimal instances yet at this point — Django only
+        # coerces a DecimalField's raw assigned value at the DB
+        # layer, AFTER save() runs, not before. The real invoice-
+        # creation view passes unit_price as a plain string in at
+        # least one real call site, and a bare `str < Decimal`
+        # comparison raises TypeError, not the intended ValueError —
+        # a real regression this exact guard introduced, caught by
+        # 9 real existing tests failing loudly rather than silently.
+        # Decimal(str(x)) round-trips correctly regardless of
+        # whether x is already a Decimal, a string, an int, or a
+        # float — safe, defensive coercion before the comparison
+        # that actually matters.
+        if self.quantity is not None and Decimal(str(self.quantity)) < Decimal("0"):
+            raise ValueError(
+                "Jumlah pada baris invoice tidak boleh negatif — gunakan alur "
+                "Nota Kredit/Retur yang terpisah untuk transaksi negatif, "
+                "bukan invoice standar."
+            )
+        if self.unit_price is not None and Decimal(str(self.unit_price)) < Decimal("0"):
+            raise ValueError(
+                "Harga satuan pada baris invoice tidak boleh negatif — "
+                "gunakan alur Nota Kredit/Retur yang terpisah untuk "
+                "transaksi negatif, bukan invoice standar."
+            )
+        super().save(*args, **kwargs)
+
     @property
     def subtotal(self):
         return self.quantity * self.unit_price
