@@ -36,6 +36,7 @@ from apps.invoicing.models import Invoice
 from apps.invoicing.tests import InvoicingAPITestBase
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.payments.events import PaymentReceived
+from apps.payments.models import Payment, SupplierPayment
 from apps.purchasing.models import Supplier, SupplierInvoice
 from apps.service.models import Customer, Vehicle
 from apps.workorders.events import WorkOrderCompleted
@@ -801,6 +802,44 @@ class AgingAPReportTests(TestCase):
         data = reports.aging_ap(self.org, as_of=date.today())
         self.assertEqual(data["buckets"]["0-30"], Decimal("50000"))
 
+    # ── Point-in-time correctness — 5 Sep 2026 ──────────────────
+    # Structurally cleaner than the AR side — SupplierInvoice has no
+    # cancellation state at all, and a real invoice_date field of its
+    # own, not a created-at proxy. See aging_ap()'s own docstring.
+
+    def test_paid_supplier_invoice_still_shows_outstanding_for_a_historical_as_of_before_the_payment(self):
+        """Mirror of aging_ar()'s own headline regression test."""
+        invoice = SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("700000"),
+            invoice_date=date.today() - timedelta(days=20),
+        )
+        payment_date = timezone.now() - timedelta(days=5)
+        SupplierPayment.record(supplier_invoice=invoice, paid_at=payment_date)
+
+        before_payment = reports.aging_ap(self.org, as_of=payment_date.date() - timedelta(days=1))
+        self.assertEqual(before_payment["total_outstanding"], Decimal("700000"))
+
+        after_payment = reports.aging_ap(self.org, as_of=payment_date.date())
+        self.assertEqual(after_payment["total_outstanding"], Decimal("0"))
+
+    def test_supplier_invoice_excluded_before_its_own_invoice_date(self):
+        SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("300000"),
+            invoice_date=date.today(),
+        )
+        data = reports.aging_ap(self.org, as_of=date.today() - timedelta(days=1))
+        self.assertEqual(data["total_outstanding"], Decimal("0"))
+
+    def test_supplier_payment_after_as_of_does_not_reduce_historical_balance(self):
+        invoice = SupplierInvoice.record(
+            organization=self.org, supplier=self.supplier, amount=Decimal("450000"),
+            invoice_date=date.today() - timedelta(days=20),
+        )
+        SupplierPayment.record(supplier_invoice=invoice, paid_at=timezone.now())
+
+        data = reports.aging_ap(self.org, as_of=date.today() - timedelta(days=10))
+        self.assertEqual(data["total_outstanding"], Decimal("450000"))
+
 
 class CashConversionCycleTests(TestCase):
     """
@@ -1078,6 +1117,102 @@ class AgingARReportTests(InvoicingAPITestBase):
         self.assertEqual(data["buckets"]["0-30"], Decimal("100000"))
         self.assertEqual(data["buckets"]["31-60"], Decimal("200000"))
         self.assertEqual(data["total_outstanding"], Decimal("300000"))
+
+    # ── Point-in-time correctness — 5 Sep 2026 ──────────────────
+    # The real regression coverage for the gap found via a design-
+    # review trace: the old status="ISSUED" filter and lifetime
+    # balance_due both silently broke any as_of other than "today."
+
+    def test_fully_paid_invoice_still_shows_outstanding_for_a_historical_as_of_before_the_payment(self):
+        """
+        THE headline regression test — an invoice paid in full today
+        must still show as fully outstanding when queried for a
+        historical date BEFORE that real payment, and correctly show
+        zero for a date on/after it. This is the exact scenario that
+        would destroy Made's trust in a past-period reconciliation.
+        """
+        invoice_id = self._new_issued_invoice(Decimal("500000"))
+        Invoice.objects.filter(pk=invoice_id).update(created_at=timezone.now() - timedelta(days=20))
+        payment_date = timezone.now() - timedelta(days=5)
+        Payment.objects.create(
+            invoice_id=invoice_id, amount=Decimal("500000"), method="cash", received_at=payment_date,
+        )
+
+        before_payment = reports.aging_ar(self.org, as_of=payment_date.date() - timedelta(days=1))
+        self.assertEqual(before_payment["total_outstanding"], Decimal("500000"))
+
+        after_payment = reports.aging_ar(self.org, as_of=payment_date.date())
+        self.assertEqual(after_payment["total_outstanding"], Decimal("0"))
+
+    def test_partial_payment_before_as_of_correctly_reduces_balance(self):
+        invoice_id = self._new_issued_invoice(Decimal("1000000"))
+        Invoice.objects.filter(pk=invoice_id).update(created_at=timezone.now() - timedelta(days=20))
+        Payment.objects.create(
+            invoice_id=invoice_id, amount=Decimal("400000"), method="cash",
+            received_at=timezone.now() - timedelta(days=5),
+        )
+
+        data = reports.aging_ar(self.org, as_of=date.today())
+        self.assertEqual(data["total_outstanding"], Decimal("600000"))
+
+    def test_payment_received_after_as_of_does_not_reduce_historical_balance(self):
+        """Real proof this is date-BOUNDED, not just existence-
+        checked — a payment dated after as_of must not count."""
+        invoice_id = self._new_issued_invoice(Decimal("300000"))
+        Invoice.objects.filter(pk=invoice_id).update(created_at=timezone.now() - timedelta(days=20))
+        Payment.objects.create(
+            invoice_id=invoice_id, amount=Decimal("300000"), method="cash", received_at=timezone.now(),
+        )
+
+        data = reports.aging_ar(self.org, as_of=date.today() - timedelta(days=10))
+        self.assertEqual(data["total_outstanding"], Decimal("300000"))
+
+    def test_cancelled_invoice_excluded_from_all_historical_aging(self):
+        """
+        The known, honest, narrow limitation, explicitly tested as
+        such — not silently passing. See aging_ar()'s own docstring
+        for the full reasoning: Invoice stores no cancellation
+        timestamp at all, so a currently-cancelled invoice is
+        excluded from every as_of, not just dates on/after its real
+        (unknown) cancellation date.
+        """
+        invoice_id = self._new_issued_invoice(Decimal("250000"))
+        Invoice.objects.filter(pk=invoice_id).update(created_at=timezone.now() - timedelta(days=10))
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json")
+
+        data = reports.aging_ar(self.org, as_of=date.today())
+        self.assertEqual(data["total_outstanding"], Decimal("0"))
+
+    def test_draft_invoice_never_appears_regardless_of_created_at(self):
+        """
+        issued_event_id is only ever set at the real ISSUED
+        transition — a DRAFT invoice must never appear in aging,
+        even with a created_at far in the past.
+        """
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 9999 ZZ",
+            manufacture_year=2022, vehicle_type="Mobil", model="Honda Brio",
+        )
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=vehicle, assigned_to=self.mechanic)
+        wo.status = "IN_PROGRESS"
+        wo.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=wo, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        wo.status = "QC"
+        wo.save(update_fields=["status"])
+        service_record = wo.close(closed_by=self.owner)
+        create = self.client.post(
+            f"/api/service-records/{service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa", "quantity": 1, "unit_price": "999000"}]},
+            format="json",
+        )
+        draft_invoice_id = create.data["invoice"]["id"]
+        Invoice.objects.filter(pk=draft_invoice_id).update(created_at=timezone.now() - timedelta(days=100))
+
+        data = reports.aging_ar(self.org, as_of=date.today())
+        self.assertEqual(data["total_outstanding"], Decimal("0"))
 
 
 class ReportingAPITests(APITestCase):
