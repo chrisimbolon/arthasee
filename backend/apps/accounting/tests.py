@@ -729,6 +729,35 @@ class FinancialReportingTests(TestCase):
         self.assertEqual(data["total_assets"], Decimal("1000000"))
         self.assertEqual(data["total_equity"], Decimal("1000000"))
 
+    def test_deactivated_account_still_appears_in_historical_reports(self):
+        """
+        5 Sep 2026 — real, contingent-risk fix: is_active must never
+        gate a REPORTING query, only whether an account can be
+        selected for a NEW posting going forward. There is no real
+        account-deactivation feature or endpoint anywhere in this
+        codebase today — is_active is toggled here directly via the
+        ORM purely to prove the report layer itself is correct
+        whenever that feature eventually exists, not to test a real
+        user-facing flow that doesn't exist yet.
+        """
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        self.revenue.is_active = False
+        self.revenue.save(update_fields=["is_active"])
+
+        trial_balance = reports.trial_balance(self.org, as_of=date.today())
+        self.assertIn("4001", [row["code"] for row in trial_balance["accounts"]])
+
+        pl = reports.profit_and_loss(self.org, since=date(date.today().year, 1, 1), as_of=date.today())
+        self.assertEqual(pl["total_revenue"], Decimal("500000"))
+
+        self.cash.is_active = False
+        self.cash.save(update_fields=["is_active"])
+        bs = reports.balance_sheet(self.org, as_of=date.today())
+        self.assertIn("1001", [row["code"] for row in bs["assets"]])
+
 
 class AgingAPReportTests(TestCase):
     """
