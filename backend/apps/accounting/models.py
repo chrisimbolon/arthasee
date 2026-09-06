@@ -1306,18 +1306,44 @@ class OpeningBalanceSession(TenantScopedModel):
         requires), EVERYTHING rolls back cleanly: every Part, every
         Asset, every StockAdjustment created above included. Nothing
         is left half-created just because the total didn't balance.
+
+        6 Sep 2026 — real, hard idempotency guard, found via a
+        design-review trace (Sansan's own "double-click / network
+        retry" question), not a live incident: the OLD version
+        checked self.status BEFORE ever entering transaction.atomic(),
+        against whatever was already loaded into memory, with no row
+        lock at all. Two near-simultaneous requests (a genuine
+        double-click, or a frontend retry after a network glitch)
+        could both load the same session with status=DRAFT, both
+        pass the check, and both proceed to post — silently creating
+        TWO separate OPENING_BALANCE journal entries and doubling
+        the entire opening position. unique_together on this model
+        only stops a second SESSION ROW from ever being created — it
+        does nothing to stop two concurrent post() calls against the
+        one row that already exists.
+
+        Real fix: select_for_update() re-fetches THIS row with a
+        real row-level lock, and the status check re-runs against
+        that locked, authoritative copy — same proven pattern already
+        established elsewhere in this codebase (DepreciationRun.
+        execute()'s own select_for_update(), InvoiceSequence.
+        next_number()'s own select_for_update()). The second
+        concurrent request blocks here until the first one's
+        transaction commits (or rolls back), then re-checks status
+        and correctly sees POSTED, raising cleanly instead of racing.
         """
-        if self.status != self.Status.DRAFT:
-            raise ValueError("Sesi saldo awal ini sudah pernah diposting.")
-
-        self._validate_before_posting()
-
         # Local imports — cross-app dependency, same established
         # convention as every other cross-app reach in this codebase
         # (WorkOrder.close()'s own ServiceRecord import, etc.).
         from apps.inventory.models import Part, StockAdjustment
 
         with transaction.atomic():
+            locked_self = OpeningBalanceSession.objects.select_for_update().get(pk=self.pk)
+            if locked_self.status != self.Status.DRAFT:
+                raise ValueError("Sesi saldo awal ini sudah pernah diposting.")
+
+            self._validate_before_posting()
+
             # Real gap found and fixed while writing this session's
             # own test coverage, not caught during the original
             # design review — Sansan's own approved §5 ("trigger
