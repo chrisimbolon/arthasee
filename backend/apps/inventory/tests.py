@@ -1060,3 +1060,50 @@ class StockOpnameSessionTests(InventoryAPITestBase):
         # 2 * unit_price (25000, part_a's own real setUp value) = 50000.
         debit_5004 = entry.lines.get(account__code="5004")
         self.assertEqual(debit_5004.debit_amount, Decimal("50000.00"))
+    def test_complete_blocked_synchronously_when_current_period_is_closed(self):
+        """
+        6 Sep 2026 — THE real regression test for Q37: completing a
+        session against an already-closed period must roll back
+        EVERYTHING, including the real stock-quantity change — not
+        silently succeed at the DB layer while only the async GL
+        posting fails in the background afterward. Closes the
+        CURRENT real month's own period (the one seed_coa's own
+        signup-time seeding always creates) directly via the ORM —
+        the exact real period StockOpnameSession.complete()'s own new
+        guard checks against (today's local date — StockOpnameCompleted
+        carries no transaction_date of its own).
+        """
+        from apps.accounting.models import AccountingPeriod
+        from apps.inventory.models import StockOpnameSession
+
+        today = timezone.now().date()
+        period = AccountingPeriod.objects.get(
+            organization=self.org, year=today.year, month=today.month,
+        )
+        period.is_closed = True
+        period.save(update_fields=["is_closed"])
+
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "18.00"},
+                {"part_id": str(self.part_b.id), "physical_count": "12.00"},
+            ]},
+            format="json",
+        )
+
+        session = StockOpnameSession.objects.get(id=session_id)
+        with self.assertRaises(ValueError):
+            session.complete()
+
+        session.refresh_from_db()
+        self.assertEqual(session.status, StockOpnameSession.Status.DRAFT)
+
+        # THE real proof — stock must be COMPLETELY UNCHANGED, not
+        # partially adjusted before the guard fired partway through.
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("20.00"))
+        self.assertEqual(self.part_b.current_stock, Decimal("10.00"))
+        self.assertEqual(StockAdjustment.objects.filter(reason="correction").count(), 0)

@@ -481,6 +481,18 @@ class StockOpnameSession(TenantScopedModel):
         cannot be completed, since an uncounted line has no honest
         variance to measure (genuinely unknown, not "zero").
 
+        6 Sep 2026 — real, synchronous period-lock guard added
+        (Sansan's own "period-closed inventory edit" question, Q37),
+        not a live incident: this method's real stock-quantity
+        change (StockAdjustment, below) commits SYNCHRONOUSLY, but
+        StockOpnameCompleted's own GL posting only happens
+        ASYNCHRONOUSLY, after commit — without a synchronous check
+        here, completing a session against an already-closed period
+        would permanently change Part.current_stock for real while
+        the GL posting silently failed in the background. See the
+        real check itself, right after entering transaction.atomic()
+        below, for the full reasoning.
+
         Valuation basis for the event's Rupiah totals is
         Part.cost_price ("Last Cost"), falling back to Part.unit_price
         only when cost_price is still 0 (no real GRN history yet for
@@ -525,6 +537,37 @@ class StockOpnameSession(TenantScopedModel):
             )
 
         with transaction.atomic():
+            # 6 Sep 2026 — real, synchronous guard, found via a
+            # design-review trace (Sansan's own "period-closed
+            # inventory edit" question, Q37), not a live incident.
+            # The real stock quantity change (StockAdjustment, below)
+            # commits SYNCHRONOUSLY, inside this same transaction —
+            # but the resulting StockOpnameCompleted event's own GL
+            # posting only happens ASYNCHRONOUSLY, after commit
+            # (transaction.on_commit(), the same deferred-dispatch
+            # pattern this whole event system always uses). Without
+            # this check, completing a session against an already-
+            # closed period would still successfully change Part.
+            # current_stock for real — permanently, with no way to
+            # roll it back afterward — while the GL posting silently
+            # failed in the background (a FAILED Outbox row nobody
+            # may ever notice). Same architectural gap already found
+            # and fixed for Payment.record()/SupplierPayment.record()
+            # elsewhere in this codebase — checked HERE, synchronously,
+            # before any real write happens, matching the exact
+            # discipline Asset.record()/SupplierPayment.record()
+            # already established. Checks against TODAY's real local
+            # date — StockOpnameCompleted carries no transaction_date
+            # of its own, so journal_generator.post_for_event() would
+            # fall back to occurred_at anyway, which for this
+            # synchronous action is effectively "right now." Local
+            # import — cross-app dependency, same established
+            # convention as this method's own default_bus/
+            # StockOpnameCompleted imports below.
+            from apps.accounting.models import AccountingPeriod
+            posting_date = timezone.localtime(timezone.now()).date()
+            AccountingPeriod.assert_open_for_posting(self.organization, posting_date)
+
             shortage_amount = Decimal("0")
             surplus_amount  = Decimal("0")
 
