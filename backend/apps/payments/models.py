@@ -128,6 +128,20 @@ class Payment(TenantScopedModel):
         acquiring the lock — pure input validation with no DB
         dependency, no reason to hold a row lock just to reject a
         trivially malformed amount.
+
+        6 Sep 2026 — real, synchronous period-lock guard added,
+        found via the same design-review sweep as Q37/Q50, not a
+        live incident: this method had NO period-open check at all,
+        unlike SupplierPayment.record()/OperatingExpense.record()/
+        InternalCashMutation.record(), every one of which already has
+        one. Without it, a payment could be recorded — Payment row
+        created, Invoice.status flipped to PAID — against an already-
+        closed period, while the resulting PaymentReceived event's
+        own GL posting silently failed in the background (a FAILED
+        Outbox row nobody may ever notice, with the owner believing
+        the payment fully succeeded). Checked here, synchronously,
+        BEFORE the Payment row is created — matches the exact
+        discipline SupplierPayment.record() already established.
         """
         if amount is None or amount <= Decimal("0"):
             raise ValueError("Jumlah pembayaran harus lebih dari nol.")
@@ -154,6 +168,21 @@ class Payment(TenantScopedModel):
             # transaction_date — the same value, never two
             # independent reads that could theoretically drift apart.
             received_at_resolved = received_at or timezone.now()
+
+            # timezone.is_aware() guard — localtime() requires an
+            # aware datetime; falls back to the raw date rather than
+            # crash if received_at was ever passed in naive. Computed
+            # BEFORE the period check below, since that check needs
+            # the real business date too — same single value used
+            # for both, never two independent derivations.
+            if timezone.is_aware(received_at_resolved):
+                transaction_date = timezone.localtime(received_at_resolved).date()
+            else:
+                transaction_date = received_at_resolved.date()
+
+            from apps.accounting.models import AccountingPeriod
+            AccountingPeriod.assert_open_for_posting(locked_invoice.organization, transaction_date)
+
             payment = cls.objects.create(
                 organization=locked_invoice.organization,
                 invoice=locked_invoice,
@@ -164,14 +193,6 @@ class Payment(TenantScopedModel):
                 notes=notes,
                 received_by=received_by,
             )
-
-            # timezone.is_aware() guard — localtime() requires an
-            # aware datetime; falls back to the raw date rather than
-            # crash if received_at was ever passed in naive.
-            if timezone.is_aware(received_at_resolved):
-                transaction_date = timezone.localtime(received_at_resolved).date()
-            else:
-                transaction_date = received_at_resolved.date()
 
             from apps.core.events.bus import default_bus
             from apps.payments.events import PaymentReceived

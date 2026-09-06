@@ -287,6 +287,35 @@ class PaymentRecordingTests(PaymentsAPITestBase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class PaymentPeriodLockTests(PaymentsAPITestBase):
+    """
+    6 Sep 2026 — real, synchronous period-lock coverage for
+    Payment.record(), closing the same gap already found and fixed
+    for SupplierPayment.record()/StockOpnameSession.complete()
+    elsewhere in this codebase — Payment.record() had NO period-open
+    check at all before this fix. Closes the CURRENT real month's own
+    period (the one this fixture's own real WorkOrder.close() flow
+    depends on already existing) directly via the ORM.
+    """
+
+    def test_payment_blocked_when_current_period_is_closed(self):
+        from apps.accounting.models import AccountingPeriod
+
+        today = timezone.now().date()
+        period = AccountingPeriod.objects.get(
+            organization=self.org, year=today.year, month=today.month,
+        )
+        period.is_closed = True
+        period.save(update_fields=["is_closed"])
+
+        resp = self._pay(250000)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "ISSUED")  # unchanged by the rejected attempt
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+
 class PaymentTenantIsolationTests(PaymentsAPITestBase):
 
     def setUp(self):
