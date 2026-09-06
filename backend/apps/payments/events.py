@@ -44,12 +44,28 @@ class PaymentReceived(DomainEvent):
     discipline this event's own amount/method fields already follow
     for money) — this is threading an existing snapshot one hop
     further, not inventing a new source of truth.
+
+    transaction_date, added 5 Sep 2026 — real bug found via a
+    design-review trace (Sansan's own "midnight boundary" question),
+    same class of bug as OperatingExpenseRecorded's own fix a week
+    earlier: Payment.received_at is a real, caller-supplied business
+    date (Payment.record()'s own `received_at or timezone.now()` —
+    genuinely NOT always "now," a payment collected yesterday and
+    entered today is completely normal), but this event never froze
+    it, so journal_generator.post_for_event() always fell back to
+    occurred_at (publish time) regardless. A backdated payment would
+    silently post on the WRONG day — the exact "real date entered,
+    ignored anyway" bug already found and fixed for
+    OperatingExpenseRecorded/QuickPurchaseRecorded. Frozen from
+    received_at, localized to the project's real configured
+    timezone before extracting the date — never the raw UTC date.
     """
     invoice_id: uuid.UUID
     payment_id: uuid.UUID
     amount: Decimal
     method: str
     customer_name: str
+    transaction_date: date
     event_type: str = field(init=False, default="PaymentReceived", kw_only=True)
 
 
@@ -76,12 +92,17 @@ class SupplierPaymentMade(DomainEvent):
     payment, captured once into the event payload, never re-derived
     later from a Supplier row that could itself be renamed after
     the fact.
+
+    transaction_date, added 5 Sep 2026 — same real bug and same fix
+    as PaymentReceived.transaction_date above. Frozen from paid_at,
+    localized before extracting the date.
     """
     supplier_invoice_id: uuid.UUID
     supplier_payment_id: uuid.UUID
     amount: Decimal
     method: str
     supplier_name: str
+    transaction_date: date
     event_type: str = field(init=False, default="SupplierPaymentMade", kw_only=True)
 
 
