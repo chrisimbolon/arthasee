@@ -2497,6 +2497,50 @@ class OpeningBalanceSessionPostTests(OpeningBalanceTestBase):
         with self.assertRaises(ValueError):
             self.session.post(posted_by=self.owner)
 
+    def test_second_independently_loaded_copy_cannot_double_post(self):
+        """
+        6 Sep 2026 — THE real regression test for the double-post
+        race found via a design-review trace (Sansan's own "double-
+        click / network retry" question), not a live incident.
+        Deliberately loads a SECOND, genuinely independent copy of
+        the same session row — simulating two separate HTTP requests
+        each loading their own fresh instance — rather than reusing
+        the same Python object twice, which is what
+        test_cannot_post_an_already_posted_session above already
+        does. That test alone would have passed even against the
+        OLD, buggy code: its second call reads self.status off a
+        Python object that was already mutated to POSTED in memory
+        by the first call, never exercising the real "two
+        independently-loaded DRAFT copies racing" scenario at all.
+
+        Without the select_for_update() fix, second_copy.status
+        would still read DRAFT (loaded before the first post()
+        committed), and the naive in-memory check would incorrectly
+        let it proceed — creating a SECOND OPENING_BALANCE journal
+        entry and silently doubling the opening position. With the
+        fix, second_copy.post() re-fetches the row fresh, under a
+        real lock, sees the just-committed POSTED status, and raises
+        cleanly instead.
+        """
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("100000"),
+        )
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=self.session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount=Decimal("100000"),
+        )
+        second_copy = OpeningBalanceSession.objects.get(pk=self.session.pk)
+
+        self.session.post(posted_by=self.owner)
+
+        with self.assertRaises(ValueError):
+            second_copy.post(posted_by=self.owner)
+
+        self.assertEqual(
+            JournalEntry.objects.filter(organization=self.org, source=JournalEntry.Source.OPENING_BALANCE).count(),
+            1,
+        )
+
     def test_zero_amount_line_rejected_before_anything_is_written(self):
         """
         The real pre-flight validation — a genuinely non-sane
