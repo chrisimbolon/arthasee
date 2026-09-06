@@ -522,6 +522,64 @@ class PostingEngineIntegrationTests(TestCase):
         self.assertIn("AccountingEventHandler", row.last_error)
         self.assertFalse(JournalEntry.objects.filter(reference_event_id=event.event_id).exists())
 
+
+class PostingEngineLinesHelperTests(TestCase):
+    """
+    6 Sep 2026 — real, direct coverage for posting_engine._lines(),
+    found via a design-review trace (Sansan's own "negative
+    transaction" question), not a live incident. A pure-function test
+    — no DB, no event bus — since _lines() itself has zero ORM
+    dependency by design (see posting_engine.py's own module
+    docstring). No real event in this whole posting matrix ever
+    intentionally produces a negative amount, so these tests
+    construct the malformed input directly, proving the defensive
+    guard itself rather than any one specific event's behavior.
+    """
+
+    def test_zero_amount_is_silently_dropped_unchanged(self):
+        """The existing, correct behavior — must survive this fix
+        completely unchanged."""
+        from apps.accounting import posting_engine
+        result = posting_engine._lines(
+            {"account_code": "1001", "side": "debit", "amount": Decimal("0")},
+            {"account_code": "1201", "side": "credit", "amount": Decimal("500000")},
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["account_code"], "1201")
+
+    def test_positive_amount_passes_through_unchanged(self):
+        from apps.accounting import posting_engine
+        entries = [
+            {"account_code": "1001", "side": "debit", "amount": Decimal("500000")},
+            {"account_code": "1201", "side": "credit", "amount": Decimal("500000")},
+        ]
+        result = posting_engine._lines(*entries)
+        self.assertEqual(result, entries)
+
+    def test_negative_amount_raises_instead_of_silently_dropping(self):
+        """
+        THE real regression test for the actual gap: the OLD filter
+        (`amount > 0`) treated a negative amount identically to zero
+        — silently dropped, never rejected. A negative Invoice could
+        have produced a partial or empty journal entry while the
+        operational record itself still showed a negative total.
+        """
+        from apps.accounting import posting_engine
+        with self.assertRaises(ValueError):
+            posting_engine._lines(
+                {"account_code": "1001", "side": "debit", "amount": Decimal("-500000")},
+                {"account_code": "1201", "side": "credit", "amount": Decimal("500000")},
+            )
+
+    def test_negative_amount_error_names_the_real_account_code(self):
+        from apps.accounting import posting_engine
+        with self.assertRaises(ValueError) as ctx:
+            posting_engine._lines(
+                {"account_code": "4001", "side": "credit", "amount": Decimal("-100")},
+            )
+        self.assertIn("4001", str(ctx.exception))
+
+
 class AccountingPeriodLockTests(TestCase):
     """
     Task 4.3 — proves the fiscal period lock actually holds, for

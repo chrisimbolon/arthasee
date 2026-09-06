@@ -60,21 +60,51 @@ def cash_or_bank_account_code(method: str) -> str:
 
 def _lines(*entries):
     """
-    Drops any entry whose amount is exactly zero. Real requirement,
-    not a cosmetic filter — JournalLine's own DB constraint
-    (journalline_exactly_one_side) requires exactly one side to be
-    POSITIVE, not merely set; a $0 credit line satisfies neither
-    branch of that constraint and would raise IntegrityError if
-    passed through to JournalEntry.post() as-is.
+    Drops any entry whose amount is exactly zero — a real,
+    legitimate "nothing to post for this line" case, same
+    "$0 -> post nothing" precedent as WorkOrderCompleted's own
+    labor-only jobs.
 
-    Sprint 7, Task 7.3 also leans on this directly for
-    StockOpnameCompleted's own single-entry, up-to-4-line shape — a
-    shortage-only session naturally collapses to 2 lines, a
+    6 Sep 2026 — real, defensive fix, found via a design-review
+    trace (Sansan's own "negative transaction" question), not a live
+    incident: this used to filter zero AND negative amounts
+    identically (`amount > 0`), meaning a negative amount would be
+    silently DROPPED rather than rejected — a negative Invoice could
+    have produced a partial or empty journal entry while the
+    operational record itself still showed a negative total. Every
+    real posting rule in this file was checked directly: none of
+    them ever intentionally produces a negative amount — every real
+    "reversal" concept here works by swapping which account is
+    debited vs credited, never by passing a negative number through.
+    A negative amount reaching this function is therefore always a
+    genuine upstream bug (e.g. a negative Invoice that should have
+    been rejected at creation, per this project's own confirmed
+    policy: negative transactions belong in a dedicated Credit Note/
+    Return flow, never the standard posting engine) — this now fails
+    loudly instead of silently swallowing it, with zero change to
+    the zero-or-positive behavior every existing caller already
+    depends on.
+
+    Sprint 7, Task 7.3 also leans on the zero-filtering half of this
+    directly for StockOpnameCompleted's own single-entry, up-to-4-line
+    shape — a shortage-only session naturally collapses to 2 lines, a
     surplus-only session to the other 2, a session with both to all
-    4, entirely via this same existing filter. No new mechanism
-    needed for that event's "netted, not per-part" posting shape.
+    4 — unaffected by this change, since every value passed there is
+    already `abs(...)`, always >= 0.
     """
-    return [e for e in entries if e["amount"] > Decimal("0")]
+    result = []
+    for entry in entries:
+        if entry["amount"] < Decimal("0"):
+            raise ValueError(
+                f"Refusing to post a negative amount ({entry['amount']}) for "
+                f"account {entry['account_code']} — negative transactions must "
+                f"go through a dedicated Credit Note/Return flow, never the "
+                f"standard posting engine. This indicates an upstream "
+                f"validation gap, not a legitimate zero-value line."
+            )
+        if entry["amount"] > Decimal("0"):
+            result.append(entry)
+    return result
 
 
 def resolve(event) -> dict:
