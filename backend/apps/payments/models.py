@@ -314,6 +314,12 @@ class Refund(TenantScopedModel):
                 issued_event_id=invoice.issued_event_id,
                 amount=amount,
                 method=method,
+                # 6 Sep 2026 — real audit-trail fix: refunded_by was
+                # already a real parameter here, stored on the Refund
+                # row itself, just never threaded one hop further
+                # into the event payload. See
+                # InvoiceRefunded.refunded_by's own docstring.
+                refunded_by=refunded_by.id if refunded_by else None,
             ))
 
         return refund
