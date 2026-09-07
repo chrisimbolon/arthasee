@@ -1048,7 +1048,7 @@ export default function RootPage() {
 
       <footer className="wrap">
         <div>© 2026 Arthasee. Collaboration of Langit Strategi Indonesia and Kalanara Group</div>
-        <div className="mono">ERP Bengkel full otomasi</div>
+        <div className="mono">ERP Bengkel full otomasi-Akuntansi, Laporan Keuangan, Inventory dan Pelanggan</div>
       </footer>
     </>
   );
