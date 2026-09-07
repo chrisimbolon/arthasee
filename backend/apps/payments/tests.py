@@ -48,7 +48,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Payment
+from .models import Payment, Refund
 
 
 class PaymentsAPITestBase(APITestCase):
@@ -462,6 +462,42 @@ class InvoiceRefundTests(PaymentsAPITestBase):
         self.assertEqual(
             JournalEntry.objects.filter(reference_event_id=refund_event.event_id).count(), 1,
         )
+
+    def test_reversal_entry_carries_the_real_refunding_actor(self):
+        """
+        6 Sep 2026 — real audit-trail coverage for reverse_for_refund_
+        event()'s own actor resolution (Sansan's own "who performed
+        this reversal" question, Q57), not a live incident. Calls
+        Refund.record() directly with an explicit refunded_by, rather
+        than through the real HTTP /refund/ endpoint — this proves
+        Refund.record()'s own real refunded_by parameter now
+        genuinely survives all the way through InvoiceRefunded's own
+        payload into the reversal JournalEntry's created_by,
+        independent of whether the real refund VIEW (not reviewed
+        for this fix) actually passes the authenticated request user
+        through today.
+        """
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            Refund.record(invoice=invoice, method="cash", refunded_by=self.owner)
+
+        reversal = JournalEntry.objects.get(event_type="InvoiceRefunded")
+        self.assertEqual(reversal.created_by_id, self.owner.id)
+
+    def test_reversal_entry_has_no_actor_when_refunded_by_is_not_set(self):
+        """Regression proof — the field is nullable; a refund with no
+        real actor attached must still resolve cleanly, created_by
+        simply staying null, not crash."""
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            Refund.record(invoice=invoice, method="cash")
+
+        reversal = JournalEntry.objects.get(event_type="InvoiceRefunded")
+        self.assertIsNone(reversal.created_by_id)
 
     def test_status_patch_to_cancelled_on_paid_invoice_points_at_refund_endpoint(self):
         self._pay_in_full(method="cash")
