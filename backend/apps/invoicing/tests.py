@@ -499,13 +499,12 @@ class InvoiceCancelledEventTests(InvoicingAPITestBase):
         6 Sep 2026 — real audit-trail coverage for reverse_for_event()'s
         own actor resolution (Sansan's own "who performed this
         reversal" question, Q57), not a live incident. Constructs
-        InvoiceCancelled directly with a real cancelled_by set —
-        proving the resolution logic itself works correctly —
-        independent of whether invoicing/views.py's own
-        InvoiceStatusUpdateView.patch() has yet been updated to
-        actually thread the real acting user through when publishing
-        this event in production (a separate, pending change this
-        test does not depend on).
+        InvoiceCancelled directly, isolating the resolution logic
+        itself from the real view's own request/response cycle — see
+        test_real_cancellation_via_the_api_attributes_the_reversal_to_
+        the_acting_user below for the real, end-to-end HTTP proof that
+        InvoiceStatusUpdateView.patch() actually threads this through
+        in production.
         """
         invoice_id = self._issue_mixed_invoice()
         invoice = Invoice.objects.get(id=invoice_id)
@@ -521,9 +520,10 @@ class InvoiceCancelledEventTests(InvoicingAPITestBase):
 
     def test_reversal_entry_has_no_actor_when_cancelled_by_is_not_set(self):
         """
-        Regression proof — the current, real production state (no
-        view wired up yet) must not crash; created_by simply stays
-        null, exactly as before this fix.
+        Regression proof — cancelled_by is genuinely optional (a
+        system-triggered cancellation with no human actor, say); a
+        reversal built from an event that never set it must still
+        resolve cleanly, created_by simply staying null, not crash.
         """
         invoice_id = self._issue_mixed_invoice()
         invoice = Invoice.objects.get(id=invoice_id)
@@ -535,6 +535,26 @@ class InvoiceCancelledEventTests(InvoicingAPITestBase):
         reversal = cancellations.reverse_for_event(cancel_event)
 
         self.assertIsNone(reversal.created_by_id)
+
+    def test_real_cancellation_via_the_api_attributes_the_reversal_to_the_acting_user(self):
+        """
+        6 Sep 2026 — THE real, end-to-end proof this whole fix exists
+        for: InvoiceStatusUpdateView.patch() now threads request.user
+        into the published InvoiceCancelled event, closing the gap
+        the two tests above deliberately isolated away from — this is
+        the one that actually exercises the real HTTP PATCH endpoint,
+        not a direct model/event construction.
+        """
+        invoice_id = self._issue_mixed_invoice()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        reversal = JournalEntry.objects.get(event_type="InvoiceCancelled")
+        self.assertEqual(reversal.created_by_id, self.owner.id)
 
 class InvoiceTenantIsolationTests(InvoicingAPITestBase):
 
