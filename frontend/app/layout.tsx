@@ -1,9 +1,9 @@
+import { AuthProvider } from "@/context/AuthContext";
 import type { Metadata } from "next";
 import "./globals.css";
-import { AuthProvider } from "@/context/AuthContext";
 
 export const metadata: Metadata = {
-  title: "Arthasee — CRM Bengkel",
+  title: "Arthasee — ERP Bengkel",
   description: "Data pelanggan, riwayat kendaraan, dan pengingat servis dalam satu tempat.",
 };
 
