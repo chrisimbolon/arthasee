@@ -494,6 +494,48 @@ class InvoiceCancelledEventTests(InvoicingAPITestBase):
             JournalEntry.objects.filter(reference_event_id=cancel_event.event_id).count(), 1,
         )
 
+    def test_reversal_entry_carries_the_real_actor_when_cancelled_by_is_set(self):
+        """
+        6 Sep 2026 — real audit-trail coverage for reverse_for_event()'s
+        own actor resolution (Sansan's own "who performed this
+        reversal" question, Q57), not a live incident. Constructs
+        InvoiceCancelled directly with a real cancelled_by set —
+        proving the resolution logic itself works correctly —
+        independent of whether invoicing/views.py's own
+        InvoiceStatusUpdateView.patch() has yet been updated to
+        actually thread the real acting user through when publishing
+        this event in production (a separate, pending change this
+        test does not depend on).
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            issued_event_id=invoice.issued_event_id,
+            cancelled_by=self.owner.id,
+        )
+        reversal = cancellations.reverse_for_event(cancel_event)
+
+        self.assertEqual(reversal.created_by_id, self.owner.id)
+
+    def test_reversal_entry_has_no_actor_when_cancelled_by_is_not_set(self):
+        """
+        Regression proof — the current, real production state (no
+        view wired up yet) must not crash; created_by simply stays
+        null, exactly as before this fix.
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            issued_event_id=invoice.issued_event_id,
+        )
+        reversal = cancellations.reverse_for_event(cancel_event)
+
+        self.assertIsNone(reversal.created_by_id)
+
 class InvoiceTenantIsolationTests(InvoicingAPITestBase):
 
     def setUp(self):
