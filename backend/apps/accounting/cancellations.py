@@ -22,12 +22,37 @@ line-flip would re-credit AR and push it negative if applied to a
 paid invoice's original entry. Half B touches only the revenue lines
 and credits Cash/Bank instead. Same underlying JournalEntry.post()
 write path, genuinely different accounting logic above it.
+
+6 Sep 2026 — both functions now thread a real actor into their own
+reversing JournalEntry's created_by, closing a real audit-trail gap
+found via a design-review trace (Sansan's own "who performed this
+reversal" question, Q57), not a live incident: neither reversal ever
+had a real user attached before, since neither event carried one.
+InvoiceCancelled.cancelled_by/InvoiceRefunded.refunded_by are both
+nullable UUIDs, not real model instances — resolved here via a soft
+.filter().first() lookup, same "a since-deleted user must never
+crash this" discipline every other created_by/received_by field in
+this codebase already follows (all SET_NULL, all optional).
 """
 from decimal import Decimal
 
 from apps.accounting.models import Account, JournalEntry
 from apps.accounting.posting_engine import cash_or_bank_account_code
 from apps.organizations.models import Organization
+
+
+def _resolve_actor(user_id):
+    """
+    Shared helper for both reversal functions below — a real user
+    instance if user_id is set and still exists, None otherwise.
+    Never raises: a since-deleted user is a real, anticipated state
+    (every actor FK in this codebase is SET_NULL), not an error
+    condition worth crashing a reversal over.
+    """
+    if user_id is None:
+        return None
+    from apps.authentication.models import CustomUser
+    return CustomUser.objects.filter(pk=user_id).first()
 
 
 def reverse_for_event(event) -> JournalEntry | None:
@@ -78,6 +103,13 @@ def reverse_for_event(event) -> JournalEntry | None:
         event_type=event.event_type,
         reference_event_id=event.event_id,
         memo=f"Reversal of {original.entry_number} — invoice cancelled",
+        # 6 Sep 2026 — real audit-trail fix. See module docstring —
+        # event.cancelled_by is None until invoicing/views.py's own
+        # InvoiceStatusUpdateView.patch() is updated to actually
+        # thread the acting user through when publishing
+        # InvoiceCancelled; this resolution is already correct and
+        # ready for that moment, not a no-op waiting on it.
+        created_by=_resolve_actor(getattr(event, "cancelled_by", None)),
         lines=lines,
     )
 
@@ -141,5 +173,10 @@ def reverse_for_refund_event(event) -> JournalEntry | None:
         event_type=event.event_type,
         reference_event_id=event.event_id,
         memo=f"Refund of {original.entry_number} — invoice refunded",
+        # 6 Sep 2026 — real audit-trail fix. See module docstring —
+        # event.refunded_by is now genuinely populated, threaded all
+        # the way from Refund.record()'s own real refunded_by
+        # parameter.
+        created_by=_resolve_actor(getattr(event, "refunded_by", None)),
         lines=lines,
     )
