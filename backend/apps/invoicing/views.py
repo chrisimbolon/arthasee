@@ -248,6 +248,19 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
                     organization_id=invoice.organization_id,
                     invoice_id=invoice.id,
                     issued_event_id=invoice.issued_event_id,
+                    # 6 Sep 2026 — real audit-trail fix (Sansan's own
+                    # "who performed this reversal" question, Q57):
+                    # this event previously carried no actor at all.
+                    # request.user is always a real, authenticated
+                    # user here (this view requires authentication,
+                    # same as every TenantScopedAPIView) — safe to
+                    # thread through unconditionally, no role-based
+                    # special-casing needed. See
+                    # InvoiceCancelled.cancelled_by's own docstring
+                    # and apps.accounting.cancellations._resolve_actor()
+                    # for how this gets turned back into a real
+                    # created_by on the reversal JournalEntry.
+                    cancelled_by=request.user.id,
                 ))
 
         return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
