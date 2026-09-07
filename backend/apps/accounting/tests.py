@@ -41,6 +41,7 @@ from apps.purchasing.models import Supplier, SupplierInvoice
 from apps.service.models import Customer, Vehicle
 from apps.workorders.events import WorkOrderCompleted
 from apps.workorders.models import WorkOrder, WorkOrderJobLine
+from django.contrib import admin
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import TestCase
@@ -3563,3 +3564,109 @@ class ProfitLossTrendAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         for row in resp.data["data"]:
             self.assertEqual(row["total_revenue"], Decimal("0"))
+
+
+class AccountingAdminLockdownTests(TestCase):
+    """
+    6 Sep 2026 — real coverage for admin.py's own lockdown, found via
+    a design-review trace (Sansan's own "can Django Admin modify a
+    posted journal directly" question, Q72), not a live incident.
+    Tests the ModelAdmin permission methods and readonly_fields
+    directly, not a full HTTP+superuser+HTML round trip — a precise,
+    fast proof the real overrides exist and return the right thing,
+    not a fragile UI-parsing test. ModelAdmin instances constructed
+    directly (model, admin.site) — the same standard technique used
+    to test a ModelAdmin without going through the full registry/URL
+    routing.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.ap = Account.objects.get(organization=self.org, code="2001")
+        self.entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
+        )
+
+    def test_journal_entry_admin_blocks_add(self):
+        from apps.accounting.admin import JournalEntryAdmin
+        self.assertFalse(JournalEntryAdmin(JournalEntry, admin.site).has_add_permission(request=None))
+
+    def test_journal_entry_admin_blocks_delete(self):
+        """
+        THE real regression test for the most severe finding — the
+        default Django Admin delete flow (no override at all
+        previously) could delete a posted JournalEntry outright,
+        cascading to every one of its lines, directly contradicting
+        this codebase's own "a posted journal can never be deleted"
+        guarantee.
+        """
+        from apps.accounting.admin import JournalEntryAdmin
+        self.assertFalse(JournalEntryAdmin(JournalEntry, admin.site).has_delete_permission(request=None))
+
+    def test_journal_entry_admin_every_field_readonly(self):
+        """
+        Real proof the readonly_fields expansion actually covers the
+        fields that were silently editable before this fix —
+        organization especially, a real tenant-reassignment risk on
+        a posted financial record.
+        """
+        from apps.accounting.admin import JournalEntryAdmin
+        journal_admin = JournalEntryAdmin(JournalEntry, admin.site)
+        readonly = journal_admin.get_readonly_fields(request=None, obj=self.entry)
+        for field_name in ("organization", "posting_date", "accounting_period", "memo", "created_by"):
+            self.assertIn(field_name, readonly)
+
+    def test_journal_line_inline_blocks_add(self):
+        """
+        THE real regression test for the second most severe finding
+        — extra=0 alone never disabled the "Add another" control;
+        without this override, a brand-new, unvalidated line could be
+        added to an already-posted, previously-balanced entry.
+        """
+        from apps.accounting.admin import JournalLineInline
+        inline = JournalLineInline(JournalEntry, admin.site)
+        self.assertFalse(inline.has_add_permission(request=None, obj=self.entry))
+
+    def test_accounting_period_admin_blocks_add(self):
+        from apps.accounting.admin import AccountingPeriodAdmin
+        self.assertFalse(AccountingPeriodAdmin(AccountingPeriod, admin.site).has_add_permission(request=None))
+
+    def test_accounting_period_admin_blocks_delete(self):
+        from apps.accounting.admin import AccountingPeriodAdmin
+        self.assertFalse(AccountingPeriodAdmin(AccountingPeriod, admin.site).has_delete_permission(request=None))
+
+    def test_accounting_period_admin_status_fields_readonly(self):
+        """
+        Real proof is_closed/is_locked can no longer be toggled
+        directly, bypassing close()/reopen()'s own real logic — the
+        chronological-order guard, the permanent closed_at marker,
+        owner-only authorization, reopened_by attribution.
+        """
+        from apps.accounting.admin import AccountingPeriodAdmin
+        period = AccountingPeriod.objects.get(
+            organization=self.org, year=date.today().year, month=date.today().month,
+        )
+        period_admin = AccountingPeriodAdmin(AccountingPeriod, admin.site)
+        readonly = period_admin.get_readonly_fields(request=None, obj=period)
+        for field_name in ("is_closed", "is_locked", "start_date", "end_date"):
+            self.assertIn(field_name, readonly)
+
+    def test_account_admin_locks_code_and_type_but_allows_name(self):
+        """
+        Real proof of the calibrated, NOT blanket, lockdown —
+        code/account_type/normal_balance are locked (Account.
+        balance() reads these live, so changing one retroactively
+        reinterprets historical balances), while name/is_active stay
+        genuinely editable — safe, ordinary lifecycle edits.
+        """
+        from apps.accounting.admin import AccountAdmin
+        account_admin = AccountAdmin(Account, admin.site)
+        readonly = account_admin.get_readonly_fields(request=None, obj=self.cash)
+        self.assertIn("code", readonly)
+        self.assertIn("account_type", readonly)
+        self.assertIn("normal_balance", readonly)
+        self.assertNotIn("name", readonly)
+        self.assertNotIn("is_active", readonly)
