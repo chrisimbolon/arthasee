@@ -62,9 +62,23 @@ class InvoiceCancelled(DomainEvent):
     which posting this cancellation corresponds to. Nullable: a
     legacy invoice issued before this field existed genuinely has
     nothing on record to reverse.
+
+    cancelled_by, added 6 Sep 2026 — real audit-trail gap found via a
+    design-review trace (Sansan's own "who performed this reversal"
+    question, Q57), not a live incident: apps.accounting.
+    cancellations.reverse_for_event() never had a real actor to pass
+    into JournalEntry.post()'s own created_by, since nothing upstream
+    ever carried one. Nullable — this event is published from
+    InvoiceStatusUpdateView.patch(), a real DRF view where
+    request.user is always available in practice, but kept optional
+    here rather than assumed required, matching this whole event
+    system's own general discipline of not over-constraining a field
+    a future caller might genuinely lack (a system-triggered
+    cancellation with no human actor, say).
     """
     invoice_id: uuid.UUID
     issued_event_id: uuid.UUID | None
+    cancelled_by: uuid.UUID | None = None
     event_type: str = field(init=False, default="InvoiceCancelled", kw_only=True)
 
 
@@ -96,10 +110,21 @@ class InvoiceRefunded(DomainEvent):
     from the original JournalEntry's real lines, not recomputed from
     these — same "trust the real ledger, not the publisher"
     discipline as Half A.
+
+    refunded_by, added 6 Sep 2026 — same real audit-trail gap and
+    same discipline as InvoiceCancelled.cancelled_by above.
+    Refund.record() already has a real refunded_by parameter (the
+    acting CustomUser, stored on the Refund row itself) — this simply
+    threads that same value one hop further into the event payload,
+    no new query, no new source of truth, matching this whole
+    matrix's own established "thread what's already in hand" pattern
+    (customer_name/supplier_name/account_name all followed the exact
+    same approach).
     """
     invoice_id: uuid.UUID
     refund_id: uuid.UUID
     issued_event_id: uuid.UUID | None
     amount: Decimal
     method: str
+    refunded_by: uuid.UUID | None = None
     event_type: str = field(init=False, default="InvoiceRefunded", kw_only=True)
