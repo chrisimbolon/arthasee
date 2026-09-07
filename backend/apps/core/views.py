@@ -49,10 +49,39 @@ class TenantScopedAPIView(APIView):
         membership. Callers must handle None explicitly; there is no
         organization to silently default to for a super_admin
         creating a new tenant-scoped document.
+
+        6 Sep 2026 — real, deterministic-ordering fix, found via a
+        design-review trace (Sansan's own "can an admin accidentally
+        post to the wrong workshop" question, Q62), not a live
+        incident: this used to call .first() on an UNORDERED
+        queryset — per Django's own documented behavior, an
+        unordered queryset's result order is genuinely undefined,
+        not just "arbitrary but stable." For a user with exactly one
+        active membership this was harmless (only one candidate),
+        but for a user with more than one, WHICH organization got
+        silently selected as "the" acting one could differ between
+        requests, with zero signal to the user about which was
+        picked — the exact real risk this question names.
+
+        Real fix: order_by("id") makes the result deterministic and
+        reproducible — the same set of memberships, in the same
+        order, every single time — closing the "could silently
+        differ between calls" danger. This does NOT make the choice
+        of WHICH org gets picked more business-meaningful (a random
+        UUID has no real ordering significance) — if
+        OrganizationMembership gains a real created_at field later,
+        ordering by that instead would give a more meaningful
+        default ("the org this user joined first"), worth a
+        deliberate upgrade then, not guessed at here since that
+        field was never confirmed to exist. The deeper question —
+        whether a multi-org user should be required to explicitly
+        select which org they're acting on, rather than the system
+        silently choosing one at all — is a real, separate product
+        decision, not resolved by this fix.
         """
         if self.request.user.role == "super_admin":
             return None
         membership = self.request.user.memberships.filter(
             is_active=True
-        ).select_related("organization").first()
+        ).select_related("organization").order_by("id").first()
         return membership.organization if membership else None
