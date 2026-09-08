@@ -15,71 +15,72 @@ The one real, shared implementation behind both:
 
 Deliberately NOT hooked into Organization.save() itself — that would
 fire for every Organization ever created anywhere, including every
-test fixture across the whole suite (apps.workorders.tests,
-apps.invoicing.tests, apps.payments.tests, apps.accounting.tests all
-create Organization rows directly via the ORM, never through real
-signup). Only the real registration path calls this automatically;
-everywhere else (tests, data migrations, one-off scripts) seeds
-explicitly and deliberately, matching the decision made when
-AccountingEventHandler first went live.
+test fixture across the whole codebase. Only the real registration
+path calls this automatically; everywhere else (tests, data
+migrations, one-off scripts) seeds explicitly and deliberately.
+
+8 Sep 2026 — every row now carries account_subtype/is_contra/
+is_control_account, following the direct review with Aris (Chris's
+brother, a professional accountant) against a real reference
+implementation. Real, honest limitation, not a silent gap: seed_
+chart_of_accounts()'s own get_or_create() only fills these fields in
+for a NEW row — an org whose COA was already seeded before this
+change (CV Arya Motor included) will NOT retroactively pick these up
+just by re-running this command. See the dedicated data migration
+(migrations/0XXX_backfill_account_subtypes.py) for how those existing
+rows actually get backfilled — a deliberate, separate, explicit step,
+not something this idempotent seeding function can safely do on its
+own (it must never silently overwrite a field a shop's own accountant
+may have since customized).
 """
 from apps.accounting.models import Account
 
-# (code, name, account_type, normal_balance) — matches Roadmap v2.2's
-# COA Blueprint exactly, including 2010 (Accrued Inventory / GR-IR
-# clearing) and 2101 (Tax Payable — seeded now as a placeholder;
-# Roadmap v2.2 Open Decision #4 explicitly defers wiring any posting
-# rule to it until a later phase).
+AccountType = Account.AccountType
+NormalBalance = Account.NormalBalance
+AccountSubtype = Account.AccountSubtype
+
+# (code, name, account_type, normal_balance, account_subtype, is_contra,
+# is_control_account) — matches Roadmap v2.2's COA Blueprint, plus
+# account 3002 (new, 8 Sep 2026 — Opening Balance Equity plug), plus
+# the three real control-account flags (1201/1301/2001) and the one
+# real contra-account flag (1402), plus a genuine account_subtype for
+# every real, standard account — a shop's own custom accounts added
+# later are unaffected; this list only ever seeds the standard set.
 STANDARD_COA = [
-    ("1001", "Cash",                              Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1101", "Bank",                               Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1201", "Accounts Receivable",                Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1301", "Inventory",                          Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1302", "Work In Progress (WIP)",              Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    ("1401", "Fixed Assets",                        Account.AccountType.ASSET,     Account.NormalBalance.DEBIT),
-    # 29 Aug 2026 — real automated depreciation. A genuine CONTRA-
-    # asset: account_type=ASSET (it lives in the Asset section of
-    # the COA, appears on the Balance Sheet's asset side, reducing
-    # 1401's own net book value) but normal_balance=CREDIT — the
-    # FIRST asset-type account in this whole COA with a credit
-    # normal balance, exactly the mechanism NormalBalance exists as
-    # a field separate from account_type to support. Named in
-    # English, matching this section's own real, consistent
-    # convention (Cash, Bank, Accounts Receivable, Work In Progress,
-    # Fixed Assets — every ASSET/LIABILITY/EQUITY account here is
-    # English; only REVENUE/COGS/EXPENSE accounts below use
-    # Indonesian).
-    ("1402", "Accumulated Depreciation",            Account.AccountType.ASSET,     Account.NormalBalance.CREDIT),
-    ("2001", "Accounts Payable",                    Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
-    ("2010", "Accrued Inventory (Unbilled AP)",      Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
-    ("2101", "Tax Payable",                         Account.AccountType.LIABILITY, Account.NormalBalance.CREDIT),
-    ("3001", "Owner Capital",                        Account.AccountType.EQUITY,    Account.NormalBalance.CREDIT),
-    ("3101", "Retained Earnings",                    Account.AccountType.EQUITY,    Account.NormalBalance.CREDIT),
-    ("4001", "Service Revenue",                      Account.AccountType.REVENUE,   Account.NormalBalance.CREDIT),
-    ("4002", "Parts Revenue",                        Account.AccountType.REVENUE,   Account.NormalBalance.CREDIT),
-    ("4003", "Sublet / Outsourcing Revenue",         Account.AccountType.REVENUE,   Account.NormalBalance.CREDIT),
-    ("4004", "Selisih Stok Opname (Kelebihan)",       Account.AccountType.REVENUE,   Account.NormalBalance.CREDIT),
-    ("5001", "HPP Sparepart (COGS)",                 Account.AccountType.COGS,      Account.NormalBalance.DEBIT),
-    ("5002", "HPP Sublet / Jasa Luar",                Account.AccountType.COGS,      Account.NormalBalance.DEBIT),
-    ("5003", "HPP Pelumas & Fluida",                  Account.AccountType.COGS,      Account.NormalBalance.DEBIT),
-    ("5004", "Selisih Stok Opname (Kekurangan)",      Account.AccountType.COGS,      Account.NormalBalance.DEBIT),    
-    ("6001", "Beban Gaji",                            Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6002", "Beban Sewa",                            Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6003", "Beban Listrik, Air, Telp",               Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6004", "Beban Penyusutan",                      Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    ("6005", "Beban Lain-lain",                       Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),
-    # PPh Final Pasal 4(2) — CV. Arya Motor's own confirmed real
-    # obligation (2% on gross revenue, self-remitted monthly, paid by
-    # the 8th — per direct discussion with their tax consultant, not
-    # a general assumption for every future organization on this
-    # platform). Deliberately NOT wired to any automatic posting rule
-    # — Made computes and posts this by hand each month via the
-    # Manual Adjusting Journal (Task 4.4/5.3), reviewed and confirmed
-    # before submission, same as a real accountant would. This is
-    # the correct architectural fit for a periodic, human-reviewed
-    # figure — not a gap to be automated away, at least not yet
-    # (revisit after a real first month's workflow is observed).
-    ("6006", "Beban Pajak Penghasilan Final",          Account.AccountType.EXPENSE,   Account.NormalBalance.DEBIT),    
+    ("1001", "Cash",                              AccountType.ASSET,     NormalBalance.DEBIT,  AccountSubtype.KAS_SETARA_KAS,    False, False),
+    ("1101", "Bank",                               AccountType.ASSET,     NormalBalance.DEBIT,  AccountSubtype.KAS_SETARA_KAS,    False, False),
+    ("1201", "Accounts Receivable",                AccountType.ASSET,     NormalBalance.DEBIT,  AccountSubtype.PIUTANG_USAHA,     False, True),
+    ("1301", "Inventory",                          AccountType.ASSET,     NormalBalance.DEBIT,  AccountSubtype.PERSEDIAAN,        False, True),
+    ("1302", "Work In Progress (WIP)",              AccountType.ASSET,     NormalBalance.DEBIT,  AccountSubtype.PERSEDIAAN,        False, False),
+    ("1401", "Fixed Assets",                        AccountType.ASSET,     NormalBalance.DEBIT,  AccountSubtype.ASET_TETAP,        False, False),
+    ("1402", "Accumulated Depreciation",            AccountType.ASSET,     NormalBalance.CREDIT, AccountSubtype.ASET_TETAP,        True,  False),
+    ("2001", "Accounts Payable",                    AccountType.LIABILITY, NormalBalance.CREDIT, AccountSubtype.UTANG_USAHA,       False, True),
+    ("2010", "Accrued Inventory (Unbilled AP)",      AccountType.LIABILITY, NormalBalance.CREDIT, AccountSubtype.UTANG_LAINNYA,     False, False),
+    ("2101", "Tax Payable",                         AccountType.LIABILITY, NormalBalance.CREDIT, AccountSubtype.UTANG_PAJAK,       False, False),
+    ("3001", "Owner Capital",                        AccountType.EQUITY,    NormalBalance.CREDIT, AccountSubtype.EKUITAS,           False, False),
+    # 8 Sep 2026 — new. Ekuitas Saldo Awal — the real, dedicated
+    # target for OpeningBalanceSession.post()'s own explicit variance
+    # plug (Chris/Aris's own confirmed hybrid design). Kept
+    # deliberately SEPARATE from 3001 (Owner Capital) — a real,
+    # explicit capital contribution Made states himself must never be
+    # silently mixed together with a rounding/data-entry variance the
+    # system allocated on his behalf.
+    ("3002", "Ekuitas Saldo Awal",                   AccountType.EQUITY,    NormalBalance.CREDIT, AccountSubtype.EKUITAS,           False, False),
+    ("3101", "Retained Earnings",                    AccountType.EQUITY,    NormalBalance.CREDIT, AccountSubtype.EKUITAS,           False, False),
+    ("4001", "Service Revenue",                      AccountType.REVENUE,   NormalBalance.CREDIT, AccountSubtype.PENDAPATAN,        False, False),
+    ("4002", "Parts Revenue",                        AccountType.REVENUE,   NormalBalance.CREDIT, AccountSubtype.PENDAPATAN,        False, False),
+    ("4003", "Sublet / Outsourcing Revenue",         AccountType.REVENUE,   NormalBalance.CREDIT, AccountSubtype.PENDAPATAN,        False, False),
+    ("4004", "Selisih Stok Opname (Kelebihan)",       AccountType.REVENUE,   NormalBalance.CREDIT, AccountSubtype.PENDAPATAN_LAIN_LAIN, False, False),
+    ("5001", "HPP Sparepart (COGS)",                 AccountType.COGS,      NormalBalance.DEBIT,  AccountSubtype.BEBAN_POKOK_PENJUALAN, False, False),
+    ("5002", "HPP Sublet / Jasa Luar",                AccountType.COGS,      NormalBalance.DEBIT,  AccountSubtype.BEBAN_POKOK_PENJUALAN, False, False),
+    ("5003", "HPP Pelumas & Fluida",                  AccountType.COGS,      NormalBalance.DEBIT,  AccountSubtype.BEBAN_POKOK_PENJUALAN, False, False),
+    ("5004", "Selisih Stok Opname (Kekurangan)",      AccountType.COGS,      NormalBalance.DEBIT,  AccountSubtype.BEBAN_POKOK_PENJUALAN, False, False),
+    ("6001", "Beban Gaji",                            AccountType.EXPENSE,   NormalBalance.DEBIT,  AccountSubtype.BEBAN_USAHA,       False, False),
+    ("6002", "Beban Sewa",                            AccountType.EXPENSE,   NormalBalance.DEBIT,  AccountSubtype.BEBAN_USAHA,       False, False),
+    ("6003", "Beban Listrik, Air, Telp",               AccountType.EXPENSE,   NormalBalance.DEBIT,  AccountSubtype.BEBAN_USAHA,       False, False),
+    ("6004", "Beban Penyusutan",                      AccountType.EXPENSE,   NormalBalance.DEBIT,  AccountSubtype.BEBAN_USAHA,       False, False),
+    ("6005", "Beban Lain-lain",                       AccountType.EXPENSE,   NormalBalance.DEBIT,  AccountSubtype.BEBAN_LAIN_LAIN,   False, False),
+    ("6006", "Beban Pajak Penghasilan Final",          AccountType.EXPENSE,   NormalBalance.DEBIT,  AccountSubtype.BEBAN_LAIN_LAIN,   False, False),
 ]
 
 
@@ -91,16 +92,23 @@ def seed_chart_of_accounts(organization) -> int:
     Idempotent — get_or_create per (organization, code), same
     guarantee the old inline version had: safe to call more than
     once without duplicating anything or overwriting a name/type a
-    shop's own accountant has since customized in Settings.
+    shop's own accountant has since customized in Settings. This
+    ALSO means a pre-existing account never picks up new fields
+    (account_subtype/is_contra/is_control_account) just from a
+    re-run — see this module's own docstring for the dedicated data
+    migration that backfills those onto already-seeded organizations.
     """
     created_count = 0
-    for code, name, account_type, normal_balance in STANDARD_COA:
+    for code, name, account_type, normal_balance, account_subtype, is_contra, is_control_account in STANDARD_COA:
         _, created = Account.objects.get_or_create(
             organization=organization, code=code,
             defaults={
                 "name": name,
                 "account_type": account_type,
                 "normal_balance": normal_balance,
+                "account_subtype": account_subtype,
+                "is_contra": is_contra,
+                "is_control_account": is_control_account,
             },
         )
         if created:
