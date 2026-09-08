@@ -30,6 +30,26 @@ thin-view-calls-reports.py shape as every other read-only view here;
 the one real addition is calling trace_forward.resolve_references()
 on the result before returning it, batched once per response, not
 per row.
+
+8 Sep 2026 — two real changes, following the direct review with Aris
+(Chris's brother, a professional accountant) against a real reference
+implementation:
+  1. ManualJournalListCreateView.post()'s own old, soft control-
+     account WARNING (_CONTROL_ACCOUNT_CODES, which still let the
+     post through) is REMOVED — JournalEntry.post() itself now
+     hard-rejects a MANUAL entry touching a real control account, and
+     this view's own existing `except ValueError` already correctly
+     translates that into a clean 400. See JournalEntry.post()'s own
+     updated docstring.
+  2. OpeningBalancePreviewView, new — the real pre-commit review gate
+     for the Opening Balance Equity plug (Chris/Aris's own confirmed
+     hybrid design), using the real OpeningBalancePreviewSerializer.
+     This same review also found and fixed a real, separate issue in
+     serializers.py itself: OpeningBalanceSessionSerializer had its
+     own independent total_debit/total_credit calculation, a second
+     implementation of exactly what OpeningBalanceSession.
+     compute_variance() now exists to be the one source of truth for
+     — see that serializer's own updated docstring.
 """
 from datetime import date
 
@@ -58,6 +78,7 @@ from .serializers import (AccountingPeriodSerializer, AssetRecordSerializer,
                           OpeningBalancePartLineSerializer,
                           OpeningBalancePayableRecordSerializer,
                           OpeningBalancePayableSerializer,
+                          OpeningBalancePreviewSerializer,
                           OpeningBalanceReceivableRecordSerializer,
                           OpeningBalanceReceivableSerializer,
                           OpeningBalanceSessionRecordSerializer,
@@ -351,9 +372,6 @@ class DailyCashActivityView(TenantScopedAPIView):
         return Response({"success": True, **data})
 
 
-_CONTROL_ACCOUNT_CODES = {"1201", "2001"}
-
-
 class ManualJournalListCreateView(TenantScopedAPIView):
     """
     GET  /api/accounting/manual-journals/  — every manual journal for this org
@@ -362,6 +380,16 @@ class ManualJournalListCreateView(TenantScopedAPIView):
     POST restricted to the org's owner. Uses the now-shared
     JournalEntrySerializer (Task 5.2 rename) rather than a
     manual-only copy.
+
+    8 Sep 2026 — real fix: the old soft, view-layer control-account
+    WARNING (a local _CONTROL_ACCOUNT_CODES set that still let the
+    post through) is REMOVED. JournalEntry.post() itself now
+    hard-rejects a MANUAL entry touching a real control account
+    (is_control_account=True — 1201/1301/2001, as of this same
+    review) — this view's own existing `except ValueError` already
+    correctly translates that rejection into a clean 400, no new
+    error-handling needed here. See JournalEntry.post()'s own
+    updated docstring for the full reasoning.
     """
     model = JournalEntry
 
@@ -393,14 +421,11 @@ class ManualJournalListCreateView(TenantScopedAPIView):
         data = input_serializer.validated_data
 
         lines = []
-        control_accounts_touched = set()
         for line in data["lines"]:
             try:
                 account = Account.resolve(organization, line["account_code"])
             except ValueError as e:
                 return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-            if account.code in _CONTROL_ACCOUNT_CODES:
-                control_accounts_touched.add(account.code)
             lines.append({"account": account, "debit": line.get("debit"), "credit": line.get("credit")})
 
         try:
@@ -415,14 +440,10 @@ class ManualJournalListCreateView(TenantScopedAPIView):
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        response_data = {"success": True, "manual_journal": JournalEntrySerializer(entry).data}
-        if control_accounts_touched:
-            response_data["warning"] = (
-                f"Jurnal ini menyentuh akun kontrol ({', '.join(sorted(control_accounts_touched))}) "
-                f"secara langsung — pastikan ini disengaja, karena saldo akun ini seharusnya selalu "
-                f"sama dengan total sub-ledger (Invoice/SupplierInvoice) terkait."
-            )
-        return Response(response_data, status=status.HTTP_201_CREATED)
+        return Response(
+            {"success": True, "manual_journal": JournalEntrySerializer(entry).data},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class JournalEntryListView(TenantScopedAPIView):
@@ -780,6 +801,43 @@ class OpeningBalanceSessionView(TenantScopedAPIView):
             {"success": True, "opening_balance_session": OpeningBalanceSessionSerializer(session).data},
             status=status.HTTP_201_CREATED,
         )
+
+
+class OpeningBalancePreviewView(TenantScopedAPIView):
+    """
+    GET /api/accounting/opening-balance/preview/
+
+    8 Sep 2026 — the real pre-commit review gate, Chris/Aris's own
+    confirmed hybrid design: JournalEntry.post() itself stays 100%
+    strict (no hidden balancing anywhere in the engine) — this
+    endpoint is what lets the frontend wizard show Made the exact
+    variance BEFORE he commits, so OpeningBalanceSession.post()'s own
+    automatic 3002 plug (see that method's own docstring) is never a
+    surprise. Read-only — computes via OpeningBalanceSession.
+    compute_variance(), creates nothing, posts nothing, safe to call
+    any number of times, at any point while the session is still
+    DRAFT.
+
+    Uses the real OpeningBalancePreviewSerializer (serializers.py) —
+    reconciled against that file's own real conventions once it
+    arrived; no longer a provisional, hand-built response shape.
+    """
+    model = OpeningBalanceSession
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        session, error = _get_draft_session_or_response(organization)
+        if error:
+            return error
+
+        variance = session.compute_variance()
+        return Response({"success": True, **OpeningBalancePreviewSerializer(variance).data})
 
 
 class OpeningBalancePostView(TenantScopedAPIView):
