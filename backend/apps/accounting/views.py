@@ -847,6 +847,19 @@ class OpeningBalancePostView(TenantScopedAPIView):
     as AccountingPeriodCloseView. All real logic lives in
     OpeningBalanceSession.post() itself (models.py) — this view is
     thin, same discipline as every other real write path here.
+
+    8 Sep 2026 — real fix, found by the test suite immediately after
+    the Opening Balance Equity plug first shipped: this view used to
+    call session.post() with no way for a client to confirm a real
+    variance, and the model itself used to plug ANY variance
+    silently — meaning a client could skip the new preview screen
+    entirely and still succeed. Now reads an explicit
+    `confirm_variance` boolean from the request body (defaults False
+    if omitted) and passes it straight through — see
+    OpeningBalanceSession.post()'s own updated docstring for the
+    full reasoning. A body of `{"confirm_variance": true}` is only
+    ever meaningful when a real variance exists; an already-balanced
+    session ignores it entirely.
     """
     model = OpeningBalanceSession
 
@@ -870,8 +883,10 @@ class OpeningBalancePostView(TenantScopedAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        confirm_variance = bool(request.data.get("confirm_variance", False))
+
         try:
-            session.post(posted_by=request.user)
+            session.post(posted_by=request.user, confirm_variance=confirm_variance)
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
