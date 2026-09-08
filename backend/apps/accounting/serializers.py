@@ -376,26 +376,38 @@ class OpeningBalanceSessionSerializer(serializers.ModelSerializer):
     difference, mirroring the exact "✓ BALANCED & SUBLEDGERS MATCHED"
     badge the wizard's own Step 3 needs to render in real time.
 
-    Deliberately NOT the same code path as OpeningBalanceSession.
-    post()'s own balance check — that one runs inside
-    JournalEntry.post(), against the real, final assembled lines, and
-    is the one true source of "does this actually balance." This
-    serializer's own totals are a client-facing PREVIEW, computed the
-    same way (every cash/part/asset/receivable line is a debit;
-    every payable line is a credit; every other line follows its own
-    explicit side) so the wizard can show real-time feedback without
-    attempting a real post() on every keystroke — both are proven
-    equivalent by construction against post()'s own real line-
-    assembly logic in models.py, not independently reinvented.
+    8 Sep 2026 — real fix, found via a direct review with Aris
+    (Chris's brother, a professional accountant) against a real
+    reference implementation: this serializer used to compute its own
+    independent total_debit/total_credit arithmetic (a second,
+    separate implementation of exactly the calculation
+    OpeningBalanceSession._build_line_specs() now exists specifically
+    to be the ONE source of truth for). The two never actually
+    disagreed in practice, but two independent implementations of the
+    same figure is precisely the drift risk this whole review's own
+    Opening Balance Equity plug work was designed to eliminate — the
+    entire point of _build_line_specs() is that post() and any preview
+    of it can never silently diverge. Every getter below now delegates
+    to obj.compute_variance() instead of re-deriving the numbers here.
+
+    Field NAMES are unchanged from before this fix — total_debit/
+    total_credit/is_balanced/difference — the real, already-shipped
+    frontend wizard contract is preserved exactly; only the
+    IMPLEMENTATION underneath now has one real source of truth.
+    difference stays SIGNED (positive = debits ahead, negative =
+    credits ahead), translated from compute_variance()'s own
+    unsigned variance + plug_side.
 
     Queryset optimization is the VIEW's responsibility, not this
-    serializer's — the six nested relations below should be
-    prefetch_related() at the view layer before this ever renders, or
-    every one of the four get_*() methods below re-walks its own
-    querysets from scratch (they deliberately call obj.cash_lines.
-    all() etc. multiple times each, trading a little duplicate
-    Python-side work for keeping four separate, individually
-    readable total functions instead of one dense combined one).
+    serializer's — the six nested relations should be
+    prefetch_related() at the view layer before this ever renders
+    (already true — see OpeningBalanceSessionView.get()). Calling
+    obj.compute_variance() up to four times below (once per getter)
+    re-walks the same prefetched querysets each time rather than
+    hitting the database again — same accepted "duplicate Python-side
+    work for four separately readable getters" tradeoff this
+    serializer already had before this fix, now just delegating to a
+    shared calculation instead of four bespoke ones.
     """
     cash_lines       = OpeningBalanceCashLineSerializer(many=True, read_only=True)
     part_lines       = OpeningBalancePartLineSerializer(many=True, read_only=True)
@@ -425,26 +437,13 @@ class OpeningBalanceSessionSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_total_debit(self, obj):
-        total = sum((c.amount for c in obj.cash_lines.all()), Decimal("0"))
-        total += sum((p.quantity * p.cost_price for p in obj.part_lines.all()), Decimal("0"))
-        total += sum((a.current_book_value for a in obj.asset_lines.all()), Decimal("0"))
-        total += sum((r.balance_due for r in obj.receivable_lines.all()), Decimal("0"))
-        total += sum(
-            (o.amount for o in obj.other_lines.all() if o.side == OpeningBalanceOtherLine.Side.DEBIT),
-            Decimal("0"),
-        )
-        return total
+        return obj.compute_variance()["total_debit"]
 
     def get_total_credit(self, obj):
-        total = sum((p.balance_due for p in obj.payable_lines.all()), Decimal("0"))
-        total += sum(
-            (o.amount for o in obj.other_lines.all() if o.side == OpeningBalanceOtherLine.Side.CREDIT),
-            Decimal("0"),
-        )
-        return total
+        return obj.compute_variance()["total_credit"]
 
     def get_is_balanced(self, obj):
-        return self.get_total_debit(obj) == self.get_total_credit(obj)
+        return obj.compute_variance()["is_balanced"]
 
     def get_difference(self, obj):
         # Signed, deliberately — a positive number means debits are
@@ -453,8 +452,47 @@ class OpeningBalanceSessionSerializer(serializers.ModelSerializer):
         # close the gap); negative means credits are ahead. The
         # wizard's own real-time badge can show this raw, or take
         # abs() itself for display — this serializer doesn't decide
-        # that presentation choice.
-        return self.get_total_debit(obj) - self.get_total_credit(obj)
+        # that presentation choice. Translated from compute_variance()'s
+        # own unsigned variance + plug_side — see this class's own
+        # docstring above for why that's now the one real source of
+        # truth this getter defers to.
+        variance = obj.compute_variance()
+        if variance["is_balanced"]:
+            return Decimal("0")
+        return variance["variance"] if variance["plug_side"] == "credit" else -variance["variance"]
+
+
+class OpeningBalancePreviewSerializer(serializers.Serializer):
+    """
+    8 Sep 2026 — real, read-only shape for GET .../opening-balance/
+    preview/ — the pre-commit review gate Chris/Aris's own confirmed
+    hybrid design requires (see OpeningBalanceSession.compute_variance()
+    in models.py for the real calculation this simply presents).
+    Operates directly on the plain dict compute_variance() returns —
+    DRF's field access transparently supports a Mapping the same way
+    it supports a model instance, so no adapter/wrapper object is
+    needed. Matches this whole file's own established read/write
+    split — a real, named Serializer for output, never a bare dict
+    pasted directly into Response().
+    """
+    total_debit  = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    total_credit = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    variance     = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    is_balanced  = serializers.BooleanField(read_only=True)
+    plug_side    = serializers.ChoiceField(choices=["debit", "credit"], read_only=True, allow_null=True)
+    plug_account_code = serializers.SerializerMethodField()
+
+    def get_plug_account_code(self, obj):
+        # 3002 (Ekuitas Saldo Awal) is a real, hardcoded implementation
+        # detail of OpeningBalanceSession.post()'s own plug logic, not
+        # something compute_variance() itself needs to know — it's a
+        # pure balance calculation, unaware of which account absorbs
+        # any variance. Surfaced here, at presentation time, so the
+        # wizard's review screen can name the real account Made will
+        # see on the resulting Jurnal entry ("...akan dibukukan ke
+        # 3002 Ekuitas Saldo Awal") without models.py needing to leak
+        # a presentation-layer concern into a pure calculation method.
+        return None if obj["is_balanced"] else "3002"
 
 
 class OpeningBalanceSessionRecordSerializer(serializers.Serializer):
