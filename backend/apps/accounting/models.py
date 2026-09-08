@@ -55,6 +55,56 @@ just implemented as originally pitched):
      no-proration rule does the right thing for free (the opening
      month itself gets no depreciation; straight-line depreciation of
      the REMAINING value begins cleanly the month after).
+
+8 Sep 2026 — Granular Account Subtypes & Control-Account Enforcement,
+following a direct review with a professional accountant (Aris —
+Chris's brother) against a real, mature reference implementation.
+Real, deliberate design, confirmed with Chris before writing this:
+  1. `account_subtype` (21 granular values, matching the reference's
+     own real taxonomy exactly) is ADDITIVE, not a replacement for
+     the existing 6-bucket `account_type` — every report function in
+     reports.py keeps reading `account_type` completely unchanged.
+     When `account_subtype` is set, `account_type`/`normal_balance`
+     are DERIVED from it automatically (save(), below) — matching
+     the reference's own real UI behavior ("Ditentukan otomatis
+     berdasarkan tipe akun sesuai standar akuntansi"), not two
+     independently-settable fields that could drift apart.
+     Deliberately left OPTIONAL at the model level (blank=True),
+     unlike the reference's own required field — hundreds of existing
+     tests across this whole codebase create Account rows with a
+     manually-set account_type/normal_balance and no subtype at all;
+     making it required would break every one of them for a cosmetic
+     reason. New/updated accounts should set it; nothing forces
+     migration of untouched historical test fixtures.
+  2. `is_contra` — a real, explicit boolean, matching the reference's
+     own "Akun Kontra" checkbox exactly. Flips the DERIVED
+     normal_balance only; account_type itself never flips (a contra-
+     asset is still an ASSET-type account, appearing in the Asset
+     section of the Balance Sheet, just reducing rather than adding
+     to the total — see Account.balance()'s own arithmetic, already
+     correct for this via normal_balance alone). This is the real,
+     general mechanism `1402` (Accumulated Depreciation) always
+     needed and never had a name for — no special-casing anywhere
+     else in this codebase now required for a future second contra
+     account.
+  3. `is_control_account` — a real, explicit boolean. Enforcement
+     moved from a soft, view-layer WARNING (ManualJournalListCreate
+     View.post()'s own old _CONTROL_ACCOUNT_CODES set) into a hard,
+     engine-level BLOCK inside JournalEntry.post() itself — see that
+     method's own updated docstring. Deliberately scoped to
+     source == MANUAL only: DOMAIN_EVENT, OPENING_BALANCE,
+     ASSET_ACQUISITION, PERIOD_CLOSING, and DEPRECIATION all touch
+     control accounts legitimately, every single day, and must never
+     be blocked by this guard.
+  4. Opening Balance Equity plug — real, deliberate hybrid design,
+     confirmed with Chris: JournalEntry.post() stays 100% strict, no
+     hidden balancing anywhere inside the engine. OpeningBalanceSession
+     itself is the ONE orchestration layer allowed to compute and
+     append a real, visible plug line to a new account, 3002 (Ekuitas
+     Saldo Awal) — but ONLY after a real pre-commit review endpoint
+     (see views.py's new OpeningBalancePreviewView) has already shown
+     the exact figure. See OpeningBalanceSession._build_line_specs(),
+     .compute_variance(), and .post() below for the full mechanism.
 """
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
@@ -83,6 +133,63 @@ class Account(TenantScopedModel):
         DEBIT  = "DEBIT", "Debit"
         CREDIT = "CREDIT", "Kredit"
 
+    class AccountSubtype(models.TextChoices):
+        """
+        8 Sep 2026 — the 21 granular subtypes, matching Aris's own
+        real reference implementation exactly (verbatim labels, same
+        order as that system's own "Daftar 21 tipe akun" list). This
+        is the REAL classification a shop's own accountant thinks
+        in — "Kas dan Setara Kas" vs "Piutang Lainnya" vs "Aset
+        Tetap" — one level more specific than the 6-bucket
+        AccountType this system already had, which only distinguishes
+        Asset/Liability/Equity/Revenue/COGS/Expense.
+        """
+        KAS_SETARA_KAS            = "KAS_SETARA_KAS", "Kas dan Setara Kas"
+        PIUTANG_USAHA              = "PIUTANG_USAHA", "Piutang Usaha"
+        PIUTANG_LAINNYA            = "PIUTANG_LAINNYA", "Piutang Lainnya"
+        PERSEDIAAN                 = "PERSEDIAAN", "Persediaan"
+        BIAYA_DIBAYAR_DIMUKA       = "BIAYA_DIBAYAR_DIMUKA", "Biaya Dibayar Dimuka"
+        ASET_TETAP                 = "ASET_TETAP", "Aset Tetap"
+        ASET_TAKBERWUJUD           = "ASET_TAKBERWUJUD", "Aset Takberwujud"
+        INVESTASI                  = "INVESTASI", "Investasi"
+        ASET_LAINNYA               = "ASET_LAINNYA", "Aset Lainnya"
+        UTANG_USAHA                = "UTANG_USAHA", "Utang Usaha"
+        UTANG_LAINNYA              = "UTANG_LAINNYA", "Utang Lainnya"
+        UTANG_PAJAK                = "UTANG_PAJAK", "Utang Pajak"
+        LIABILITAS_KEUANGAN        = "LIABILITAS_KEUANGAN", "Liabilitas Keuangan"
+        PENDAPATAN_DITERIMA_DIMUKA = "PENDAPATAN_DITERIMA_DIMUKA", "Pendapatan Diterima Dimuka"
+        UTANG_JANGKA_PANJANG       = "UTANG_JANGKA_PANJANG", "Utang Jangka Panjang"
+        EKUITAS                    = "EKUITAS", "Ekuitas"
+        PENDAPATAN                 = "PENDAPATAN", "Pendapatan"
+        PENDAPATAN_LAIN_LAIN       = "PENDAPATAN_LAIN_LAIN", "Pendapatan Lain-lain"
+        BEBAN_POKOK_PENJUALAN      = "BEBAN_POKOK_PENJUALAN", "Beban Pokok Penjualan"
+        BEBAN_USAHA                = "BEBAN_USAHA", "Beban Usaha"
+        BEBAN_LAIN_LAIN            = "BEBAN_LAIN_LAIN", "Beban Lain-lain"
+
+    SUBTYPE_CLASSIFICATION = {
+        AccountSubtype.KAS_SETARA_KAS:            (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.PIUTANG_USAHA:              (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.PIUTANG_LAINNYA:            (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.PERSEDIAAN:                 (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.BIAYA_DIBAYAR_DIMUKA:       (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.ASET_TETAP:                 (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.ASET_TAKBERWUJUD:           (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.INVESTASI:                  (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.ASET_LAINNYA:               (AccountType.ASSET, NormalBalance.DEBIT),
+        AccountSubtype.UTANG_USAHA:                (AccountType.LIABILITY, NormalBalance.CREDIT),
+        AccountSubtype.UTANG_LAINNYA:              (AccountType.LIABILITY, NormalBalance.CREDIT),
+        AccountSubtype.UTANG_PAJAK:                (AccountType.LIABILITY, NormalBalance.CREDIT),
+        AccountSubtype.LIABILITAS_KEUANGAN:        (AccountType.LIABILITY, NormalBalance.CREDIT),
+        AccountSubtype.PENDAPATAN_DITERIMA_DIMUKA: (AccountType.LIABILITY, NormalBalance.CREDIT),
+        AccountSubtype.UTANG_JANGKA_PANJANG:       (AccountType.LIABILITY, NormalBalance.CREDIT),
+        AccountSubtype.EKUITAS:                    (AccountType.EQUITY, NormalBalance.CREDIT),
+        AccountSubtype.PENDAPATAN:                 (AccountType.REVENUE, NormalBalance.CREDIT),
+        AccountSubtype.PENDAPATAN_LAIN_LAIN:       (AccountType.REVENUE, NormalBalance.CREDIT),
+        AccountSubtype.BEBAN_POKOK_PENJUALAN:      (AccountType.COGS, NormalBalance.DEBIT),
+        AccountSubtype.BEBAN_USAHA:                (AccountType.EXPENSE, NormalBalance.DEBIT),
+        AccountSubtype.BEBAN_LAIN_LAIN:            (AccountType.EXPENSE, NormalBalance.DEBIT),
+    }
+
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     code = models.CharField(max_length=10, verbose_name="Kode Akun")
     name = models.CharField(max_length=200, verbose_name="Nama Akun")
@@ -91,6 +198,24 @@ class Account(TenantScopedModel):
     )
     normal_balance = models.CharField(
         max_length=10, choices=NormalBalance.choices, verbose_name="Saldo Normal",
+    )
+    account_subtype = models.CharField(
+        max_length=40, choices=AccountSubtype.choices, blank=True, default="",
+        verbose_name="Sub-Tipe Akun",
+        help_text="Menentukan posisi akun di laporan keuangan secara otomatis "
+                  "(mengisi Tipe Akun & Saldo Normal). Opsional untuk akun lama.",
+    )
+    is_contra = models.BooleanField(
+        default=False, verbose_name="Akun Kontra",
+        help_text="Akun kontra dikurangkan dari total, bukan ditambahkan — "
+                  "contoh: Akumulasi Penyusutan, Cadangan Kerugian Piutang. "
+                  "Membalik Saldo Normal yang diturunkan dari Sub-Tipe Akun.",
+    )
+    is_control_account = models.BooleanField(
+        default=False, verbose_name="Akun Kontrol",
+        help_text="Akun kontrol tidak dapat menerima entri jurnal manual — "
+                  "saldonya harus selalu sama dengan total sub-ledger terkait "
+                  "(mis. AR harus sama dengan total tagihan pelanggan).",
     )
     description = models.CharField(max_length=255, blank=True, verbose_name="Deskripsi")
     is_active  = models.BooleanField(default=True, verbose_name="Aktif")
@@ -106,53 +231,34 @@ class Account(TenantScopedModel):
     def __str__(self):
         return f"{self.code} — {self.name}"
 
+    def save(self, *args, **kwargs):
+        """
+        8 Sep 2026 — real derivation step, added for account_subtype.
+        Only runs when account_subtype is actually set — an account
+        with no subtype (every pre-existing row, and any future row
+        that deliberately doesn't use this feature) passes through
+        completely unchanged, preserving today's exact behavior. When
+        a subtype IS set, account_type/normal_balance are ALWAYS
+        overwritten from SUBTYPE_CLASSIFICATION — never independently
+        trusted from whatever was passed in, matching the reference's
+        own real UI ("Ditentukan otomatis... Pilih Tipe Akun terlebih
+        dahulu"). is_contra flips normal_balance only, never
+        account_type — see class docstring for why that's correct
+        (a contra-asset is still an ASSET-type account).
+        """
+        if self.account_subtype:
+            base_type, base_normal = self.SUBTYPE_CLASSIFICATION[self.account_subtype]
+            self.account_type = base_type
+            if self.is_contra:
+                self.normal_balance = (
+                    self.NormalBalance.CREDIT if base_normal == self.NormalBalance.DEBIT
+                    else self.NormalBalance.DEBIT
+                )
+            else:
+                self.normal_balance = base_normal
+        super().save(*args, **kwargs)
+
     def balance(self, *, since=None, as_of=None, exclude_closing_entries=False) -> Decimal:
-        """
-        Computed on the fly from JournalLine, the real source of
-        truth — no denormalized running total on this model. Unlike
-        Part.current_stock (a deliberate, documented exception to
-        that rule elsewhere in this codebase), an Account's balance
-        feeds directly into real financial statements (Task 4.1) —
-        getting a cached figure wrong would misstate them. The extra
-        aggregate query is worth it.
-
-        `since`, added for Task 4.1's P&L/Balance-Sheet reporting —
-        without it, this is cumulative since the account's own
-        inception (as_of alone), correct for Trial Balance and
-        Balance Sheet. A Profit & Loss statement needs a genuine date
-        RANGE ("revenue THIS MONTH," not "revenue ever") — passing
-        since=X restricts to postings on or after that date. Fully
-        backward compatible: every existing caller across three
-        sprints only ever passes as_of=, so since=None (the default)
-        preserves today's exact behavior unchanged.
-
-        `exclude_closing_entries`, added 28 Aug 2026 — real bug
-        found live: a period's own closing entry is dated INSIDE
-        that same period's date range (deliberately, so
-        JournalEntry.post() resolves it into the right period). A
-        plain date-range balance() call for that range — exactly
-        what _period_totals() does — would sum the closing entry's
-        own reversing debits/credits together with the real original
-        activity, netting Revenue/COGS/Expense back toward zero.
-        Default False: Trial Balance and Balance Sheet's own
-        cumulative account balances correctly, deliberately DO want
-        to see the real, current, already-closed state (that IS what
-        closing the books means) — only a period-scoped report
-        asking "what really happened in this window" should exclude
-        the closing mechanism's own bookkeeping from the answer.
-
-        3 Sep 2026 — deliberately NOT extended to also exclude
-        Source.OPENING_BALANCE. Considered during the Opening Balance
-        design review and rejected: every opening-balance line posts
-        to Asset/Liability/Equity accounts only, never Revenue/COGS/
-        Expense — the same double-counting risk PERIOD_CLOSING's own
-        reversing entry creates cannot occur here, since
-        _period_totals() only ever queries REVENUE/COGS/EXPENSE
-        account types in the first place. Adding an unused exclusion
-        parameter here would be dead code standing in for a risk that
-        can't happen — see OpeningBalanceSession's own module note
-        above for the fuller reasoning.
-        """
         qs = JournalLine.objects.filter(account=self)
         if since is not None:
             qs = qs.filter(journal_entry__posting_date__gte=since)
@@ -169,16 +275,6 @@ class Account(TenantScopedModel):
 
     @classmethod
     def resolve(cls, organization, code):
-        """
-        The one real place "account code -> real Account row" gets
-        resolved, with a clear, actionable error if the Chart of
-        Accounts hasn't been seeded. Used by both
-        apps.accounting.journal_generator (posting NEW facts) and
-        apps.accounting.cancellations (reversing OLD ones) — one
-        shared implementation, so a missing-COA failure reads
-        identically no matter which path hit it, not two slightly
-        different messages that could drift apart.
-        """
         try:
             return cls.objects.get(organization=organization, code=code)
         except cls.DoesNotExist as exc:
@@ -196,13 +292,6 @@ class AccountingPeriod(TenantScopedModel):
     end_date   = models.DateField(verbose_name="Tanggal Selesai")
     is_closed  = models.BooleanField(default=False, verbose_name="Ditutup")
     is_locked  = models.BooleanField(default=False, verbose_name="Terkunci")
-    # 28 Aug 2026 — real month-end closing. closed_at is deliberately
-    # SEPARATE from is_closed: is_closed flips back to False on a
-    # reopen, but closed_at is set ONCE and never cleared — the real,
-    # permanent marker close() checks to enforce Chris's own confirmed
-    # hard guard ("block re-closing outright, even after a reopen").
-    # is_closed alone can't do this job, since a reopen would silently
-    # defeat it.
     closed_at   = models.DateTimeField(null=True, blank=True, verbose_name="Waktu Ditutup")
     closed_by   = models.ForeignKey(
         "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
@@ -240,21 +329,6 @@ class AccountingPeriod(TenantScopedModel):
 
     @classmethod
     def assert_open_for_posting(cls, organization, posting_date):
-        """
-        Raises ValueError if `posting_date` falls outside every known
-        period, OR the period covering it is closed/locked. Callers
-        should catch ValueError and return it as a real 400 response,
-        same "raise a plain ValueError, let the view translate it"
-        discipline already used by every other real write-path guard in
-        this codebase (PurchaseOrder.cancel(), WorkOrder.close(), etc.).
-
-        Deliberately the SAME is_open_for_posting check JournalEntry.post()
-        itself already uses — a period locked (not closed) still blocks
-        real operational actions here, same as it already blocks
-        DOMAIN_EVENT-sourced postings there; only a MANUAL adjusting
-        journal is allowed through a merely-locked period, and none of
-        these operational write paths are ever that.
-        """
         period = cls.objects.filter(
             organization=organization,
             start_date__lte=posting_date, end_date__gte=posting_date,
@@ -273,73 +347,6 @@ class AccountingPeriod(TenantScopedModel):
         return period    
 
     def close(self, *, closed_by=None):
-        """
-        Real month-end close, Made's own confirmed requirement (25 Aug
-        meeting, via his tax & accounting consultant) — rolls this
-        period's own Revenue/COGS/Expense activity into Retained
-        Earnings (3101) via one real, balanced JournalEntry, then marks
-        the period closed.
-
-        Reuses reports._period_totals() directly — the EXACT SAME
-        numbers Made already saw on the P&L report for this period get
-        posted here, not a second, independently-derived calculation
-        that could quietly drift from what he reviewed before clicking
-        close.
-
-        Hard guard, Chris's own explicit sign-off, 28 Aug 2026: blocked
-        outright if this period has EVER been closed before, even after
-        a reopen. Checks closed_at, not is_closed — is_closed flips back
-        to False on reopen, but closed_at is a permanent marker (see its
-        own field comment). Re-closing risks double-counting the FIRST
-        closing entry's own lines, since profit_and_loss() reads by real
-        date range, not by resetting account balances to zero — a second
-        close on the same period would debit/credit accounts that
-        already correctly reflect the first closing entry sitting inside
-        that same range. Full close -> correct -> re-close support is a
-        real, separate design problem, deliberately deferred rather than
-        solved partially here.
-
-        Only Revenue/COGS/Expense accounts with a genuinely NONZERO
-        period balance get a line — same zero-filtering discipline
-        posting_engine.py's own _lines() already uses. A period with
-        real activity in only some of these three types still produces a
-        correct, balanced entry; a period with literally zero activity
-        across all three closes with NO journal entry at all, matching
-        the existing precedent set by WorkOrderCompleted's own "$0 ->
-        post nothing, the action still succeeds" behavior.
-
-        Posted with posting_date=self.end_date — always the LAST day of
-        this period's own real range, so JournalEntry.post()'s own
-        period-resolution always finds this exact period, and the
-        closing entry itself is correctly still open for posting (is_closed
-        is only set True AFTER the entry posts successfully, not before).
-
-        29 Aug 2026 — real pipeline restructuring, Chris's own
-        confirmed ordering: the ENTIRE close() operation — the
-        depreciation run, the P&L calculation, the Retained Earnings
-        posting, the lock flag — now runs inside ONE
-        transaction.atomic() block, not just its own tail end as
-        before. Real reason: DepreciationRun's own
-        unique_together(organization, accounting_period) guard means
-        a second call for the same period is a hard, permanent
-        block — if depreciation posted successfully but something
-        LATER in this method then failed, a retry would immediately
-        hit "already run for this period" while the period itself
-        never actually closed, a genuine lock-out trap. Wrapping the
-        whole method means a failure ANYWHERE rolls back EVERYTHING
-        cleanly, including the depreciation run itself, so a retry
-        always starts clean.
-
-        Depreciation MUST run before the P&L totals below are
-        computed — otherwise this month's own real depreciation
-        expense (6004) would never reach the closing entry at all,
-        silently understating expenses for a month that genuinely
-        had real depreciation. DepreciationRun.execute()'s own
-        posting (source=DEPRECIATION) is picked up correctly by
-        _period_totals() below — it's real, new expense activity for
-        this month, not a reversal of anything, so it's deliberately
-        NOT excluded the way PERIOD_CLOSING's own lines are.
-        """
         from apps.accounting.reports import _period_totals
         from django.utils import timezone
 
@@ -350,32 +357,6 @@ class AccountingPeriod(TenantScopedModel):
                 "untuk koreksi lebih lanjut."
             )
 
-        # 4 Sep 2026 — real, hard chronological-order guard, found
-        # necessary via a careful design-review trace, not a live
-        # incident. Closing periods out of order silently broke TWO
-        # separate things that both quietly assumed strict
-        # chronological closing:
-        #   - balance_sheet()'s own current_year_earnings — an
-        #     earlier, still-open period's real income would be
-        #     DISCARDED ENTIRELY once a later period closed and its
-        #     own "is the period covering as_of closed" branch fired,
-        #     not just miscounted (see reports.py's own
-        #     _unclosed_earnings_start() docstring for the full
-        #     trace).
-        #   - DepreciationRun.execute()'s own entries_so_far logic —
-        #     an asset would silently post only ONE month of
-        #     depreciation on an out-of-order close, not however many
-        #     months should genuinely have accrued since its last
-        #     real entry.
-        # Rather than patch each downstream symptom separately, this
-        # blocks the real root cause at its source: a period can
-        # never close while an earlier period for the same
-        # organization is still open. Matches how real bookkeeping
-        # already works — January closes before February, never the
-        # reverse. A period that was closed and later reopened (see
-        # reopen() below) counts as open again here too — its own
-        # closed_at being set in the past does not exempt it; only
-        # is_closed, the real current state, matters for this check.
         earlier_open_period = AccountingPeriod.objects.filter(
             organization=self.organization, start_date__lt=self.start_date, is_closed=False,
         ).order_by("start_date").first()
@@ -412,8 +393,6 @@ class AccountingPeriod(TenantScopedModel):
                 lines.append({"account": Account.resolve(self.organization, "3101"), "credit": net_income})
             elif net_income < Decimal("0"):
                 lines.append({"account": Account.resolve(self.organization, "3101"), "debit": -net_income})
-            # net_income == 0 with real, offsetting revenue/cogs/expense activity:
-            # lines still balance on their own, no 3101 line needed at all.
 
             closing_entry = None
             if lines:
@@ -434,19 +413,6 @@ class AccountingPeriod(TenantScopedModel):
 
 
     def reopen(self, *, reopened_by=None):
-        """
-        Real, deliberately narrow action — flips is_closed back to False
-        so genuine corrections can be posted, matching Made's own
-        confirmed requirement ("heavily guarded, owner-only" — the
-        owner-only check itself lives in the view, same "authorization
-        belongs in the view, the write-path rule belongs in the model"
-        split ManualJournalListCreateView's own owner check already
-        uses).
-
-        closed_at is deliberately NEVER cleared here — see close()'s own
-        docstring for why that's the real, permanent guard against
-        re-closing this exact period.
-        """
         from django.utils import timezone
 
         if not self.is_closed:
@@ -488,53 +454,9 @@ class JournalEntry(TenantScopedModel):
     class Source(models.TextChoices):
         DOMAIN_EVENT   = "DOMAIN_EVENT", "Event Domain"
         MANUAL         = "MANUAL", "Jurnal Manual"
-        # 28 Aug 2026 — real bug found live: a closing entry dated
-        # inside the very period it closes was originally posted as
-        # MANUAL, indistinguishable from a real adjusting journal.
-        # That meant re-querying that period's own P&L afterward
-        # silently zeroed out — the closing entry's own reversing
-        # debits to Revenue got summed together with the real
-        # original revenue in the SAME date-range query, netting to
-        # ~0. This distinct source lets reports.py's own
-        # _period_totals() tell the difference and exclude it, so a
-        # closed month's history stays intact and re-queryable.
         PERIOD_CLOSING = "PERIOD_CLOSING", "Penutupan Periode"
-        # 29 Aug 2026 — Fixed Asset & Depreciation. Neither of these
-        # two goes through the async event bus at all — unlike
-        # QuickPurchase/OperatingExpense/GoodsReceived (which exist
-        # to translate an OTHER domain's real business fact into GL
-        # terms, a genuine cross-app decoupling need), Asset lives
-        # HERE, in apps.accounting itself — there's no other domain
-        # to decouple from, so both post directly and synchronously,
-        # same precedent PERIOD_CLOSING above already set.
-        #
-        # ASSET_ACQUISITION is a normal, LOCK-RESPECTING transaction
-        # — buying an asset is ordinary operational activity, same as
-        # QuickPurchase/OperatingExpense, neither of which bypasses a
-        # locked period either.
         ASSET_ACQUISITION = "ASSET_ACQUISITION", "Perolehan Aset"
-        # DEPRECIATION, by contrast, DOES need the same lock-bypass
-        # PERIOD_CLOSING already has — it runs INSIDE
-        # AccountingPeriod.close()'s own atomic flow (Chris's own
-        # confirmed pipeline ordering: depreciation must post BEFORE
-        # the P&L totals are computed, or this month's own real
-        # depreciation expense would never reach the closing entry),
-        # so it must never be blocked by the very lock that Made's
-        # real workflow (lock for review, then close) puts in place
-        # immediately beforehand.
         DEPRECIATION = "DEPRECIATION", "Penyusutan Aset"
-        # 3 Sep 2026 — Opening Balance onboarding. A normal,
-        # LOCK-RESPECTING transaction, same treatment as
-        # ASSET_ACQUISITION and for the same reason — it posts once,
-        # into a period freshly created moments earlier by the
-        # onboarding backfill, so it will never realistically hit an
-        # already-locked period; there's no real scenario requiring
-        # a bypass privilege it structurally never needs. Added
-        # purely for honest Jurnal-page labeling and to keep the
-        # opening entry unambiguously distinguishable from a real
-        # MANUAL adjusting journal — see Account.balance()'s own note
-        # above for why this does NOT also need a P&L-range exclusion
-        # the way PERIOD_CLOSING does.
         OPENING_BALANCE = "OPENING_BALANCE", "Saldo Awal"
 
     class Status(models.TextChoices):
@@ -560,9 +482,6 @@ class JournalEntry(TenantScopedModel):
     created_by = models.ForeignKey(
         "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
         verbose_name="Dibuat Oleh",
-        # Null for domain-event-driven entries — nobody "typed" these
-        # in. Only ever set for source=MANUAL, the SAK ETAP/EMKM
-        # adjusting-journal path (Phase 4, Task 4.4).
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -595,11 +514,27 @@ class JournalEntry(TenantScopedModel):
             [{"account": <Account>, "debit": Decimal("0"), "credit": Decimal("0"), "description": ""}, ...]
 
         Validates BEFORE writing anything: at least two lines, total
-        debit == total credit, non-zero total, and exactly one side
-        set per line. A JournalEntry with mismatched or malformed
-        lines must never be able to exist even transiently — same
-        "guarantee your own atomicity, don't trust the caller"
-        discipline as WorkOrder.close()/cancel().
+        debit == total credit, non-zero total, exactly one side set
+        per line, and — 8 Sep 2026 — that a MANUAL entry never
+        touches a real control account. A JournalEntry with
+        mismatched, malformed, or illegally-targeted lines must never
+        be able to exist even transiently — same "guarantee your own
+        atomicity, don't trust the caller" discipline as
+        WorkOrder.close()/cancel().
+
+        8 Sep 2026 — real control-account guard, promoted from a
+        soft, view-layer WARNING (ManualJournalListCreateView.post()'s
+        own old _CONTROL_ACCOUNT_CODES set, which still let the post
+        through) into a hard, engine-level BLOCK — following a direct
+        review with a professional accountant against a real
+        reference implementation, which enforces this at the engine,
+        never the view. Deliberately scoped to source == MANUAL only:
+        DOMAIN_EVENT, OPENING_BALANCE, ASSET_ACQUISITION,
+        PERIOD_CLOSING, and DEPRECIATION all touch control accounts
+        (1201/1301/2001, as of this same review) legitimately, every
+        single day — this guard must never block any of them. Checked
+        here, in the one real write path every source goes through,
+        not duplicated in each individual view.
         """
         if len(lines) < 2:
             raise ValueError(
@@ -628,18 +563,20 @@ class JournalEntry(TenantScopedModel):
                     f"one of debit/credit set, not both or neither."
                 )
 
+        if source == cls.Source.MANUAL:
+            control_codes_touched = sorted({
+                line["account"].code for line in lines
+                if getattr(line["account"], "is_control_account", False)
+            })
+            if control_codes_touched:
+                raise ValueError(
+                    f"Akun kontrol ({', '.join(control_codes_touched)}) tidak bisa "
+                    f"menerima entri jurnal manual — saldo akun kontrol harus selalu "
+                    f"sama dengan total sub-ledger terkait (mis. Piutang Usaha harus "
+                    f"sama dengan total tagihan pelanggan yang belum lunas)."
+                )
+
         with transaction.atomic():
-            # Task 4.3 — Fiscal Period Lock. Auto-resolves the period
-            # for posting_date if the caller didn't already pass one
-            # (nobody has, historically — accounting_period has sat
-            # unused by every event handler since Sprint 1). Chris's
-            # own explicit call: NO period found is a hard failure,
-            # not a silent pass-through — "every posting must belong
-            # to a real period, no exceptions." This is what makes
-            # apps.accounting.periods.ensure_current_year_period() a
-            # genuine prerequisite for a new organization now, same
-            # as seed_chart_of_accounts() already was — see that
-            # function's own module docstring.
             if accounting_period is None:
                 accounting_period = AccountingPeriod.objects.filter(
                     organization=organization,
@@ -659,24 +596,6 @@ class JournalEntry(TenantScopedModel):
                     f"{accounting_period.end_date} sudah ditutup — tidak bisa "
                     f"memposting jurnal apa pun ke periode ini."
                 )
-            # Locked blocks automatic (DOMAIN_EVENT) postings only —
-            # a manual adjusting journal (Task 4.4) can still post
-            # through a locked period, Chris's own explicit call.
-            # PERIOD_CLOSING and DEPRECIATION are allowed through the
-            # SAME exception — 28-29 Aug 2026 — Made's own real
-            # workflow is lock a period first (for review), THEN
-            # close it, so neither the closing entry itself nor the
-            # depreciation run that must complete before it (see
-            # AccountingPeriod.close()'s own docstring) can ever be
-            # blocked by the very lock that precedes them.
-            # ASSET_ACQUISITION and OPENING_BALANCE deliberately do
-            # NOT join this exception — buying an asset, or posting
-            # the opening balance itself, is ordinary operational
-            # activity, genuinely blocked by a lock same as any other
-            # normal transaction. CLOSED, above, still blocks
-            # everything unconditionally, including all of these —
-            # a genuinely different, stronger state than locked,
-            # checked first and never bypassed by source.
             if accounting_period.is_locked and source not in (
                 cls.Source.MANUAL, cls.Source.PERIOD_CLOSING, cls.Source.DEPRECIATION,
             ):
@@ -738,8 +657,6 @@ class JournalLine(TenantScopedModel):
         verbose_name_plural  = "Journal Lines"
         ordering             = ["created_at"]
         constraints = [
-            # Single-row rule only — see module docstring for why the
-            # cross-row "entry balances" rule can't live here too.
             models.CheckConstraint(
                 check=(
                     models.Q(debit_amount__gt=0, credit_amount=0)
@@ -781,53 +698,6 @@ class AssetSequence(TenantScopedModel):
 
 
 class Asset(TenantScopedModel):
-    """
-    A real fixed asset — a compressor, tools, equipment the shop
-    owns and uses over multiple years, not consumed in one
-    transaction the way Part inventory is. Made's own confirmed real
-    request, 27 Aug meeting notes: "otomasi depresiasi... bahkan
-    kunci/peralatan kecil izin dihitung penyusutannya."
-
-    Straight-line depreciation only, v1 — the simplest, most
-    standard real method, matching this whole system's own
-    established "lean over precise" philosophy (same spirit as
-    Part.cost_price's own plain "Last Cost" instead of a running
-    weighted average). `method` is still a real field, not a
-    hardcoded assumption — room to add a second method later without
-    a schema change, same shape as Payment.METHOD_CHOICES.
-
-    Salvage value is deliberately NOT a field here — Chris's own
-    confirmed call: Made doesn't estimate resale values for shop
-    tools, and asking for one on every asset would slow down exactly
-    the kind of fast, low-ceremony entry this system optimizes for
-    elsewhere (QuickPurchase, OperatingExpense). Always 0 in v1 —
-    monthly_depreciation is a straight (cost / useful_life_months)
-    division, no subtraction term.
-
-    No proration in the month of acquisition — Chris's own confirmed
-    call: depreciation starts the CALENDAR MONTH AFTER acquisition, a
-    full month's worth every month thereafter, regardless of whether
-    the asset was bought on the 1st or the 28th. See
-    DepreciationRun.execute() below for exactly where this is
-    enforced.
-
-    Real, honest limitation, not a silent gap: disposal (an asset
-    sold or scrapped before its useful life ends) is explicitly OUT
-    OF SCOPE for v1 — real disposal accounting (writing off remaining
-    book value, a possible gain/loss) is genuinely more complex,
-    closer to PurchaseReturn's own multi-case scoping problem than a
-    simple monthly posting. Tracked as a real, named open decision,
-    not silently ignored. is_active exists so a future disposal
-    feature has a real place to land without a schema change — for
-    now it only ever flips False once an asset reaches full
-    depreciation (see DepreciationRun.execute()).
-
-    3 Sep 2026 — record() gained post_acquisition_entry, for the
-    Opening Balance onboarding path. See that parameter's own
-    docstring below for the full reasoning; every existing call site
-    is unaffected, since it defaults True and preserves today's exact
-    behavior unchanged.
-    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor Aset")
     sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
@@ -856,12 +726,6 @@ class Asset(TenantScopedModel):
 
     @property
     def monthly_depreciation(self):
-        # Straight-line, salvage value always 0 in v1. quantize() to
-        # real currency precision — the ROUND_HALF_UP result is what
-        # every non-final month actually posts; the FINAL month
-        # never uses this value at all (see DepreciationRun.execute()
-        # below), which is exactly what keeps the running total from
-        # ever drifting off the real original cost.
         return (self.cost / self.useful_life_months).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     @property
@@ -884,30 +748,6 @@ class Asset(TenantScopedModel):
         cls, *, organization, name, acquisition_date, cost, useful_life_months,
         method="cash", created_by=None, post_acquisition_entry=True,
     ):
-        """
-        The one real entry point — never construct Asset directly.
-        Posts the real acquisition entry — Dr 1401 Fixed Assets /
-        Cr Cash (1001) or Bank (1101) — immediately, inside
-        this same transaction. Chris's own confirmed in-scope call:
-        a fixed asset register without a real capitalization entry
-        breaks the double-entry foundation this whole system is
-        built on. Posts synchronously, source=ASSET_ACQUISITION —
-        see that Source value's own docstring on JournalEntry.Source
-        for why this doesn't go through the async event bus at all.
-
-        post_acquisition_entry, added 3 Sep 2026 for Opening Balance
-        onboarding — the one real, deliberate exception to "this
-        method always posts its own acquisition entry." A legacy
-        asset entered at onboarding was NOT bought today; there is no
-        real cash outflow to credit, and the real cost is instead
-        just one line among many inside OpeningBalanceSession's own
-        single consolidated journal entry (matching the canonical
-        onboarding doctrine's own worked example — one opening
-        journal, not N separate ones). Defaults True — every existing
-        call site (the real "buy an asset today" flow) is completely
-        unaffected; method's own validation only runs when this is
-        True, since it becomes meaningless otherwise.
-        """
         if cost is None or cost <= Decimal("0"):
             raise ValueError("Harga perolehan aset harus lebih dari nol.")
         if useful_life_months is None or useful_life_months <= 0:
@@ -941,21 +781,6 @@ class Asset(TenantScopedModel):
 
 
 class DepreciationRun(TenantScopedModel):
-    """
-    One real, aggregated monthly depreciation posting — Chris's own
-    confirmed granularity call: one consolidated Dr 6004 Beban
-    Penyusutan / Cr 1402 Accumulated Depreciation journal entry per
-    organization per month, keeping the Jurnal page clean, while
-    AssetDepreciationEntry rows underneath preserve the real,
-    itemized per-asset breakdown.
-
-    unique_together(organization, accounting_period) is the real,
-    hard guard against ever running depreciation twice for the same
-    month — enforced at the DB level, not just application logic,
-    since this is triggered directly inside
-    AccountingPeriod.close()'s own atomic block, not via the async
-    event bus's own reference_event_id idempotency check.
-    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     accounting_period = models.ForeignKey(
         AccountingPeriod, on_delete=models.PROTECT, related_name="depreciation_runs",
@@ -964,13 +789,6 @@ class DepreciationRun(TenantScopedModel):
     journal_entry = models.OneToOneField(
         JournalEntry, on_delete=models.PROTECT, null=True, blank=True,
         related_name="depreciation_run", verbose_name="Jurnal Penyusutan",
-        # Nullable — a real month with ZERO active, still-depreciating
-        # assets produces a real DepreciationRun row (so a genuine
-        # re-run attempt for that period is still correctly blocked
-        # by the unique_together guard above) but posts NO journal
-        # entry at all, matching the exact "$0 -> post nothing"
-        # precedent AccountingPeriod.close()'s own P&L entry already
-        # established.
     )
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"), verbose_name="Total Penyusutan")
     run_at = models.DateTimeField(auto_now_add=True)
@@ -985,61 +803,6 @@ class DepreciationRun(TenantScopedModel):
 
     @classmethod
     def execute(cls, *, organization, accounting_period, run_by=None):
-        """
-        The real, core depreciation loop — called from INSIDE
-        AccountingPeriod.close()'s own atomic block (see that
-        method's own updated docstring for the real pipeline-
-        ordering reason). Real, hard idempotency guard: this class's
-        own unique_together above means a second call for the same
-        period raises IntegrityError immediately — deliberately NOT
-        caught here, letting close()'s own transaction.atomic() roll
-        back the whole close attempt rather than silently skip
-        depreciation a second time.
-
-        Real, verified rounding-ceiling fix: uses entries_so_far (a
-        real COUNT of this asset's own prior depreciation entries),
-        not a comparison between rounded Decimal amounts — the exact
-        final scheduled month posts the true REMAINING book value,
-        not another rounded monthly_depreciation slice, so N months
-        of straight-line division always sum to EXACTLY the original
-        cost, never drifting off by a stray cent. Verified by hand:
-        333.333,33 + 333.333,33 + 333.333,34 = 1.000.000,00 exactly.
-
-        No proration — an asset's FIRST real depreciation entry is
-        the calendar month immediately AFTER its own
-        acquisition_date falls, a full month's worth, Chris's own
-        confirmed call. select_for_update() on the assets queryset —
-        a real, defensive lock against a concurrent close() attempt
-        for the same organization, matching this codebase's own
-        established discipline for anything about to be read and
-        depended on within a single atomic block (WorkOrderSequence.
-        next_number(), etc.).
-
-        29 Aug 2026 — real bug found live, via direct manual testing
-        outside AccountingPeriod.close(): select_for_update() above
-        requires an active transaction to attach its row lock to,
-        and this method's own body was never wrapped in one itself
-        — it only ever worked because its one real call site
-        (close()) already runs inside transaction.atomic(). Called
-        directly (a real, legitimate need — reviewing/testing
-        depreciation for a specific period without a full close),
-        Django raised TransactionManagementError outright. Fixed by
-        wrapping this method's own body in transaction.atomic() —
-        fully safe to call from anywhere now, including from inside
-        close()'s own already-atomic block, since Django's atomic()
-        is reentrant and simply becomes a harmless nested savepoint
-        there, with zero change to that real, existing call path.
-
-        3 Sep 2026 — this same loop is what makes the Opening Balance
-        onboarding's own "current_book_value + remaining_useful_life"
-        design work correctly for free: a legacy asset's
-        acquisition_date is set to the opening session's own
-        start_date (see OpeningBalanceAssetLine.post() logic), so its
-        FIRST real entries_so_far is 0, same as any brand-new asset —
-        depreciation of the REMAINING value begins cleanly the month
-        after onboarding, never double-counting whatever real wear
-        already happened before the shop started using Arthasee.
-        """
         with transaction.atomic():
             assets = (
                 Asset.objects
@@ -1051,9 +814,6 @@ class DepreciationRun(TenantScopedModel):
             total = Decimal("0")
 
             for asset in assets:
-                # No proration — skip entirely if this period's own
-                # start_date is still the SAME calendar month as
-                # acquisition, or falls before it entirely.
                 same_month_as_acquisition = (
                     accounting_period.start_date.year == asset.acquisition_date.year
                     and accounting_period.start_date.month == asset.acquisition_date.month
@@ -1063,11 +823,6 @@ class DepreciationRun(TenantScopedModel):
 
                 entries_so_far = asset.depreciation_entries.count()
                 if entries_so_far >= asset.useful_life_months:
-                    # Already fully depreciated — is_active should
-                    # already be False by the time this could happen
-                    # (set the moment the FINAL entry was created, below),
-                    # but this guard stands regardless of that flag's
-                    # own correctness.
                     continue
 
                 remaining = asset.cost - asset.accumulated_depreciation
@@ -1081,13 +836,6 @@ class DepreciationRun(TenantScopedModel):
                 total += amount
 
             if not entries_to_create:
-                # Real, honest "nothing to depreciate this month" state
-                # — no assets yet, every asset still in its acquisition
-                # month, or every asset already fully depreciated. Still
-                # creates the real DepreciationRun row (so a genuine
-                # re-run attempt for this period is still correctly
-                # blocked), just with no journal entry — same "$0 -> post
-                # nothing" precedent as close()'s own P&L closing entry.
                 return cls.objects.create(
                     organization=organization, accounting_period=accounting_period,
                     journal_entry=None, total_amount=Decimal("0"),
@@ -1117,12 +865,6 @@ class DepreciationRun(TenantScopedModel):
                 for asset, amount, _ in entries_to_create
             ])
 
-            # Deactivate any asset that just received its FINAL entry —
-            # matches Asset.is_active's own docstring: False once fully
-            # depreciated. bulk_update(), not individual .save() calls —
-            # same "no per-instance side effects to preserve" reasoning
-            # already established for WorkOrder.close()'s own
-            # bulk_update() of stages/job lines.
             fully_depreciated_ids = [asset.id for asset, _, is_final in entries_to_create if is_final]
             if fully_depreciated_ids:
                 Asset.objects.filter(pk__in=fully_depreciated_ids).update(is_active=False)
@@ -1131,12 +873,6 @@ class DepreciationRun(TenantScopedModel):
 
 
 class AssetDepreciationEntry(TenantScopedModel):
-    """
-    One real, granular record of ONE asset's depreciation for ONE
-    month — the itemized breakdown underneath DepreciationRun's own
-    single aggregated JournalEntry (Chris's own confirmed
-    granularity call).
-    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     asset = models.ForeignKey(
         Asset, on_delete=models.PROTECT, related_name="depreciation_entries",
@@ -1154,10 +890,6 @@ class AssetDepreciationEntry(TenantScopedModel):
         verbose_name_plural  = "Asset Depreciation Entries"
         ordering             = ["created_at"]
         unique_together      = [("asset", "depreciation_run")]
-        # A given asset can only ever have ONE entry per real
-        # DepreciationRun — the real guard, at the database level,
-        # against ever double-posting the same asset's own
-        # depreciation for the same month.
 
     def __str__(self):
         return f"{self.asset.name} — {self.amount} ({self.depreciation_run})"
@@ -1169,43 +901,8 @@ class AssetDepreciationEntry(TenantScopedModel):
 # =============================================================================
 # Opening Balance — new-workshop onboarding (3 Sep 2026)
 # =============================================================================
-"""
-Sansan's own canonical onboarding proposal, meticulously reviewed and
-revised (see this module's own top-level docstring for the two real
-corrections made during that review) before a line of this was
-written.
-
-One OpeningBalanceSession per organization, ever — unique_together
-enforces this at the DB level, matching the real-world fact that a
-shop has exactly one accounting start date and posts its opening
-position exactly once. Genuinely mutable while DRAFT (the owner adds/
-edits line items across however many wizard sessions it takes to get
-right); posting is a single, atomic, all-or-nothing action via
-post() below, after which the session — and every real Part/Asset row
-it created — is exactly as immutable as any other posted history in
-this codebase.
-
-Six line-item categories, matching Chris's own signed-off subledger
-strategy: Cash/Bank are simple lump sums (nothing subledger-shaped
-sits underneath them); Inventory, Fixed Assets, Receivables, and
-Payables are all itemized, each real line producing a real underlying
-record (a Part, an Asset, an OpeningBalanceReceivable/Payable row)
-so the Balance Sheet can never silently diverge from what Spare Parts
-& Fluids, Aset Tetap, or Piutang/Utang actually show — the exact
-class of bug this whole redesign exists to prevent. OpeningBalance
-OtherLine is the deliberate, honest escape hatch for anything that
-doesn't fit the five itemized categories (Owner Capital itself,
-Loans, Tax Payable) — a real account code and side, not a second,
-looser "just balance it" mechanism.
-"""
 
 class OpeningBalanceSession(TenantScopedModel):
-    """
-    The real wizard session itself — one per organization, ever.
-    Holds the chosen accounting start date and tracks DRAFT/POSTED
-    status; the actual line items live on the six related models
-    below, each pointing back here via a plain FK.
-    """
     class Status(models.TextChoices):
         DRAFT  = "DRAFT", "Draf"
         POSTED = "POSTED", "Terposting"
@@ -1216,9 +913,6 @@ class OpeningBalanceSession(TenantScopedModel):
     journal_entry = models.OneToOneField(
         JournalEntry, on_delete=models.PROTECT, null=True, blank=True,
         related_name="opening_balance_session", verbose_name="Jurnal Saldo Awal",
-        # PROTECT, not CASCADE — same Principle 2 reasoning as every
-        # other posted-history FK in this file. Null until post()
-        # actually succeeds.
     )
     posted_at = models.DateTimeField(null=True, blank=True, verbose_name="Waktu Diposting")
     posted_by = models.ForeignKey(
@@ -1241,16 +935,6 @@ class OpeningBalanceSession(TenantScopedModel):
         return f"{self.organization} — saldo awal {self.start_date} ({self.status})"
 
     def _validate_before_posting(self):
-        """
-        Real, explicit pre-flight checks — separate from the
-        arithmetic balance check JournalEntry.post() already owns.
-        Raises ValueError on the FIRST problem found, before anything
-        is written — same "validate everything before touching the
-        database" discipline as JournalEntry.post() itself. Matching
-        Sansan's own "no mystery plug" doctrine: every individual line
-        must be a real, sane number on its own, not just something
-        that happens to make the total balance.
-        """
         for cash in self.cash_lines.all():
             if cash.amount <= Decimal("0"):
                 raise ValueError(f"Saldo awal kas/bank untuk akun {cash.account_code} harus lebih dari nol.")
@@ -1274,6 +958,102 @@ class OpeningBalanceSession(TenantScopedModel):
             if other.amount <= Decimal("0"):
                 raise ValueError(f"Jumlah untuk akun {other.account_code} harus lebih dari nol.")
 
+    def _build_line_specs(self):
+        """
+        8 Sep 2026 — the one real, shared calculation behind BOTH
+        post() and the new preview endpoint (Chris/Aris's own
+        confirmed hybrid design for the Opening Balance Equity plug).
+        Returns RAW specs — account_code, debit/credit amount,
+        description — never a resolved Account instance and never a
+        created Part/Asset row. This is what GUARANTEES the exact
+        figure Made reviews on the pre-commit screen is the exact
+        figure that gets committed a moment later: preview and
+        post() both call this same method, so they cannot drift
+        apart on the arithmetic even if one of them is later edited
+        without the other.
+
+        `part_line`/`asset_line` keys carry the originating model
+        instance back to post() so IT knows which real Part/Asset to
+        create and which row to update afterward — the preview path
+        never looks at either key, since a preview must never create
+        a real side-effecting row.
+        """
+        specs = []
+
+        for cash in self.cash_lines.all():
+            specs.append({
+                "account_code": cash.account_code, "debit": cash.amount, "credit": None,
+                "description": "Saldo awal kas/bank",
+            })
+
+        for part_line in self.part_lines.all():
+            amount = part_line.quantity * part_line.cost_price
+            if amount > Decimal("0"):
+                specs.append({
+                    "account_code": "1301", "debit": amount, "credit": None,
+                    "description": f"Saldo awal stok — {part_line.part_name}",
+                    "part_line": part_line,
+                })
+
+        for asset_line in self.asset_lines.all():
+            specs.append({
+                "account_code": "1401", "debit": asset_line.current_book_value, "credit": None,
+                "description": f"Saldo awal aset — {asset_line.name}",
+                "asset_line": asset_line,
+            })
+
+        for ar in self.receivable_lines.all():
+            specs.append({
+                "account_code": "1201", "debit": ar.balance_due, "credit": None,
+                "description": f"Saldo awal piutang — {ar.customer.name}",
+            })
+
+        for ap in self.payable_lines.all():
+            specs.append({
+                "account_code": "2001", "debit": None, "credit": ap.balance_due,
+                "description": f"Saldo awal utang — {ap.supplier.name}",
+            })
+
+        for other in self.other_lines.all():
+            spec = {
+                "account_code": other.account_code, "description": other.description,
+                "debit": None, "credit": None,
+            }
+            if other.side == OpeningBalanceOtherLine.Side.DEBIT:
+                spec["debit"] = other.amount
+            else:
+                spec["credit"] = other.amount
+            specs.append(spec)
+
+        return specs
+
+    def compute_variance(self):
+        """
+        8 Sep 2026 — the real, explicit variance computation behind
+        the new pre-commit review gate (GET .../opening-balance/
+        preview/). Chris/Aris's own confirmed doctrine: NEVER balance
+        silently — Made must see this exact figure before committing.
+        `plug_side` names which side (debit/credit) the 3002 plug
+        line will land on if he proceeds — None when already
+        balanced, matching JournalEntry.post()'s own "nothing to
+        plug" case.
+        """
+        zero = Decimal("0")
+        specs = self._build_line_specs()
+        total_debit  = sum((s["debit"] or zero) for s in specs)
+        total_credit = sum((s["credit"] or zero) for s in specs)
+        if total_debit == total_credit:
+            return {
+                "total_debit": total_debit, "total_credit": total_credit,
+                "variance": zero, "is_balanced": True, "plug_side": None,
+            }
+        variance = abs(total_debit - total_credit)
+        plug_side = "credit" if total_debit > total_credit else "debit"
+        return {
+            "total_debit": total_debit, "total_credit": total_credit,
+            "variance": variance, "is_balanced": False, "plug_side": plug_side,
+        }
+
     def post(self, *, posted_by=None):
         """
         The one real entry point — posts every line item across all
@@ -1281,60 +1061,23 @@ class OpeningBalanceSession(TenantScopedModel):
         the canonical onboarding doctrine's own worked example
         exactly (one opening journal, not N separate ones).
 
-        Real, itemized side effects for the four subledger-backed
-        categories — this IS the fix for the exact "lump-sum GL
-        posting with nothing real underneath it" trap this whole
-        design review exists to prevent:
-          - Part lines create real Part rows (current_stock=0) plus a
-            real, audited StockAdjustment (reason="opening_balance")
-            to bring stock to the real starting count — never a raw
-            current_stock write, same discipline every other stock
-            movement in this codebase already follows.
-          - Asset lines create real Asset rows via Asset.record(...,
-            post_acquisition_entry=False) — see that parameter's own
-            docstring for the full reasoning on why acquisition_date
-            is deliberately set to this session's own start_date, not
-            the asset's real historical acquisition date.
-          - Receivable/Payable lines are already their own real,
-            dedicated rows (OpeningBalanceReceivable/Payable) — Made's
-            own Piutang/Utang dashboard cards union these in directly
-            (see reports.py), no further materialization needed here.
-
-        Wrapped in ONE transaction.atomic() — if JournalEntry.post()
-        itself rejects the final assembled lines as unbalanced (the
-        real, hard "no mystery plug" guarantee Sansan's own doctrine
-        requires), EVERYTHING rolls back cleanly: every Part, every
-        Asset, every StockAdjustment created above included. Nothing
-        is left half-created just because the total didn't balance.
-
-        6 Sep 2026 — real, hard idempotency guard, found via a
-        design-review trace (Sansan's own "double-click / network
-        retry" question), not a live incident: the OLD version
-        checked self.status BEFORE ever entering transaction.atomic(),
-        against whatever was already loaded into memory, with no row
-        lock at all. Two near-simultaneous requests (a genuine
-        double-click, or a frontend retry after a network glitch)
-        could both load the same session with status=DRAFT, both
-        pass the check, and both proceed to post — silently creating
-        TWO separate OPENING_BALANCE journal entries and doubling
-        the entire opening position. unique_together on this model
-        only stops a second SESSION ROW from ever being created — it
-        does nothing to stop two concurrent post() calls against the
-        one row that already exists.
-
-        Real fix: select_for_update() re-fetches THIS row with a
-        real row-level lock, and the status check re-runs against
-        that locked, authoritative copy — same proven pattern already
-        established elsewhere in this codebase (DepreciationRun.
-        execute()'s own select_for_update(), InvoiceSequence.
-        next_number()'s own select_for_update()). The second
-        concurrent request blocks here until the first one's
-        transaction commits (or rolls back), then re-checks status
-        and correctly sees POSTED, raising cleanly instead of racing.
+        8 Sep 2026 — real, explicit Opening Balance Equity plug
+        added, Chris and Aris's own confirmed hybrid design following
+        direct review against a real reference implementation:
+        JournalEntry.post() itself stays 100% strict — no hidden
+        balancing anywhere inside the engine, the "no mystery plug"
+        guarantee this whole system was built on is completely
+        unchanged. This orchestration layer is the ONE, deliberate,
+        visible place a variance is ever allocated — and only after
+        the frontend's own pre-commit review screen (backed by
+        compute_variance()/_build_line_specs() above) has already
+        shown Made this exact figure. Posts any variance to 3002
+        (Ekuitas Saldo Awal) — kept deliberately separate from 3001
+        (Owner Capital), so a real, explicit capital contribution
+        Made states himself is never silently mixed together with a
+        rounding/data-entry variance the system allocated on his
+        behalf.
         """
-        # Local imports — cross-app dependency, same established
-        # convention as every other cross-app reach in this codebase
-        # (WorkOrder.close()'s own ServiceRecord import, etc.).
         from apps.inventory.models import Part, StockAdjustment
 
         with transaction.atomic():
@@ -1344,24 +1087,6 @@ class OpeningBalanceSession(TenantScopedModel):
 
             self._validate_before_posting()
 
-            # Real gap found and fixed while writing this session's
-            # own test coverage, not caught during the original
-            # design review — Sansan's own approved §5 ("trigger
-            # ensure_period_for_org() synchronously at signup/
-            # posting time to bridge [start_date -> current_date]")
-            # was signed off but never actually implemented. Without
-            # this, a genuinely backdated start_date (the whole
-            # reason this design point existed at all) would hit
-            # assert_open_for_posting() below and fail with "no
-            # period covers this date" for every month between
-            # start_date and whatever period already happened to
-            # exist — exactly the Sep 1 period-gap incident this
-            # whole project already lived through once, reintroduced
-            # here if left unfixed. Loops inclusive of the CURRENT
-            # real month, not just up to start_date's own month —
-            # a shop backdating to January still needs every month
-            # since then open for posting, not just the one opening
-            # entry's own month.
             from apps.accounting.periods import ensure_period_for_org
             from django.utils import timezone
             today = timezone.now().date()
@@ -1375,73 +1100,58 @@ class OpeningBalanceSession(TenantScopedModel):
 
             AccountingPeriod.assert_open_for_posting(self.organization, self.start_date)
 
+            specs = self._build_line_specs()
             lines = []
 
-            for cash in self.cash_lines.all():
+            for spec in specs:
+                if "part_line" in spec:
+                    part_line = spec["part_line"]
+                    part = Part.objects.create(
+                        organization=self.organization, name=part_line.part_name,
+                        sku=part_line.sku, unit=part_line.unit,
+                        current_stock=Decimal("0"), cost_price=part_line.cost_price,
+                    )
+                    StockAdjustment.objects.create(
+                        organization=self.organization, part=part,
+                        quantity_change=part_line.quantity, reason="opening_balance",
+                        notes=f"Saldo awal — sesi {self.id}",
+                    )
+                    part_line.part = part
+                    part_line.save(update_fields=["part"])
+                elif "asset_line" in spec:
+                    asset_line = spec["asset_line"]
+                    asset = Asset.record(
+                        organization=self.organization, name=asset_line.name,
+                        acquisition_date=self.start_date, cost=asset_line.current_book_value,
+                        useful_life_months=asset_line.remaining_useful_life_months,
+                        created_by=posted_by, post_acquisition_entry=False,
+                    )
+                    asset_line.asset = asset
+                    asset_line.save(update_fields=["asset"])
+
                 lines.append({
-                    "account": Account.resolve(self.organization, cash.account_code),
-                    "debit": cash.amount,
-                    "description": "Saldo awal kas/bank",
+                    "account": Account.resolve(self.organization, spec["account_code"]),
+                    "debit": spec["debit"],
+                    "credit": spec["credit"],
+                    "description": spec["description"],
                 })
 
-            for part_line in self.part_lines.all():
-                part = Part.objects.create(
-                    organization=self.organization, name=part_line.part_name,
-                    sku=part_line.sku, unit=part_line.unit,
-                    current_stock=Decimal("0"), cost_price=part_line.cost_price,
-                )
-                StockAdjustment.objects.create(
-                    organization=self.organization, part=part,
-                    quantity_change=part_line.quantity, reason="opening_balance",
-                    notes=f"Saldo awal — sesi {self.id}",
-                )
-                part_line.part = part
-                part_line.save(update_fields=["part"])
-                amount = part_line.quantity * part_line.cost_price
-                if amount > Decimal("0"):
+            zero = Decimal("0")
+            total_debit  = sum((line["debit"] or zero) for line in lines)
+            total_credit = sum((line["credit"] or zero) for line in lines)
+            if total_debit != total_credit:
+                variance = abs(total_debit - total_credit)
+                plug_account = Account.resolve(self.organization, "3002")
+                if total_debit > total_credit:
                     lines.append({
-                        "account": Account.resolve(self.organization, "1301"),
-                        "debit": amount,
-                        "description": f"Saldo awal stok — {part.name}",
+                        "account": plug_account, "debit": None, "credit": variance,
+                        "description": "Selisih saldo awal — Ekuitas Saldo Awal",
                     })
-
-            for asset_line in self.asset_lines.all():
-                asset = Asset.record(
-                    organization=self.organization, name=asset_line.name,
-                    acquisition_date=self.start_date, cost=asset_line.current_book_value,
-                    useful_life_months=asset_line.remaining_useful_life_months,
-                    created_by=posted_by, post_acquisition_entry=False,
-                )
-                asset_line.asset = asset
-                asset_line.save(update_fields=["asset"])
-                lines.append({
-                    "account": Account.resolve(self.organization, "1401"),
-                    "debit": asset_line.current_book_value,
-                    "description": f"Saldo awal aset — {asset.name}",
-                })
-
-            for ar in self.receivable_lines.all():
-                lines.append({
-                    "account": Account.resolve(self.organization, "1201"),
-                    "debit": ar.balance_due,
-                    "description": f"Saldo awal piutang — {ar.customer.name}",
-                })
-
-            for ap in self.payable_lines.all():
-                lines.append({
-                    "account": Account.resolve(self.organization, "2001"),
-                    "credit": ap.balance_due,
-                    "description": f"Saldo awal utang — {ap.supplier.name}",
-                })
-
-            for other in self.other_lines.all():
-                account = Account.resolve(self.organization, other.account_code)
-                line = {"account": account, "description": other.description}
-                if other.side == OpeningBalanceOtherLine.Side.DEBIT:
-                    line["debit"] = other.amount
                 else:
-                    line["credit"] = other.amount
-                lines.append(line)
+                    lines.append({
+                        "account": plug_account, "debit": variance, "credit": None,
+                        "description": "Selisih saldo awal — Ekuitas Saldo Awal",
+                    })
 
             entry = JournalEntry.post(
                 organization=self.organization,
@@ -1452,7 +1162,6 @@ class OpeningBalanceSession(TenantScopedModel):
                 lines=lines,
             )
 
-            from django.utils import timezone
             self.status = self.Status.POSTED
             self.journal_entry = entry
             self.posted_at = timezone.now()
@@ -1463,11 +1172,6 @@ class OpeningBalanceSession(TenantScopedModel):
 
 
 class OpeningBalanceCashLine(TenantScopedModel):
-    """
-    A simple lump-sum line — Cash (1001) or Bank (1101) only,
-    Chris's own signed-off call: nothing subledger-shaped sits
-    underneath either account, so there's no real itemization to do.
-    """
     ACCOUNT_CHOICES = [("1001", "Kas"), ("1101", "Bank")]
 
     id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1483,9 +1187,6 @@ class OpeningBalanceCashLine(TenantScopedModel):
         verbose_name        = "Opening Balance Cash Line"
         verbose_name_plural  = "Opening Balance Cash Lines"
         unique_together      = [("session", "account_code")]
-        # At most one row per real account (1001, 1101) per session —
-        # a real cash/bank balance is a single number, not several
-        # competing entries for the same account.
 
     def __str__(self):
         return f"{self.account_code} — {self.amount}"
@@ -1495,14 +1196,6 @@ class OpeningBalanceCashLine(TenantScopedModel):
 
 
 class OpeningBalancePartLine(TenantScopedModel):
-    """
-    One itemized opening-stock line — Chris's own signed-off fix for
-    the exact "lump-sum Inventory with nothing real underneath it"
-    trap. Becomes a real Part (see OpeningBalanceSession.post()) the
-    moment the session posts; `part` is null until then, populated
-    afterward purely for real, honest audit traceability — never
-    fabricated before the real row actually exists.
-    """
     id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(
         OpeningBalanceSession, on_delete=models.CASCADE, related_name="part_lines",
@@ -1532,13 +1225,6 @@ class OpeningBalancePartLine(TenantScopedModel):
 
 
 class OpeningBalanceAssetLine(TenantScopedModel):
-    """
-    One itemized legacy Fixed Asset line. Deliberately asks for
-    current_book_value and remaining_useful_life_months — NOT the
-    asset's real original cost/useful_life — see this module's own
-    top-level docstring and Asset.record()'s own post_acquisition_
-    entry docstring for the full reasoning behind this reframing.
-    """
     id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(
         OpeningBalanceSession, on_delete=models.CASCADE, related_name="asset_lines",
@@ -1572,17 +1258,6 @@ class OpeningBalanceAssetLine(TenantScopedModel):
 
 
 class OpeningBalanceReceivable(TenantScopedModel):
-    """
-    A lightweight, dedicated opening-AR row — Sansan's own Option B
-    call: a legacy unpaid customer bill from before the shop used
-    Arthasee is a genuinely different shape than a real, operational
-    Invoice (no ServiceRecord origin, no line items, no mechanic
-    snapshot requirement), and forcing it through that full schema
-    would be a round peg in a square hole. reports.aging_ar() and
-    dashboard_financial_summary() are expected to UNION these in
-    alongside real Invoice rows — a separate, deliberate follow-up,
-    not part of this models-and-migration step.
-    """
     id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(
         OpeningBalanceSession, on_delete=models.CASCADE, related_name="receivable_lines",
@@ -1610,8 +1285,6 @@ class OpeningBalanceReceivable(TenantScopedModel):
 
 
 class OpeningBalancePayable(TenantScopedModel):
-    """Mirrors OpeningBalanceReceivable exactly, inverted — a
-    legacy unpaid supplier bill from before onboarding."""
     id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(
         OpeningBalanceSession, on_delete=models.CASCADE, related_name="payable_lines",
@@ -1639,16 +1312,6 @@ class OpeningBalancePayable(TenantScopedModel):
 
 
 class OpeningBalanceOtherLine(TenantScopedModel):
-    """
-    The deliberate, honest escape hatch — Sansan's own "no mystery
-    plug" doctrine means this is NOT a free-text balancing field; it
-    is a real account code and a real, explicit side (debit or
-    credit), resolved through the exact same Account.resolve() every
-    other line in this system uses. This is where Owner Capital
-    itself lands (the real balancing entry an owner explicitly
-    states, not one this system silently invents), along with real
-    but non-itemizable categories like Loans or Tax Payable.
-    """
     class Side(models.TextChoices):
         DEBIT  = "debit", "Debit"
         CREDIT = "credit", "Kredit"
