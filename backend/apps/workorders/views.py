@@ -881,7 +881,18 @@ class DashboardSummaryView(TenantScopedAPIView):
         # ever touches a DONE WorkOrder again after that point.
 
         queued = WorkOrder.objects.filter(organization=org, status="OPEN").count()
-        in_progress_qs = WorkOrder.objects.filter(organization=org, status="IN_PROGRESS").select_related("vehicle")
+        # 8 Sep 2026 — real fix: was status="IN_PROGRESS" only. This
+        # queryset feeds BOTH the in_progress count AND the
+        # overdue_work_orders list below — WorkOrder.is_overdue
+        # itself was already correctly QC-aware (see that property's
+        # own docstring in models.py), but a QC-status WorkOrder
+        # never reached it at all, filtered out one step earlier
+        # right here. Made's own confirmed call: QC still occupies a
+        # bay and real shop capacity, so it belongs under
+        # "Dikerjakan" (in_progress), same as IN_PROGRESS, and a
+        # vehicle stuck in QC past its promised time must surface on
+        # the overdue alert exactly like an IN_PROGRESS one does.
+        in_progress_qs = WorkOrder.objects.filter(organization=org, status__in=("IN_PROGRESS", "QC")).select_related("vehicle")
         in_progress = in_progress_qs.count()
 
         # is_overdue is a Python property, not a DB column — filtered
