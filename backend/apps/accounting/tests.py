@@ -19,6 +19,25 @@ elsewhere in this file — daily_cash_activity() reads the ledger, it
 doesn't care what produced it, so this tests the report function in
 isolation rather than requiring the full domain-event fixture chains
 (Invoice/WorkOrder/etc.) each real event type would otherwise need.
+
+8 Sep 2026 — real, widespread fixup following Account.
+is_control_account's promotion from a soft view-layer warning into a
+hard, engine-level block inside JournalEntry.post() (see that
+method's own docstring): many existing tests across this file used
+1201 (AR) / 1301 (Inventory) / 2001 (AP) as convenient "any two
+accounts" fixtures for testing unrelated mechanics (balance math,
+pagination, report date-ranges) — written before control accounts
+existed. Two real fix shapes, applied precisely per test, never
+uniformly:
+  - Tests that don't care about `source` at all: changed MANUAL to
+    DOMAIN_EVENT — arguably more realistic anyway, since a real
+    posting to AR/Inventory/AP almost always comes from a domain
+    event, never a hand-typed manual journal.
+  - Tests that specifically test MANUAL-journal behavior (locked-
+    period bypass, the control-account block itself, source-based
+    filtering): kept MANUAL, swapped the account for a real,
+    non-control one instead — changing `source` there would have
+    defeated the actual point of the test.
 """
 import uuid
 from datetime import date, timedelta
@@ -79,7 +98,10 @@ class SeedCoaTests(TestCase):
 
     def test_seed_creates_every_standard_account(self):
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        self.assertEqual(Account.objects.filter(organization=self.org).count(), 26)
+        # 8 Sep 2026 — 26 -> 27: account 3002 (Ekuitas Saldo Awal)
+        # added this review, the real dedicated target for
+        # OpeningBalanceSession.post()'s own explicit variance plug.
+        self.assertEqual(Account.objects.filter(organization=self.org).count(), 27)
         # A handful of specific codes, not just the count — the count
         # alone wouldn't catch a wrong code silently replacing a real
         # one from the Roadmap v2.2 COA Blueprint.
@@ -103,7 +125,9 @@ class SeedCoaTests(TestCase):
 
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
 
-        self.assertEqual(Account.objects.filter(organization=self.org).count(), 26)
+        # 8 Sep 2026 — 26 -> 27, same reason as test_seed_creates_
+        # every_standard_account above.
+        self.assertEqual(Account.objects.filter(organization=self.org).count(), 27)
         account_1001.refresh_from_db()
         self.assertEqual(account_1001.name, "Kas (Customized)")
 
@@ -207,10 +231,14 @@ class JournalEntryPostTests(TestCase):
             )
 
     def test_entry_numbers_increment_per_organization(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this test proves entry
+        # numbering, not manual-journal semantics; 1301 (Inventory)
+        # is a real control account as of this review and would
+        # otherwise reject a MANUAL posting here.
         for _ in range(3):
             JournalEntry.post(
                 organization=self.org, posting_date=date(2026, 8, 7),
-                source=JournalEntry.Source.MANUAL,
+                source=JournalEntry.Source.DOMAIN_EVENT,
                 lines=[
                     {"account": self.wip, "debit": Decimal("1000")},
                     {"account": self.inventory, "credit": Decimal("1000")},
@@ -228,14 +256,16 @@ class JournalEntryPostTests(TestCase):
         other_wip = Account.objects.get(organization=other_org, code="1302")
         other_inv = Account.objects.get(organization=other_org, code="1301")
 
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as
+        # test_entry_numbers_increment_per_organization above.
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 8, 7),
-            source=JournalEntry.Source.MANUAL,
+            source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.wip, "debit": Decimal("1000")}, {"account": self.inventory, "credit": Decimal("1000")}],
         )
         other_entry = JournalEntry.post(
             organization=other_org, posting_date=date(2026, 8, 7),
-            source=JournalEntry.Source.MANUAL,
+            source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": other_wip, "debit": Decimal("1000")}, {"account": other_inv, "credit": Decimal("1000")}],
         )
         self.assertEqual(other_entry.entry_number, "000001")
@@ -254,30 +284,35 @@ class AccountBalanceTests(TestCase):
         self.ap = Account.objects.get(organization=self.org, code="2001")    # credit-normal
 
     def test_debit_normal_account_increases_with_debit(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this test proves
+        # balance-direction math, not manual-journal semantics; 2001
+        # (AP) is a real control account as of this review.
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 8, 7),
-            source=JournalEntry.Source.MANUAL,
+            source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
         )
         self.assertEqual(self.cash.balance(), Decimal("500000"))
 
     def test_credit_normal_account_increases_with_credit(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 8, 7),
-            source=JournalEntry.Source.MANUAL,
+            source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
         )
         self.assertEqual(self.ap.balance(), Decimal("500000"))
 
     def test_balance_as_of_excludes_later_postings(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 1, 10),
-            source=JournalEntry.Source.MANUAL,
+            source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
         )
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 8, 7),
-            source=JournalEntry.Source.MANUAL,
+            source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("50000")}, {"account": self.ap, "credit": Decimal("50000")}],
         )
         self.assertEqual(self.cash.balance(as_of=date(2026, 2, 1)), Decimal("100000"))
@@ -597,7 +632,14 @@ class AccountingPeriodLockTests(TestCase):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.wip       = Account.objects.get(organization=self.org, code="1302")
-        self.inventory = Account.objects.get(organization=self.org, code="1301")
+        # 8 Sep 2026 — real fix: was code="1301" (Inventory), now a
+        # real control account. This class's own
+        # test_posting_into_locked_period_is_allowed_for_manual_journals
+        # specifically needs a MANUAL entry to succeed — swapped to
+        # 2010 (Accrued Inventory), a real, non-control, credit-normal
+        # account, rather than changing that test's own source (which
+        # would defeat the entire point of what it's proving).
+        self.inventory = Account.objects.get(organization=self.org, code="2010")
         # The one period seed_coa's own widened scope just created —
         # see apps.accounting.periods.ensure_current_month_period().
         self.period = AccountingPeriod.objects.get(organization=self.org, year=date.today().year, month=date.today().month)
@@ -728,13 +770,18 @@ class FinancialReportingTests(TestCase):
         self.assertEqual(data["total_debit"], data["total_credit"])
 
     def test_profit_and_loss_computes_net_income(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT for the AR-touching
+        # postings: this test proves P&L math, not manual-journal
+        # semantics; 1201 (AR) is a real control account as of this
+        # review. The third posting (expense/cash) never touched AR
+        # and stays MANUAL, unaffected.
         period_start = date(date.today().year, 1, 1)
         JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
         )
         JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cogs, "debit": Decimal("300000")}, {"account": self.ar, "credit": Decimal("300000")}],
         )
         JournalEntry.post(
@@ -759,13 +806,16 @@ class FinancialReportingTests(TestCase):
         AccountingPeriod (period-locking and report-range filtering
         are correctly independent concerns).
         """
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: proves date-range
+        # filtering, not manual-journal semantics; 1201 (AR) is a
+        # real control account as of this review.
         year = date.today().year
         JournalEntry.post(
-            organization=self.org, posting_date=date(year, 1, 15), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(year, 1, 15), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("100000")}, {"account": self.revenue, "credit": Decimal("100000")}],
         )
         JournalEntry.post(
-            organization=self.org, posting_date=date(year, 6, 1), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(year, 6, 1), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("999999")}, {"account": self.revenue, "credit": Decimal("999999")}],
         )
 
@@ -924,22 +974,29 @@ class CashConversionCycleTests(TestCase):
         self.revenue   = Account.objects.get(organization=self.org, code="4001")
 
     def test_ccc_matches_hand_verified_scenario(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT for all three postings:
+        # this test proves CCC math, not manual-journal semantics —
+        # 1301/2001/1201 are all real control accounts as of this
+        # review, and the specific accounts here are semantically
+        # required by the DIO/DSO/DPO calculation itself, so they
+        # could not be swapped out the way other tests' generic
+        # fixtures were.
         since = date(2026, 1, 1)
         as_of = date(2026, 1, 31)  # 30 days
 
         # Buy 500k of inventory on credit
         JournalEntry.post(
-            organization=self.org, posting_date=since, source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=since, source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.inventory, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
         )
         # 300k of that inventory becomes COGS
         JournalEntry.post(
-            organization=self.org, posting_date=since, source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=since, source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cogs, "debit": Decimal("300000")}, {"account": self.inventory, "credit": Decimal("300000")}],
         )
         # A 1,000,000 sale on credit
         JournalEntry.post(
-            organization=self.org, posting_date=since, source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=since, source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
         )
 
@@ -979,14 +1036,17 @@ class ProfitAndLossComparisonTests(TestCase):
         self.revenue = Account.objects.get(organization=self.org, code="4001")
 
     def test_compares_current_period_against_the_immediately_preceding_one(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this test proves
+        # period-comparison math, not manual-journal semantics; 1201
+        # (AR) is a real control account as of this review.
         # Prior period: Jan 1-15 (15 days) -- 500,000 revenue
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 10), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 10), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
         )
         # Current period: Jan 16-30 (15 days) -- 1,000,000 revenue, exactly double
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 20), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 20), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
         )
 
@@ -1001,8 +1061,9 @@ class ProfitAndLossComparisonTests(TestCase):
         revenue must render as "—" on the frontend, not crash on
         division by zero or show a misleading infinite percentage.
         """
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 20), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 20), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
         )
         data = reports.profit_and_loss_comparison(self.org, since=date(2026, 1, 16), as_of=date(2026, 1, 30))
@@ -1328,10 +1389,11 @@ class ManualJournalAPITests(APITestCase):
     """
     Task 4.4 — proves the authorization gate, the reason requirement,
     balance validation surfacing cleanly through the API, the
-    control-account warning, and — the real payoff of Task 4.3's own
-    locked-vs-closed distinction — a manual journal actually posting
-    through a locked period via a real HTTP call, not just a direct
-    model call this time.
+    control-account HARD BLOCK (8 Sep 2026 — promoted from a soft
+    warning; see JournalEntry.post()'s own docstring), and — the real
+    payoff of Task 4.3's own locked-vs-closed distinction — a manual
+    journal actually posting through a locked period via a real HTTP
+    call, not just a direct model call this time.
     """
 
     def setUp(self):
@@ -1356,9 +1418,15 @@ class ManualJournalAPITests(APITestCase):
         return self.client.post("/api/accounting/manual-journals/", {
             "posting_date": str(date.today()),
             "reason": reason,
+            # 8 Sep 2026 — real fix: default credit target was 1301
+            # (Inventory), now a real control account. Swapped to
+            # 2010 (Accrued Inventory) — a real, non-control account
+            # — so this default pair keeps working as the generic
+            # "any two valid accounts" fixture most tests here rely
+            # on it for.
             "lines": lines or [
                 {"account_code": "5003", "debit": "50000"},
-                {"account_code": "1301", "credit": "50000"},
+                {"account_code": "2010", "credit": "50000"},
             ],
         }, format="json")
 
@@ -1384,22 +1452,35 @@ class ManualJournalAPITests(APITestCase):
         ])
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_touching_ar_returns_warning(self):
+    def test_touching_ar_returns_a_clean_400_naming_the_control_account(self):
         """
-        The real proof of the "warn, don't block" decision — a
-        legitimate manual AR write-off still succeeds, but the
-        response makes clear a control account was touched directly.
+        8 Sep 2026 — real, deliberate rewrite. Was
+        test_touching_ar_returns_warning, proving the OLD "warn,
+        don't block" behavior (a manual AR write-off succeeded with a
+        warning in the response) — that behavior is gone. The
+        control-account guard was promoted from a soft, view-layer
+        warning into a hard, engine-level block inside
+        JournalEntry.post() itself, following a direct review with a
+        professional accountant against a real reference
+        implementation: a control account's balance must always
+        equal its own subledger total, which a hand-typed manual
+        entry could otherwise silently break. This is now the real,
+        correct proof of that block, not the old warning.
         """
         resp = self._post(reason="Penghapusan piutang macet", lines=[
             {"account_code": "6005", "debit": "100000"},
             {"account_code": "1201", "credit": "100000"},
         ])
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertIn("warning", resp.data)
-        self.assertIn("1201", resp.data["warning"])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("1201", resp.data["message"])
 
     def test_manual_journal_not_touching_control_accounts_has_no_warning(self):
-        resp = self._post()  # 5003/1301 — neither is a control account
+        # 8 Sep 2026 — the shared _post() helper's own default lines
+        # were updated (5003/1301 -> 5003/2010) since 1301 is now a
+        # real control account — this test's own comment ("neither is
+        # a control account") is still accurate against the NEW
+        # defaults, just no longer literally 5003/1301.
+        resp = self._post()  # 5003/2010 — neither is a control account
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertNotIn("warning", resp.data)
 
@@ -1472,7 +1553,12 @@ class JournalEntryAndFailedPostingsAPITests(APITestCase):
         self.client.force_authenticate(user=self.owner)
 
         self.wip       = Account.objects.get(organization=self.org, code="1302")
-        self.inventory = Account.objects.get(organization=self.org, code="1301")
+        # 8 Sep 2026 — real fix: was code="1301" (Inventory), now a
+        # real control account. This class's own tests below
+        # specifically prove MANUAL-source filtering/listing — kept
+        # source=MANUAL where that's the point, swapped to 2010
+        # (Accrued Inventory, non-control) here instead.
+        self.inventory = Account.objects.get(organization=self.org, code="2010")
 
     def _post(self, source):
         return JournalEntry.post(
@@ -1506,7 +1592,7 @@ class JournalEntryAndFailedPostingsAPITests(APITestCase):
         resp = self.client.get("/api/accounting/journal-entries/")
         lines = resp.data["journal_entries"][0]["lines"]
         self.assertEqual(len(lines), 2)
-        self.assertEqual({l["account_code"] for l in lines}, {"1301", "1302"})
+        self.assertEqual({l["account_code"] for l in lines}, {"2010", "1302"})
 
     def test_journal_entries_scoped_to_organization(self):
         self._post(JournalEntry.Source.MANUAL)
@@ -1832,9 +1918,12 @@ class AccountingPeriodCloseTests(TestCase):
         self.assertIsNotNone(period.closed_at)
 
     def test_close_posts_real_pl_entry_and_updates_retained_earnings(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this test proves the
+        # close() pipeline, not manual-journal semantics; 1201 (AR)
+        # is a real control account as of this review.
         self._close_prior_months(3)
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 3, 10), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 3, 10), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("2000000")}, {"account": self.revenue, "credit": Decimal("2000000")}],
         )
         period = self._period(3)
@@ -1868,8 +1957,11 @@ class AccountingPeriodCloseTests(TestCase):
             organization=self.org, name="Kompresor", acquisition_date=date(2026, 1, 15),
             cost=Decimal("1000000"), useful_life_months=3,
         )
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as
+        # test_close_posts_real_pl_entry_and_updates_retained_earnings
+        # above.
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 2, 10), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 2, 10), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal("1000000")}, {"account": self.revenue, "credit": Decimal("1000000")}],
         )
         self._close_prior_months(2)
@@ -2004,13 +2096,14 @@ class DailyCashActivityReportTests(TestCase):
     """
     2 Sep 2026 — real coverage for reports.daily_cash_activity(),
     closing a genuine gap: the function shipped same-day as the Kas
-    Harian dashboard (built in direct response to the Sep 1 period-
-    gap incident) with zero automated coverage. Posts directly via
+    Harian dashboard (built in response to a real production
+    incident) with zero automated coverage. Posts directly via
     JournalEntry.post() with real event_type/memo values, same style
-    as FinancialReportingTests above — this function reads the
-    ledger, it doesn't care what produced it, so no domain-event
-    fixture chains (Invoice/WorkOrder/etc.) are needed to prove its
-    own real logic.
+    as FinancialReportingTests above — daily_cash_activity() reads
+    the ledger, it doesn't care what produced it, so this tests the
+    report function in isolation rather than requiring the full
+    domain-event fixture chains (Invoice/WorkOrder/etc.) each real
+    event type would otherwise need.
     """
 
     def setUp(self):
@@ -2145,11 +2238,19 @@ class DailyCashActivityReportTests(TestCase):
         _CASH_ACTIVITY_CATEGORY_LABELS) must still show up honestly,
         not crash or vanish — falls back to "Lainnya."
         """
+        # 8 Sep 2026 — real fix: self.ar (1201) is now a real control
+        # account and cannot receive a MANUAL posting — but source=
+        # MANUAL is exactly what this test is proving falls back to
+        # "Lainnya," so it can't be changed. Swapped the credit target
+        # to 3001 (Owner Capital), a real, non-control account, local
+        # to this one test only — self.ar stays untouched for every
+        # other test in this class, all of which post via DOMAIN_EVENT.
+        owner_capital = Account.objects.get(organization=self.org, code="3001")
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 5, 1),
             source=JournalEntry.Source.MANUAL,
             memo="Penyesuaian kas",
-            lines=[{"account": self.cash, "debit": Decimal("50000")}, {"account": self.ar, "credit": Decimal("50000")}],
+            lines=[{"account": self.cash, "debit": Decimal("50000")}, {"account": owner_capital, "credit": Decimal("50000")}],
         )
         data = reports.daily_cash_activity(self.org, on_date=date(2026, 5, 1))
         self.assertEqual(data["activities"][0]["category"], "Lainnya")
@@ -2230,6 +2331,18 @@ implemented in the original build. OpeningBalanceSession.post() now
 includes that backfill loop (see models.py) — the fix that made
 test_backfills_periods_from_start_date_through_today below possible
 to write honestly, rather than skipped or faked.
+
+8 Sep 2026 — a second real design gap, found by
+test_unbalanced_session_rejected_with_400/
+test_unbalanced_session_rolls_back_everything_no_mystery_plug
+themselves, immediately after the Opening Balance Equity plug first
+shipped: OpeningBalanceSession.post() gained a real, required
+`confirm_variance` parameter (default False) — an unbalanced session
+is REJECTED by default, only proceeding (with the real, visible 3002
+plug) once a caller explicitly confirms. Neither test below needed
+editing for this — both already called post() with no confirm_
+variance argument, which is exactly the "reject by default" case;
+they now pass again for the reason they were always meant to.
 """
 
 def _months_before_today(n):
@@ -2520,6 +2633,14 @@ class OpeningBalanceSessionPostTests(OpeningBalanceTestBase):
         Part, no StockAdjustment, no Asset, no JournalEntry — the
         entire operation rolls back as one atomic unit, not a
         partial success.
+
+        8 Sep 2026 — still true and still the right assertion even
+        after the Opening Balance Equity plug shipped: this call
+        never passes confirm_variance, so OpeningBalanceSession.
+        post() rejects the imbalance outright, before ever reaching
+        the plug logic at all — the plug only ever activates once a
+        caller has explicitly confirmed, which this test deliberately
+        never does.
         """
         OpeningBalancePartLine.objects.create(
             organization=self.org, session=self.session, part_name="Busi NGK",
@@ -2631,6 +2752,29 @@ class OpeningBalanceSessionPostTests(OpeningBalanceTestBase):
         self.assertEqual(self.session.journal_entry_id, entry.id)
         self.assertIsNotNone(self.session.posted_at)
         self.assertEqual(self.session.posted_by_id, self.owner.id)
+
+    def test_unbalanced_session_succeeds_with_explicit_confirm_variance(self):
+        """
+        8 Sep 2026 — new, real coverage for the confirmation path
+        itself — the OTHER half of the design this review's own
+        hybrid Opening Balance Equity plug requires. An unbalanced
+        session that IS explicitly confirmed must succeed, with the
+        real variance visibly plugged to 3002 (Ekuitas Saldo Awal),
+        never silently, and never to 3001 (Owner Capital).
+        """
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=self.session, account_code="1001", amount=Decimal("700000"),
+        )
+        # Deliberately no balancing line — a genuine Rp700.000 variance.
+
+        entry = self.session.post(posted_by=self.owner, confirm_variance=True)
+
+        plug_account = Account.objects.get(organization=self.org, code="3002")
+        self.assertEqual(plug_account.balance(), Decimal("700000.00"))
+        self.assertEqual(entry.lines.count(), 2)
+
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.status, OpeningBalanceSession.Status.POSTED)
 
 
 class OpeningBalanceReportsUnionTests(OpeningBalanceTestBase):
@@ -2972,6 +3116,102 @@ class OpeningBalancePostAPITests(APITestCase):
         resp = self.client.post("/api/accounting/opening-balance/post/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_unbalanced_session_succeeds_via_api_with_confirm_variance(self):
+        """
+        8 Sep 2026 — new, real coverage for the API-level confirmation
+        path — mirrors OpeningBalanceSessionPostTests.test_unbalanced_
+        session_succeeds_with_explicit_confirm_variance at the HTTP
+        layer, same discipline as every other model-vs-API test pair
+        in this file.
+        """
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "600000"}, format="json")
+        resp = self.client.post("/api/accounting/opening-balance/post/", {"confirm_variance": True}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["opening_balance_session"]["status"], "POSTED")
+
+        plug_account = Account.objects.get(organization=self.org, code="3002")
+        self.assertEqual(plug_account.balance(), Decimal("600000.00"))
+
+
+class OpeningBalancePreviewAPITests(APITestCase):
+    """
+    8 Sep 2026 — real coverage for GET /api/accounting/opening-
+    balance/preview/, the pre-commit review gate Chris/Aris's own
+    confirmed hybrid design requires. Own dedicated class, matching
+    this file's own "one class per real endpoint" convention.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.obpreview@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.client.post("/api/accounting/opening-balance/", {"start_date": str(date.today())}, format="json")
+
+    def test_balanced_session_shows_zero_variance(self):
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+        self.client.post("/api/accounting/opening-balance/other/", {
+            "account_code": "3001", "side": "credit", "amount": "500000",
+        }, format="json")
+
+        resp = self.client.get("/api/accounting/opening-balance/preview/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["is_balanced"])
+        self.assertEqual(resp.data["variance"], Decimal("0"))
+        self.assertIsNone(resp.data["plug_side"])
+        self.assertIsNone(resp.data["plug_account_code"])
+
+    def test_unbalanced_session_names_the_real_plug_side_and_account(self):
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+
+        resp = self.client.get("/api/accounting/opening-balance/preview/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data["is_balanced"])
+        self.assertEqual(resp.data["variance"], Decimal("500000"))
+        self.assertEqual(resp.data["plug_side"], "credit")
+        self.assertEqual(resp.data["plug_account_code"], "3002")
+
+    def test_preview_creates_and_posts_nothing(self):
+        """
+        Real, deliberate proof preview() is genuinely read-only —
+        safe to call any number of times with zero side effects.
+        """
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+
+        self.client.get("/api/accounting/opening-balance/preview/")
+        self.client.get("/api/accounting/opening-balance/preview/")
+
+        self.assertFalse(JournalEntry.objects.filter(organization=self.org).exists())
+        session = OpeningBalanceSession.objects.get(organization=self.org)
+        self.assertEqual(session.status, OpeningBalanceSession.Status.DRAFT)
+
+    def test_blocked_once_session_is_posted(self):
+        self.client.put("/api/accounting/opening-balance/cash/", {"account_code": "1001", "amount": "500000"}, format="json")
+        self.client.post("/api/accounting/opening-balance/other/", {
+            "account_code": "3001", "side": "credit", "amount": "500000",
+        }, format="json")
+        self.client.post("/api/accounting/opening-balance/post/")
+
+        resp = self.client.get("/api/accounting/opening-balance/preview/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_returns_404_when_no_session_exists(self):
+        other_org = Organization.objects.create(name="Bengkel Lain OB Preview")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.obpreview@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/opening-balance/preview/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
 
 # =============================================================================
 # General Ledger (Buku Besar) — 4 Sep 2026
@@ -2995,16 +3235,23 @@ class GeneralLedgerReportTests(TestCase):
         self.ap   = Account.objects.get(organization=self.org, code="2001")  # credit-normal
 
     def test_running_balance_accumulates_correctly_with_no_since(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT throughout this class:
+        # every test here proves general-ledger REPORTING mechanics
+        # (running balance, pagination, opening balance), never
+        # manual-journal semantics specifically; 2001 (AP) is a real
+        # control account as of this review. The one exception —
+        # test_manual_entry_has_no_reference_event_id, further below
+        # — genuinely needs source=MANUAL and is fixed differently.
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 5), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 5), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
         )
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 10), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 10), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("200000")}, {"account": self.ap, "credit": Decimal("200000")}],
         )
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 15), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 15), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ap, "debit": Decimal("50000")}, {"account": self.cash, "credit": Decimal("50000")}],
         )
 
@@ -3020,12 +3267,13 @@ class GeneralLedgerReportTests(TestCase):
         self.assertEqual(data["total_credit"], Decimal("50000"))
 
     def test_opening_balance_reflects_real_balance_before_since_date(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 5), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 5), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
         )
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 1, 15), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 1, 15), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
         )
 
@@ -3041,12 +3289,13 @@ class GeneralLedgerReportTests(TestCase):
         self.assertEqual(data["closing_balance"], Decimal("600000"))
 
     def test_credit_normal_account_running_balance_direction(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 2, 5), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 2, 5), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("300000")}, {"account": self.ap, "credit": Decimal("300000")}],
         )
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 2, 10), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 2, 10), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ap, "debit": Decimal("100000")}, {"account": self.cash, "credit": Decimal("100000")}],
         )
 
@@ -3065,9 +3314,10 @@ class GeneralLedgerReportTests(TestCase):
         page 2 must CONTINUE from there (300000/400000), not restart
         from zero just because it's a fresh queryset slice.
         """
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         for day in range(1, 6):
             JournalEntry.post(
-                organization=self.org, posting_date=date(2026, 3, day), source=JournalEntry.Source.MANUAL,
+                organization=self.org, posting_date=date(2026, 3, day), source=JournalEntry.Source.DOMAIN_EVENT,
                 lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
             )
 
@@ -3084,8 +3334,9 @@ class GeneralLedgerReportTests(TestCase):
         self.assertEqual(page2["closing_balance"], Decimal("500000"))
 
     def test_line_description_falls_back_to_entry_memo_when_blank(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 4, 1), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 4, 1), source=JournalEntry.Source.DOMAIN_EVENT,
             memo="Manual Adjustment",
             lines=[
                 {"account": self.cash, "debit": Decimal("1000"), "description": "Custom line text"},
@@ -3129,9 +3380,18 @@ class GeneralLedgerReportTests(TestCase):
         self.assertEqual(data["rows"][0]["event_type"], "PaymentReceived")
 
     def test_manual_entry_has_no_reference_event_id(self):
+        """
+        8 Sep 2026 — real fix: this test SPECIFICALLY proves a MANUAL
+        entry has no reference_event_id, so source cannot be changed
+        here (unlike every other test in this class). Swapped the
+        credit target from self.ap (2001, now control) to 2010
+        (Accrued Inventory), a real, non-control account — local to
+        this one test only.
+        """
+        accrued = Account.objects.get(organization=self.org, code="2010")
         JournalEntry.post(
             organization=self.org, posting_date=date(2026, 5, 1), source=JournalEntry.Source.MANUAL,
-            lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
+            lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": accrued, "credit": Decimal("1000")}],
         )
         data = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 5, 31))
         self.assertIsNone(data["rows"][-1]["reference_event_id"])
@@ -3145,8 +3405,11 @@ class GeneralLedgerReportTests(TestCase):
         to call it with, the new single-entry detail endpoint would
         have had nothing valid to look up from Buku Besar's own rows.
         """
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as the
+        # rest of this class — this test proves entry_id is carried
+        # through, not manual-journal semantics.
         entry = JournalEntry.post(
-            organization=self.org, posting_date=date(2026, 6, 1), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date(2026, 6, 1), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
         )
         data = reports.general_ledger(self.org, account_code="1001", as_of=date(2026, 6, 30))
@@ -3329,8 +3592,11 @@ class GeneralLedgerAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_valid_request_returns_expected_shape(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this test proves the
+        # endpoint's own response shape, not manual-journal semantics;
+        # 2001 (AP) is a real control account as of this review.
         JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("100000")}, {"account": self.ap, "credit": Decimal("100000")}],
         )
         resp = self.client.get("/api/accounting/general-ledger/?account=1001")
@@ -3349,8 +3615,9 @@ class GeneralLedgerAPITests(APITestCase):
         self.assertEqual(resp.data["page_size"], 200)
 
     def test_scoped_to_organization(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.ap, "credit": Decimal("500000")}],
         )
         other_org = Organization.objects.create(name="Bengkel Lain General Ledger")
@@ -3392,8 +3659,12 @@ class JournalEntryDetailAPITests(APITestCase):
         self.ap   = Account.objects.get(organization=self.org, code="2001")
 
     def test_returns_the_real_entry_with_every_line(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this test proves the
+        # detail endpoint's own response shape, not manual-journal
+        # semantics; 2001 (AP) is a real control account as of this
+        # review.
         entry = JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             memo="Test entry", lines=[
                 {"account": self.cash, "debit": Decimal("1000")},
                 {"account": self.ap, "credit": Decimal("1000")},
@@ -3410,8 +3681,9 @@ class JournalEntryDetailAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_scoped_to_organization(self):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT, same reasoning as above.
         entry = JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
         )
         other_org = Organization.objects.create(name="Bengkel Lain JE Detail")
@@ -3444,8 +3716,12 @@ class ProfitAndLossTrendReportTests(TestCase):
         self.revenue = Account.objects.get(organization=self.org, code="4001")
 
     def _post_revenue(self, on_date, amount):
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this shared helper
+        # feeds every test in this class, none of which test manual-
+        # journal semantics specifically; 1201 (AR) is a real control
+        # account as of this review.
         JournalEntry.post(
-            organization=self.org, posting_date=on_date, source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=on_date, source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.ar, "debit": Decimal(amount)}, {"account": self.revenue, "credit": Decimal(amount)}],
         )
 
@@ -3585,8 +3861,15 @@ class AccountingAdminLockdownTests(TestCase):
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
         self.cash = Account.objects.get(organization=self.org, code="1001")
         self.ap = Account.objects.get(organization=self.org, code="2001")
+        # 8 Sep 2026 — MANUAL -> DOMAIN_EVENT: this shared fixture
+        # entry is only ever referenced as a whole (self.entry) by
+        # every test below, none of which test manual-journal
+        # semantics specifically; 2001 (AP) is a real control account
+        # as of this review. self.cash is still directly asserted by
+        # name in test_account_admin_locks_code_and_type_but_allows_name
+        # below and is completely unaffected by this change.
         self.entry = JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": self.cash, "debit": Decimal("1000")}, {"account": self.ap, "credit": Decimal("1000")}],
         )
 
