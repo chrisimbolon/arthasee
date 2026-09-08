@@ -125,6 +125,14 @@ class WorkOrderQueueStatusTests(GrowthAnalyticsTestBase):
 
 
 class RevenueTrendTests(GrowthAnalyticsTestBase):
+    """
+    8 Sep 2026 — MANUAL -> DOMAIN_EVENT throughout this class: every
+    test here proves revenue-trend bucketing/projection math, not
+    manual-journal semantics; 1201 (AR) is a real control account as
+    of the accounting review that added Account.is_control_account
+    (see apps.accounting.tests's own module docstring for the full
+    reasoning behind this fix shape).
+    """
 
     def test_buckets_by_month_and_zero_fills_quiet_months(self):
         revenue = Account.objects.get(organization=self.org, code="4001")
@@ -132,11 +140,11 @@ class RevenueTrendTests(GrowthAnalyticsTestBase):
 
         JournalEntry.post(
             organization=self.org, posting_date=_shift_month(date.today(), -2),
-            source=JournalEntry.Source.MANUAL,
+            source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": ar, "debit": Decimal("100000")}, {"account": revenue, "credit": Decimal("100000")}],
         )
         JournalEntry.post(
-            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
             lines=[{"account": ar, "debit": Decimal("50000")}, {"account": revenue, "credit": Decimal("50000")}],
         )
 
@@ -153,7 +161,7 @@ class RevenueTrendTests(GrowthAnalyticsTestBase):
         for i, amount in enumerate([Decimal("100000"), Decimal("200000"), Decimal("300000")]):
             JournalEntry.post(
                 organization=self.org, posting_date=_shift_month(date.today(), -(2 - i)),
-                source=JournalEntry.Source.MANUAL,
+                source=JournalEntry.Source.DOMAIN_EVENT,
                 lines=[{"account": ar, "debit": amount}, {"account": revenue, "credit": amount}],
             )
         result = growth.revenue_trend(self.org, months=3)
@@ -178,7 +186,7 @@ class RevenueTrendTests(GrowthAnalyticsTestBase):
         for i, amount in enumerate([Decimal("150000"), Decimal("300000")]):
             JournalEntry.post(
                 organization=self.org, posting_date=_shift_month(date.today(), -(1 - i)),
-                source=JournalEntry.Source.MANUAL,
+                source=JournalEntry.Source.DOMAIN_EVENT,
                 lines=[{"account": ar, "debit": amount}, {"account": revenue, "credit": amount}],
             )
         result = growth.revenue_trend(self.org, months=6)
