@@ -244,22 +244,17 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
                 from apps.core.events.bus import default_bus
                 from apps.invoicing.events import InvoiceCancelled
 
+                # 8 Sep 2026 — real fix: cancelled_by was never passed
+                # here at all, so cancellations.reverse_for_event()'s
+                # own real actor-resolution logic (already correct —
+                # see its own dedicated coverage) had nothing to
+                # resolve, and every real, HTTP-triggered cancellation
+                # reversal landed with created_by=None regardless of
+                # who actually clicked cancel.
                 default_bus.publish(InvoiceCancelled(
                     organization_id=invoice.organization_id,
                     invoice_id=invoice.id,
                     issued_event_id=invoice.issued_event_id,
-                    # 6 Sep 2026 — real audit-trail fix (Sansan's own
-                    # "who performed this reversal" question, Q57):
-                    # this event previously carried no actor at all.
-                    # request.user is always a real, authenticated
-                    # user here (this view requires authentication,
-                    # same as every TenantScopedAPIView) — safe to
-                    # thread through unconditionally, no role-based
-                    # special-casing needed. See
-                    # InvoiceCancelled.cancelled_by's own docstring
-                    # and apps.accounting.cancellations._resolve_actor()
-                    # for how this gets turned back into a real
-                    # created_by on the reversal JournalEntry.
                     cancelled_by=request.user.id,
                 ))
 
@@ -301,7 +296,14 @@ class InvoicePdfView(TenantScopedAPIView):
                 {"success": False, "message": "PDF hanya tersedia untuk invoice yang sudah Lunas."},
                 status=status.HTTP_409_CONFLICT,
             )
-        pdf_bytes = build_invoice_pdf(invoice, org_name=invoice.organization.name)
+        # 8 Sep 2026 — real fix: org_address was never passed at all,
+        # so the PDF header only ever showed the shop name, never its
+        # address, even though the real invoice-detail web page has
+        # always shown both — see build_invoice_pdf's own updated
+        # docstring in pdf.py for the full reasoning.
+        pdf_bytes = build_invoice_pdf(
+            invoice, org_name=invoice.organization.name, org_address=invoice.organization.address,
+        )
 
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         # invoice.number genuinely contains slashes ("INV/REG/AM/0004/
