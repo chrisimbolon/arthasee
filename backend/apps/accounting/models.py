@@ -1054,7 +1054,7 @@ class OpeningBalanceSession(TenantScopedModel):
             "variance": variance, "is_balanced": False, "plug_side": plug_side,
         }
 
-    def post(self, *, posted_by=None):
+    def post(self, *, posted_by=None, confirm_variance=False):
         """
         The one real entry point — posts every line item across all
         six categories into ONE consolidated JournalEntry, matching
@@ -1068,15 +1068,30 @@ class OpeningBalanceSession(TenantScopedModel):
         balancing anywhere inside the engine, the "no mystery plug"
         guarantee this whole system was built on is completely
         unchanged. This orchestration layer is the ONE, deliberate,
-        visible place a variance is ever allocated — and only after
-        the frontend's own pre-commit review screen (backed by
-        compute_variance()/_build_line_specs() above) has already
-        shown Made this exact figure. Posts any variance to 3002
-        (Ekuitas Saldo Awal) — kept deliberately separate from 3001
-        (Owner Capital), so a real, explicit capital contribution
-        Made states himself is never silently mixed together with a
-        rounding/data-entry variance the system allocated on his
-        behalf.
+        visible place a variance is ever allocated. Posts any
+        variance to 3002 (Ekuitas Saldo Awal) — kept deliberately
+        separate from 3001 (Owner Capital), so a real, explicit
+        capital contribution Made states himself is never silently
+        mixed together with a rounding/data-entry variance the
+        system allocated on his behalf.
+
+        8 Sep 2026 — real, second fix, found by the test suite's own
+        test_unbalanced_session_rejected_with_400 immediately after
+        the plug above first shipped: the plug alone made ANY
+        variance silently succeed, whether or not the frontend ever
+        actually showed Made the number first — nothing stopped a
+        client from calling this endpoint directly, skipping the new
+        preview screen entirely. That directly contradicts Chris's
+        own explicit confirmation: "Made must explicitly review and
+        confirm the variance before the system calls the final
+        commit." `confirm_variance` closes that gap — defaults to
+        False (fail closed, matching this whole codebase's own
+        established discipline for anything consequential), and this
+        method now REFUSES to proceed when a real variance exists and
+        confirm_variance wasn't explicitly passed True. A session
+        that's already balanced needs no confirmation at all — there
+        is nothing to confirm — so confirm_variance is only ever
+        consulted once a real variance is already known to exist.
         """
         from apps.inventory.models import Part, StockAdjustment
 
@@ -1141,6 +1156,14 @@ class OpeningBalanceSession(TenantScopedModel):
             total_credit = sum((line["credit"] or zero) for line in lines)
             if total_debit != total_credit:
                 variance = abs(total_debit - total_credit)
+                if not confirm_variance:
+                    raise ValueError(
+                        f"Saldo awal belum seimbang — selisih Rp{variance} akan "
+                        f"dibukukan ke akun 3002 (Ekuitas Saldo Awal). Tinjau "
+                        f"selisih ini terlebih dahulu (GET .../opening-balance/"
+                        f"preview/), lalu kirim ulang permintaan ini dengan "
+                        f"konfirmasi eksplisit untuk melanjutkan."
+                    )
                 plug_account = Account.resolve(self.organization, "3002")
                 if total_debit > total_credit:
                     lines.append({
