@@ -2236,6 +2236,43 @@ class ActiveJobsViewTests(WorkOrderAPITestBase):
         self.assertIsNone(entry["current_stage_name"])
         self.assertIsNone(entry["current_stage_mechanic"])
 
+    def test_current_stage_mechanic_falls_back_to_workorder_level_assignment(self):
+        """
+        8 Sep 2026 — THE real regression test for the actual bug
+        found live: a routine, non-staged WorkOrder (the common case
+        — a simple job with no "Tambah Tahap" use at all) with a
+        real, direct WorkOrder.assigned_to ("Mekanik Penanggung
+        Jawab" on the detail page) used to show current_stage_
+        mechanic as None here, even though the detail page itself
+        clearly showed a real mechanic assigned — this whole
+        endpoint's own stated purpose is remote supervision, and
+        silently hiding who's actually on the job defeats that.
+        """
+        mechanic = Mechanic.objects.create(organization=self.org, name="Tommy")
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, assigned_to=mechanic)
+        resp = self.client.get("/api/work-orders/active/")
+        entry = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertIsNone(entry["current_stage_name"])
+        self.assertEqual(entry["current_stage_mechanic"], "Tommy")
+
+    def test_current_stage_mechanic_prefers_the_in_motion_stage_over_workorder_level(self):
+        """
+        The other real half of the fallback logic — when a stage IS
+        actively in motion, its own assigned mechanic is the more
+        precise, current answer and must still win over the WO-level
+        assignment, not be silently overridden by it.
+        """
+        wo_mechanic = Mechanic.objects.create(organization=self.org, name="Tommy")
+        stage_mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, assigned_to=wo_mechanic)
+        WorkOrderStage.objects.create(
+            organization=self.org, work_order=wo, name="Painting", sequence=1,
+            assigned_to=stage_mechanic, started_at=timezone.now(),
+        )
+        resp = self.client.get("/api/work-orders/active/")
+        entry = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertEqual(entry["current_stage_mechanic"], "Alex")
+
     def test_current_stage_mechanic_is_none_when_stage_unassigned(self):
         wo = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
         WorkOrderStage.objects.create(
