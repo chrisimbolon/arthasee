@@ -30,6 +30,30 @@ meeting note, confirmed with Chris to apply to Invoice ONLY (not the
 Job Ticket, which deliberately shows zero prices anywhere): a spelled
 -out Indonesian amount, and a "Diterima oleh" sign-off line for a
 real, physical customer signature.
+
+8 Sep 2026 — real, three-part fix, found live against a printed PDF
+compared directly to the real invoice-detail web page:
+  1. org_address was never a parameter at all — the header showed
+     only the shop name, never its address, even though the web page
+     has always shown both.
+  2. This module's own prior docstring claimed a single flat line-
+     items table "matches invoice-detail's own existing print/screen
+     view" — that claim was stale; the real page splits Parts and
+     Jasa into their own sections with their own subtotals
+     (InvoiceLineItem.kind already carries exactly this distinction,
+     it just was never used here). Now mirrors that real split.
+  3. The grand-total row only ever checked deposit_amount > 0 to
+     decide between "Total" and "Sisa Tagihan" — completely blind to
+     Invoice.total_paid (real Payment rows), the far more common real
+     completion path (a customer paying cash on pickup, not a
+     pre-service deposit). An invoice paid this way rendered as
+     "Total Rp 0" — as if the whole job were worth nothing — instead
+     of "Sisa Tagihan Rp 0" with a real "Sudah Dibayar" row, exactly
+     what the web page has always shown. Now sums deposit_amount +
+     total_paid into one real "Sudah Dibayar" figure, matching the
+     web page's own presentation exactly, and picks "Sisa Tagihan"
+     whenever any real amount has been paid, regardless of which
+     mechanism paid it.
 """
 from decimal import Decimal
 from io import BytesIO
@@ -141,7 +165,52 @@ def _format_rupiah(value):
     return f"Rp {whole:,}".replace(",", ".")
 
 
-def build_invoice_pdf(invoice, org_name):
+def _line_item_rows(items):
+    """
+    Renders one <tr> per line item, or a single empty-state row when
+    the list is genuinely empty — shared by both the Parts and Jasa
+    sections below so neither one duplicates this markup.
+    """
+    if not items:
+        return '<tr><td colspan="4" class="empty">Belum ada item.</td></tr>'
+    rows_html = ""
+    for li in items:
+        rows_html += f"""
+        <tr>
+            <td>{li.description}</td>
+            <td class="num">{li.quantity}</td>
+            <td class="num">{_format_rupiah(li.unit_price)}</td>
+            <td class="num">{_format_rupiah(li.subtotal)}</td>
+        </tr>"""
+    return rows_html
+
+
+def _line_item_section(title, items):
+    """
+    One real section (Parts or Jasa) — its own header, its own line-
+    item rows, its own subtotal, matching the real invoice-detail
+    web page exactly (see this module's own updated docstring above
+    for why this replaced the prior single flat table). Omitted
+    entirely by the caller when a category has zero items — see
+    build_invoice_pdf() below — rather than rendering an empty
+    section with nothing under it.
+    """
+    section_total = sum((li.subtotal for li in items), Decimal("0"))
+    return f"""
+    <div class="section-title">{title}</div>
+    <table class="line-table">
+        <thead>
+            <tr><th>Deskripsi</th><th class="num">Jml</th><th class="num">Harga Satuan</th><th class="num">Subtotal</th></tr>
+        </thead>
+        <tbody>{_line_item_rows(items)}</tbody>
+    </table>
+    <table class="section-subtotal-table">
+        <tr><td class="num">Total {title}</td><td class="num total-value">{_format_rupiah(section_total)}</td></tr>
+    </table>
+    """
+
+
+def build_invoice_pdf(invoice, org_name, org_address=""):
     """
     Returns raw PDF bytes. The caller (the view) is responsible for
     gating this to PAID invoices only and wrapping the result in an
@@ -149,38 +218,47 @@ def build_invoice_pdf(invoice, org_name):
     testable builder, same discipline as build_quotation_pdf in
     apps.estimates.pdf.
 
-    Deliberately ONE flat line-items table, not split into sections —
-    matches how invoice-detail's own existing print/screen view
-    already renders it (a single ordered list of charges), not the
-    Parts/Jasa split used on the Estimate quotation. Introducing a
-    split here that doesn't exist on the page this PDF is meant to
-    mirror would be a real, avoidable inconsistency.
+    org_address is optional and blank-safe — an organization that
+    hasn't filled in an address yet (still possible pre-onboarding-
+    completion in principle) simply renders with no address line,
+    rather than the caller needing to guard against None itself.
+
+    Line items are now split into real Parts/Jasa sections (kind=
+    "part"/"labor" on InvoiceLineItem), each with its own subtotal —
+    matching the real invoice-detail web page exactly, not the flat
+    single-table shape this module used before. A category with zero
+    items is omitted entirely, not rendered as an empty section.
     """
-    items = list(invoice.line_items.all())
+    all_items = list(invoice.line_items.all())
+    part_items = [li for li in all_items if li.kind == "part"]
+    labor_items = [li for li in all_items if li.kind == "labor"]
 
-    rows_html = ""
-    if not items:
-        rows_html = '<tr><td colspan="4" class="empty">Belum ada item.</td></tr>'
+    if not all_items:
+        sections_html = '<table class="line-table"><tbody><tr><td colspan="4" class="empty">Belum ada item.</td></tr></tbody></table>'
     else:
-        for li in items:
-            rows_html += f"""
-            <tr>
-                <td>{li.description}</td>
-                <td class="num">{li.quantity}</td>
-                <td class="num">{_format_rupiah(li.unit_price)}</td>
-                <td class="num">{_format_rupiah(li.subtotal)}</td>
-            </tr>"""
+        sections_html = ""
+        if part_items:
+            sections_html += _line_item_section("Parts", part_items)
+        if labor_items:
+            sections_html += _line_item_section("Jasa", labor_items)
 
-    # deposit_amount defaults to 0, never None — a plain ">" check is
-    # enough, no need to also guard against a null value.
-    deposit_row = ""
-    if invoice.deposit_amount > 0:
-        deposit_row = f"""
-        <tr><td class="num">Deposit</td><td class="num">− {_format_rupiah(invoice.deposit_amount)}</td></tr>"""
+    # 8 Sep 2026 — real fix: was `if invoice.deposit_amount > 0` only,
+    # completely blind to invoice.total_paid (real Payment rows) —
+    # see this module's own docstring above for the full reasoning.
+    # paid_total is the ONE real figure the web page's own "Sudah
+    # Dibayar" row shows — deposit and later cash/transfer payments
+    # both count the same way toward "how much of this has actually
+    # been paid," and are combined here exactly as the web page
+    # already combines them.
+    paid_total = invoice.deposit_amount + invoice.total_paid
+    paid_row = ""
+    if paid_total > 0:
+        paid_row = f"""
+        <tr><td class="num">Sudah Dibayar</td><td class="num">− {_format_rupiah(paid_total)}</td></tr>"""
 
-    total_label = "Sisa Tagihan" if invoice.deposit_amount > 0 else "Total"
+    total_label = "Sisa Tagihan" if paid_total > 0 else "Total"
     # Terbilang describes the SAME figure total_label/the grand-total
-    # row actually shows — balance_due, not the pre-deposit subtotal.
+    # row actually shows — balance_due, not the pre-payment subtotal.
     # Spelling out a different number than what's printed as the
     # bottom-line total would be a real, confusing inconsistency on a
     # financial document, not a cosmetic mismatch.
@@ -189,6 +267,8 @@ def build_invoice_pdf(invoice, org_name):
     created_by_block = ""
     if invoice.created_by_id and invoice.created_by.full_name:
         created_by_block = f'<p class="created-by">Dibuat oleh {invoice.created_by.full_name}</p>'
+
+    org_address_block = f'<div class="org-address">{org_address}</div>' if org_address else ""
 
     html = f"""
     <html>
@@ -199,7 +279,8 @@ def build_invoice_pdf(invoice, org_name):
         .header-table {{ width: 100%; margin-bottom: 20px; }}
         .header-table td {{ vertical-align: top; }}
         .org-name {{ font-size: 16pt; font-weight: bold; }}
-        .doc-title {{ font-size: 10pt; color: #6b6b6b; margin-top: 2px; }}
+        .org-address {{ font-size: 9pt; color: #52514e; margin-top: 2px; }}
+        .doc-title {{ font-size: 10pt; color: #6b6b6b; margin-top: 4px; }}
         .est-number {{ font-size: 12pt; font-weight: bold; text-align: right; }}
         .est-date {{ font-size: 9.5pt; color: #6b6b6b; text-align: right; margin-top: 2px; }}
         .status-badge {{ font-size: 8.5pt; font-weight: bold; color: #ffffff;
@@ -208,13 +289,17 @@ def build_invoice_pdf(invoice, org_name):
         .info-table {{ width: 100%; margin-bottom: 20px; border-bottom: 1px solid #d8d8d8; padding-bottom: 14px; }}
         .label {{ font-size: 8.5pt; color: #6b6b6b; text-transform: uppercase; }}
         .value {{ font-size: 11pt; font-weight: bold; margin-top: 2px; }}
+        .section-title {{ font-size: 9pt; font-weight: bold; text-transform: uppercase;
+                          color: #52514e; margin-top: 16px; margin-bottom: 6px; }}
         .line-table {{ width: 100%; border-collapse: collapse; margin-bottom: 4px; }}
         .line-table th {{ text-align: left; font-size: 8.5pt; text-transform: uppercase;
                           color: #6b6b6b; border-bottom: 1px solid #d8d8d8; padding: 4px 0; }}
         .line-table td {{ font-size: 10pt; padding: 5px 0; border-bottom: 1px solid #eeeeee; }}
         .num {{ text-align: right; }}
         .empty {{ text-align: center; color: #6b6b6b; padding: 10px 0; }}
-        .subtotal-table {{ width: 100%; }}
+        .section-subtotal-table {{ width: 100%; margin-bottom: 4px; }}
+        .section-subtotal-table td {{ font-size: 9.5pt; padding: 3px 0; color: #52514e; }}
+        .subtotal-table {{ width: 100%; margin-top: 10px; }}
         .subtotal-table td {{ font-size: 10pt; padding: 4px 0; }}
         .total-value {{ font-weight: bold; }}
         .grand-total-table {{ width: 100%; margin-top: 12px; border-top: 1px solid #17181a; padding-top: 10px; }}
@@ -232,6 +317,7 @@ def build_invoice_pdf(invoice, org_name):
             <tr>
                 <td style="width: 55%;">
                     <div class="org-name">{org_name}</div>
+                    {org_address_block}
                     <div class="doc-title">INVOICE</div>
                 </td>
                 <td style="width: 45%;">
@@ -261,16 +347,11 @@ def build_invoice_pdf(invoice, org_name):
             </tr>
         </table>
 
-        <table class="line-table">
-            <thead>
-                <tr><th>Deskripsi</th><th class="num">Jml</th><th class="num">Harga Satuan</th><th class="num">Subtotal</th></tr>
-            </thead>
-            <tbody>{rows_html}</tbody>
-        </table>
+        {sections_html}
 
         <table class="subtotal-table">
             <tr><td class="num">Subtotal</td><td class="num total-value">{_format_rupiah(invoice.subtotal)}</td></tr>
-            {deposit_row}
+            {paid_row}
         </table>
 
         <table class="grand-total-table">
