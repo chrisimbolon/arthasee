@@ -65,7 +65,12 @@ class RegisterViewTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
         org = Organization.objects.get(name="Arya Motor Test")
-        self.assertEqual(Account.objects.filter(organization=org).count(), 26)
+        # 8 Sep 2026 — 26 -> 27: account 3002 (Ekuitas Saldo Awal)
+        # added in the accounting COA-redesign review, the real
+        # dedicated target for OpeningBalanceSession.post()'s own
+        # explicit variance plug. Mirrors the same fix in
+        # apps.accounting.tests.SeedCoaTests.
+        self.assertEqual(Account.objects.filter(organization=org).count(), 27)
 
     def test_register_still_creates_nothing_on_duplicate_email_with_seeding_added(self):
         """
