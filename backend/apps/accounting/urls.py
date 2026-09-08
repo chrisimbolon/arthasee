@@ -20,7 +20,8 @@ from .views import (AccountingPeriodCloseView, AccountingPeriodListView,
                     OpeningBalancePartLineListCreateView,
                     OpeningBalancePayableDetailView,
                     OpeningBalancePayableListCreateView,
-                    OpeningBalancePostView, OpeningBalanceReceivableDetailView,
+                    OpeningBalancePostView, OpeningBalancePreviewView,
+                    OpeningBalanceReceivableDetailView,
                     OpeningBalanceReceivableListCreateView,
                     OpeningBalanceSessionView, ProfitLossTrendView,
                     ProfitLossView, TrialBalanceView)
@@ -60,6 +61,13 @@ urlpatterns = [
     # authenticated org member — see views.py's own module docstring
     # for why data entry and the final post carry different stakes.
     path("opening-balance/",               OpeningBalanceSessionView.as_view(),         name="opening-balance-session"),
+    # 8 Sep 2026 — the real pre-commit review gate, Chris/Aris's own
+    # confirmed hybrid design for the Opening Balance Equity plug:
+    # read-only, safe to call any number of times while the session
+    # is still DRAFT, placed between session-create and the final,
+    # irreversible post — matching the real order a wizard actually
+    # walks through (create -> fill in lines -> preview -> post).
+    path("opening-balance/preview/",       OpeningBalancePreviewView.as_view(),         name="opening-balance-preview"),
     path("opening-balance/post/",          OpeningBalancePostView.as_view(),            name="opening-balance-post"),
     path("opening-balance/cash/",          OpeningBalanceCashLineView.as_view(),        name="opening-balance-cash"),
     path("opening-balance/parts/",         OpeningBalancePartLineListCreateView.as_view(), name="opening-balance-part-list-create"),
