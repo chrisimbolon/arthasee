@@ -617,6 +617,23 @@ export interface OpeningBalanceActionResult {
   opening_balance_session?: OpeningBalanceSessionResponse;
 }
 
+// 8 Sep 2026 — the real, authoritative pre-commit review shape,
+// backed by OpeningBalanceSession.compute_variance() itself (the
+// same calculation post() uses to decide whether a plug is even
+// possible) — not the client-side session.total_debit/total_credit
+// above, which is a live UI convenience only. plug_side/
+// plug_account_code are both null exactly when is_balanced is true —
+// there's nothing to plug.
+export interface OpeningBalancePreviewResponse {
+  success: boolean;
+  total_debit: string | number;
+  total_credit: string | number;
+  variance: string | number;
+  is_balanced: boolean;
+  plug_side: "debit" | "credit" | null;
+  plug_account_code: string | null;
+}
+
 function extractErrorMessage(err: unknown, fallback: string): string {
   const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
   return message || fallback;
@@ -648,10 +665,30 @@ export const openingBalanceApi = {
     }
   },
 
-  // The real, final, irreversible action.
-  async post(): Promise<OpeningBalanceActionResult> {
+  // 8 Sep 2026 — the real pre-commit review gate: read-only, safe to
+  // call any number of times, never creates or posts anything (see
+  // OpeningBalancePreviewView's own backend docstring). Returns null
+  // on any request failure — same "collapse to null, let the caller
+  // decide" convention as getSession() above; the review UI treats a
+  // null preview as "couldn't load," not as "balanced."
+  async preview(): Promise<OpeningBalancePreviewResponse | null> {
     try {
-      const { data } = await api.post("/api/accounting/opening-balance/post/");
+      const { data } = await api.get("/api/accounting/opening-balance/preview/");
+      return data;
+    } catch {
+      return null;
+    }
+  },
+
+  // The real, final, irreversible action. confirm_variance is only
+  // ever meaningful when the session is genuinely unbalanced — see
+  // OpeningBalanceSession.post()'s own backend docstring — omitting
+  // it (or passing false) is the safe default and matches calling
+  // this with no payload at all; a balanced session ignores it
+  // entirely.
+  async post(payload?: { confirm_variance?: boolean }): Promise<OpeningBalanceActionResult> {
+    try {
+      const { data } = await api.post("/api/accounting/opening-balance/post/", payload ?? {});
       return data;
     } catch (err) {
       return { success: false, message: extractErrorMessage(err, "Gagal memposting saldo awal.") };
