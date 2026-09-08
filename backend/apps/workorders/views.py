@@ -881,7 +881,7 @@ class DashboardSummaryView(TenantScopedAPIView):
         # ever touches a DONE WorkOrder again after that point.
 
         queued = WorkOrder.objects.filter(organization=org, status="OPEN").count()
-        in_progress_qs = WorkOrder.objects.filter(organization=org, status__in=("IN_PROGRESS", "QC")).select_related("vehicle")
+        in_progress_qs = WorkOrder.objects.filter(organization=org, status="IN_PROGRESS").select_related("vehicle")
         in_progress = in_progress_qs.count()
 
         # is_overdue is a Python property, not a DB column — filtered
@@ -957,7 +957,7 @@ class ActiveJobsView(TenantScopedAPIView):
         work_orders = (
             self.get_queryset()
             .filter(status__in=OPEN_STATUSES)
-            .select_related("vehicle", "vehicle__customer")
+            .select_related("vehicle", "vehicle__customer", "assigned_to")
             .prefetch_related("stages", "stages__assigned_to")
         )
 
@@ -974,9 +974,26 @@ class ActiveJobsView(TenantScopedAPIView):
                 "elapsed_since": elapsed_since,
                 "elapsed_hours": _hours_elapsed(elapsed_since),
                 "current_stage_name": current_stage.name if current_stage else None,
+                # 8 Sep 2026 — real fix: this used to read ONLY
+                # current_stage.assigned_to, silently showing nothing
+                # for any WorkOrder that doesn't use staged work at
+                # all (a direct, single-checklist job — the common
+                # case per Made's own real usage) even when it has a
+                # real, direct WorkOrder.assigned_to ("Mekanik
+                # Penanggung Jawab" on the detail page). Falls back
+                # to that WO-level assignment whenever no stage is
+                # currently in motion — same real "WO-level OR
+                # stage-level, whichever applies" duality
+                # growth.mechanic_utilization() already establishes
+                # elsewhere in this codebase, not a narrower rule
+                # invented just for this endpoint. A stage actively
+                # in motion still wins when one exists — it's the
+                # more precise, current answer for that specific
+                # case.
                 "current_stage_mechanic": (
                     current_stage.assigned_to.name
-                    if current_stage and current_stage.assigned_to else None
+                    if current_stage and current_stage.assigned_to
+                    else (wo.assigned_to.name if wo.assigned_to else None)
                 ),
                 "is_overdue": wo.is_overdue,
             })
