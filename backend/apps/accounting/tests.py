@@ -3161,7 +3161,12 @@ class OpeningBalancePreviewAPITests(APITestCase):
         resp = self.client.get("/api/accounting/opening-balance/preview/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(resp.data["is_balanced"])
-        self.assertEqual(resp.data["variance"], Decimal("0"))
+        # 8 Sep 2026 — real fix: DRF's DecimalField serializes to a
+        # STRING by default ("0.00"), not a Decimal, once a response
+        # goes through the real HTTP cycle — OpeningBalancePreviewSerializer
+        # declares variance as a DecimalField, so the raw resp.data
+        # value must be wrapped in Decimal() before comparing.
+        self.assertEqual(Decimal(resp.data["variance"]), Decimal("0"))
         self.assertIsNone(resp.data["plug_side"])
         self.assertIsNone(resp.data["plug_account_code"])
 
@@ -3171,7 +3176,9 @@ class OpeningBalancePreviewAPITests(APITestCase):
         resp = self.client.get("/api/accounting/opening-balance/preview/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertFalse(resp.data["is_balanced"])
-        self.assertEqual(resp.data["variance"], Decimal("500000"))
+        # 8 Sep 2026 — same real DecimalField-serializes-to-string fix
+        # as test_balanced_session_shows_zero_variance above.
+        self.assertEqual(Decimal(resp.data["variance"]), Decimal("500000"))
         self.assertEqual(resp.data["plug_side"], "credit")
         self.assertEqual(resp.data["plug_account_code"], "3002")
 
