@@ -30,7 +30,7 @@
 // asymmetry between the two pickers, not an oversight.
 // =============================================================================
 import {
-  OpeningBalanceActionResult, OpeningBalanceOtherSide,
+  OpeningBalanceActionResult, OpeningBalanceOtherSide, OpeningBalancePreviewResponse,
   OpeningBalanceSessionResponse, openingBalanceApi,
 } from "@/lib/api/accounting";
 import { Organization, organizationsApi } from "@/lib/api/organizations";
@@ -84,6 +84,53 @@ function ErrorBanner({ text }: { text: string }) {
   return (
     <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 18 }}>
       {text}
+    </div>
+  );
+}
+
+// 8 Sep 2026 — the real, explicit confirmation gate for the Opening
+// Balance Equity plug. Rendered only once the user has already
+// clicked "Posting & Selesai" AND the real, authoritative preview
+// (GET /opening-balance/preview/ — not the client-side session
+// totals) confirms a genuine variance exists. Chris's own product
+// call: a small variance is never a hard blocker — the important
+// thing is that a real, existing business actually completes this
+// step, not that it balances to the exact rupiah on day one. This
+// modal exists purely so that whatever plug happens is something the
+// owner has genuinely seen and agreed to, never a silent surprise.
+function VarianceConfirmModal({
+  preview, onCancel, onConfirm, confirming,
+}: {
+  preview: OpeningBalancePreviewResponse;
+  onCancel: () => void;
+  onConfirm: () => void;
+  confirming: boolean;
+}) {
+  const variance = Math.abs(toNumber(preview.variance));
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,20,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1100, padding: 20 }}>
+      <div className="card" style={{ width: 440 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--hazard-dark)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 10 }}>
+          Selisih Saldo Awal
+        </div>
+        <h2 className="display" style={{ fontSize: 19, marginBottom: 10, textTransform: "none" }}>
+          Saldo belum seimbang sempurna
+        </h2>
+        <div style={{ background: "var(--hazard-light)", borderRadius: 8, padding: "12px 14px", marginBottom: 14, fontSize: 13, lineHeight: 1.5 }}>
+          Selisih <strong className="mono">{formatRupiah(variance)}</strong> akan otomatis dialokasikan ke akun <strong>3002 — Ekuitas Saldo Awal</strong>.
+        </div>
+        <p style={{ fontSize: 13, color: "var(--steel)", lineHeight: 1.6, marginBottom: 20 }}>
+          Idealnya akun-akun sudah seimbang sebelum bisnis Anda mulai tercatat di Arthasee — tapi ini bukan penghalang. Yang terpenting proses pencatatan saldo awal ini selesai; selisih ini tetap bisa Anda sesuaikan kapan saja lewat jurnal manual setelah onboarding.
+        </p>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button type="button" className="btn-ghost" onClick={onCancel} disabled={confirming} style={{ flex: 1, justifyContent: "center" }}>
+            Tinjau Lagi
+          </button>
+          <button type="button" className="btn-rust" onClick={onConfirm} disabled={confirming} style={{ flex: 1, justifyContent: "center" }}>
+            {confirming ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Konfirmasi & Lanjutkan"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -654,6 +701,8 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
   const [startDate, setStartDate] = useState(todayISO());
   const [creating, setCreating] = useState(false);
   const [posting, setPosting] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const [pendingConfirm, setPendingConfirm] = useState<OpeningBalancePreviewResponse | null>(null);
   const [goingFresh, setGoingFresh] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -697,9 +746,9 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
     setSession(result.opening_balance_session);
   };
 
-  const handlePost = async () => {
+  const handlePost = async (confirmVariance: boolean) => {
     setPosting(true); setError(null);
-    const result: OpeningBalanceActionResult = await openingBalanceApi.post();
+    const result: OpeningBalanceActionResult = await openingBalanceApi.post({ confirm_variance: confirmVariance });
     if (!result.success) {
       setError(result.message || "Gagal memposting saldo awal.");
       setPosting(false);
@@ -707,6 +756,35 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
     }
     const ok = await finishOnboarding();
     if (!ok) setPosting(false);
+  };
+
+  // 8 Sep 2026 — the real review gate: fetches the AUTHORITATIVE
+  // variance (GET /opening-balance/preview/, backed by
+  // OpeningBalanceSession.compute_variance() — not the client-side
+  // session.total_debit/total_credit above, which is a live UI
+  // convenience only and could theoretically drift from the real
+  // figure a concurrent edit produced). A genuinely balanced session
+  // posts straight through with no modal — confirm_variance is only
+  // ever meaningful once a real variance exists.
+  const handlePostClick = async () => {
+    setError(null);
+    setReviewing(true);
+    const preview = await openingBalanceApi.preview();
+    setReviewing(false);
+    if (!preview || !preview.success) {
+      setError("Gagal memuat pratinjau saldo awal. Coba lagi.");
+      return;
+    }
+    if (preview.is_balanced) {
+      await handlePost(false);
+    } else {
+      setPendingConfirm(preview);
+    }
+  };
+
+  const handleConfirmVariance = async () => {
+    setPendingConfirm(null);
+    await handlePost(true);
   };
 
   if (loading) {
@@ -763,7 +841,13 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
   const totalDebit = toNumber(session.total_debit);
   const totalCredit = toNumber(session.total_credit);
   const hasContent = totalDebit > 0 || totalCredit > 0;
-  const canPost = session.is_balanced && hasContent && !posting;
+  // 8 Sep 2026 — real, deliberate product change: no longer gated on
+  // session.is_balanced. A perfectly-balanced saldo awal is the
+  // ideal, but a real, already-running business joining Arthasee
+  // should never be blocked from finishing onboarding over a small
+  // variance — see handlePostClick below for the real review-and-
+  // confirm gate this now goes through instead of a hard block.
+  const canPost = hasContent && !posting && !reviewing;
 
   return (
     <Overlay width={760}>
@@ -788,8 +872,8 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
         </div>
         <div style={{ marginLeft: "auto", textAlign: "right" }}>
           <div className="label">Status</div>
-          <div style={{ fontSize: 13.5, fontWeight: 700, color: !hasContent ? "var(--steel)" : session.is_balanced ? "var(--workshop)" : "var(--danger)" }}>
-            {!hasContent ? "Belum ada data" : session.is_balanced ? "✓ Seimbang" : `Selisih ${formatRupiah(Math.abs(toNumber(session.difference)))}`}
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: !hasContent ? "var(--steel)" : session.is_balanced ? "var(--workshop)" : "var(--hazard-dark)" }}>
+            {!hasContent ? "Belum ada data" : session.is_balanced ? "✓ Neraca Seimbang" : `Selisih ${formatRupiah(Math.abs(toNumber(session.difference)))}`}
           </div>
         </div>
       </div>
@@ -803,18 +887,27 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
 
       <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
         <button
-          type="button" className="btn-ghost" onClick={handleFreshStart} disabled={goingFresh || posting}
+          type="button" className="btn-ghost" onClick={handleFreshStart} disabled={goingFresh || posting || reviewing}
           style={{ flex: 1, justifyContent: "center" }}
         >
           {goingFresh ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Batal — Bengkel Baru Saja"}
         </button>
         <button
-          type="button" className="btn-rust" onClick={handlePost} disabled={!canPost}
+          type="button" className="btn-rust" onClick={handlePostClick} disabled={!canPost}
           style={{ flex: 2, justifyContent: "center" }}
         >
-          {posting ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Posting & Selesai"}
+          {posting || reviewing ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Posting & Selesai"}
         </button>
       </div>
+
+      {pendingConfirm && (
+        <VarianceConfirmModal
+          preview={pendingConfirm}
+          confirming={posting}
+          onCancel={() => setPendingConfirm(null)}
+          onConfirm={handleConfirmVariance}
+        />
+      )}
     </Overlay>
   );
 }
