@@ -113,6 +113,9 @@ from apps.core.models import TenantScopedModel
 from django.db import models, transaction
 from django.db.models import Sum
 
+_UNSET = object()  # real sentinel — see Account.apply_edit()'s own docstring
+                    # for why `parent` needs three states (untouched / clear /
+                    # set), which plain `None` alone can't express.
 
 class Account(TenantScopedModel):
     """
@@ -120,6 +123,25 @@ class Account(TenantScopedModel):
     management/commands/seed_coa.py for the standard set every shop
     starts with (Roadmap v2.2 COA Blueprint). Shops can add their own
     beyond the standard set later; nothing here restricts that.
+
+    9 Sep 2026 — Phase 17, Task 17.2. `parent` is DELIBERATELY pure
+    presentation/organizational metadata — a real, confirmed design
+    call, not a placeholder for a future rollup. Account.balance()
+    and every report function in reports.py (trial_balance(),
+    balance_sheet(), etc.) sum every individual Account row flatly
+    by account_type/normal_balance, completely unchanged by this
+    field's existence — a parent and its children are simply two
+    (or more) independent rows in that same flat sum, mathematically
+    identical to today's behavior for a shop that only ever posts at
+    the child (till) level. This closes off the exact class of risk
+    that produced the real, live contra-asset summation bug caught
+    in balance_sheet() before it shipped (Phase 12) — a rollup here
+    would mean re-deriving balance summation logic, which is
+    precisely what that incident proved is easy to get wrong. If a
+    real "parent + children combined total" need ever surfaces, it
+    becomes its own new, separately-tested report function — never
+    a change to Account.balance() or the two trusted, already-proven
+    report functions (Open Decision #21).    
     """
     class AccountType(models.TextChoices):
         ASSET     = "ASSET", "Aset"
@@ -217,6 +239,14 @@ class Account(TenantScopedModel):
                   "saldonya harus selalu sama dengan total sub-ledger terkait "
                   "(mis. AR harus sama dengan total tagihan pelanggan).",
     )
+    parent = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="children", verbose_name="Sub-Akun Dari",
+        help_text="Menjadikan akun ini sebagai sub-akun dari akun lain — "
+                  "murni untuk pengelompokan tampilan (mis. beberapa Kas Kecil "
+                  "di bawah satu Kas & Bank). TIDAK mempengaruhi Account.balance() "
+                  "atau laporan mana pun — lihat class docstring Account di atas.",
+    )    
     description = models.CharField(max_length=255, blank=True, verbose_name="Deskripsi")
     is_active  = models.BooleanField(default=True, verbose_name="Aktif")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -287,46 +317,29 @@ class Account(TenantScopedModel):
     @classmethod
     def record(
         cls, *, organization, code, name, account_subtype,
-        is_contra=False, is_control_account=False, description="",
+        is_contra=False, is_control_account=False, description="", parent=None,
     ):
         """
-        9 Sep 2026 — Phase 17, Task 17.1. The one real entry point for
+        9 Sep 2026 — Phase 17, Task 17.1 (create), extended in Task
+        17.2 with real `parent` support. The one real entry point for
         creating a CUSTOM Account via the live API
-        (AccountListCreateView.post()) — found genuinely MISSING
-        during Phase 17 design review: no such endpoint existed
-        anywhere in this codebase before now. `seed_coa.py`'s own
-        idempotent `get_or_create()` remains the separate, deliberate
-        path for the standard COA at signup/backfill time —
-        unchanged by this, and deliberately not routed through this
-        method (seeding 26 known-good rows at once is a different
-        real operation from a live, single, user-typed creation).
+        (AccountListCreateView.post()). `seed_coa.py`'s own idempotent
+        `get_or_create()` remains the separate, deliberate path for
+        the standard COA at signup/backfill time — unchanged by this.
 
-        `account_subtype` is REQUIRED here, unlike the model field's
-        own `blank=True` default (kept only so hundreds of existing
-        test fixtures across this codebase can keep constructing an
-        `Account` directly with a manually-set `account_type`/
-        `normal_balance` and no subtype at all). The real, user-facing
-        creation endpoint always requires a real subtype so
-        `account_type`/`normal_balance` are ALWAYS derived by
-        `save()` itself — `account_type`/`normal_balance` are
-        deliberately not even parameters of this method; there is no
-        way to call this and have them independently guessed by
-        whichever person is filling out the form. Matches the exact
-        "Ditentukan otomatis..." auto-derivation behavior Phase 16
-        already established for the standard COA.
-
-        Real, explicit duplicate-code guard, not left to a bare
-        `IntegrityError` bubbling up as a 500: `Account.Meta.
-        unique_together = [("organization", "code")]` is the real,
-        final backstop at the DB level (guards a genuine race between
-        two concurrent requests), but this method checks first and
-        raises a clean, real `ValueError` with the actual code named
-        — the same "validate before writing, never trust a caller to
-        get this right" discipline as every other real write path in
-        this codebase (Cheat Sheet §1). The `except IntegrityError`
-        fallback exists specifically for that narrow race window
-        between the check and the write — it should be genuinely rare
-        in practice, not the primary way this ever surfaces an error.
+        `account_subtype` is REQUIRED here — `account_type`/
+        `normal_balance` are never accepted as direct input at all,
+        always derived server-side by `save()` (see Phase 16's own
+        precedent). `parent`, if given, is resolved against a real
+        Account belonging to the SAME organization — never trusted as
+        a bare cross-tenant UUID (same tenant-isolation discipline as
+        every other real FK resolution in this codebase, e.g.
+        OpeningBalanceReceivableListCreateView's own Customer lookup).
+        No cycle check is needed here — a brand-new account cannot
+        already be an ancestor of anything, so setting its parent at
+        creation time can never create a cycle. Cycle prevention only
+        matters for `apply_edit()` below, where an EXISTING account's
+        parent can be reassigned after the fact.
         """
         code = (code or "").strip()
         if not code:
@@ -336,6 +349,12 @@ class Account(TenantScopedModel):
             raise ValueError("Nama akun tidak boleh kosong.")
         if account_subtype not in cls.SUBTYPE_CLASSIFICATION:
             raise ValueError(f"Sub-tipe akun tidak valid: {account_subtype!r}.")
+
+        parent_account = None
+        if parent is not None:
+            parent_account = cls.objects.filter(organization=organization, pk=parent).first()
+            if parent_account is None:
+                raise ValueError("Akun induk (parent) tidak ditemukan untuk organisasi ini.")
 
         with transaction.atomic():
             if cls.objects.filter(organization=organization, code=code).exists():
@@ -349,56 +368,85 @@ class Account(TenantScopedModel):
                     is_contra=is_contra,
                     is_control_account=is_control_account,
                     description=description,
+                    parent=parent_account,
                 )
             except IntegrityError:
-                # Real, narrow race window between the exists() check
-                # above and this create() — two concurrent requests
-                # for the same new code. Translated into the same
-                # clean ValueError shape as the pre-check above,
-                # never a raw 500.
                 raise ValueError(f"Akun dengan kode {code!r} sudah ada untuk organisasi ini.")
 
         return account
 
+    def _would_create_cycle(self, candidate_parent):
+        """
+        True if setting `candidate_parent` as this account's own
+        parent would create a cycle in the hierarchy — i.e.
+        candidate_parent IS this account, or candidate_parent is
+        currently a DESCENDANT of this account. Walks UP from
+        candidate_parent through its own real chain of parents,
+        checking whether that chain ever reaches back to self — if it
+        does, self is already an ancestor of candidate_parent, so
+        making candidate_parent the new parent of self would close a
+        loop (self -> candidate_parent -> ... -> self).
+
+        Real, defensive hop limit (100) — should be genuinely
+        unreachable given this exact guard is what prevents a cycle
+        from ever being created in the first place, but a malformed
+        or corrupted hierarchy must never hang a real request in an
+        infinite loop. A real shop's own till hierarchy is expected
+        to be 2-3 levels deep at most; 100 is a circuit breaker, not
+        a realistic depth limit.
+        """
+        if candidate_parent.pk == self.pk:
+            return True
+        seen = {self.pk}
+        node = candidate_parent
+        hops = 0
+        while node is not None:
+            if node.pk in seen:
+                return True
+            seen.add(node.pk)
+            node = node.parent
+            hops += 1
+            if hops > 100:
+                raise ValueError(
+                    "Struktur akun induk terlalu dalam atau tidak valid — "
+                    "tidak bisa memverifikasi apakah perubahan ini aman."
+                )
+        return False
+
     def apply_edit(
         self, *, name=None, description=None, is_active=None,
         account_subtype=None, is_contra=None, is_control_account=None,
+        parent=_UNSET,
     ):
         """
-        9 Sep 2026 — Phase 17, Task 17.1. The one real path for
-        editing an existing Account — called only from
-        AccountDetailView.patch(). `code` is deliberately not a
-        parameter here at all: immutable once created, since a real
-        account code may already be referenced on historical
-        documents, exports, or a shop's own accountant's paper
-        records built around it. There is no method signature that
-        can even attempt to change it.
+        9 Sep 2026 — Phase 17, Task 17.1 (base fields), extended in
+        Task 17.2 with real `parent` reassignment. The one real path
+        for editing an existing Account — called only from
+        AccountDetailView.patch(). `code` is deliberately still not a
+        parameter at all — immutable after creation.
 
-        Real, deliberate guard — the actual reason this is a method
-        on the model and not a bare `serializer.save()`: once this
-        account has ANY real posted `JournalLine`, its classification
-        (`account_subtype`/`is_contra`, and therefore the DERIVED
-        `account_type`/`normal_balance` — see `save()` above) can
-        never be changed again. Changing `normal_balance` on an
-        account with real history wouldn't touch a single existing
-        `JournalLine` row — it would silently REINTERPRET every
-        debit/credit already posted to it, flipping the sign of
-        `Account.balance()`'s own arithmetic for every past
-        transaction without moving a single rupiah. This is the same
-        "never let a change silently reinterpret already-posted
-        history" discipline Phase 16's control-account enforcement
-        and Phase 15's immutability hardening are both built on — see
-        Roadmap Principle #15 (Immutable-on-Post, Never
-        Recompute-on-Read).
+        `parent` uses the module-level `_UNSET` sentinel as its
+        default, not `None` — a genuine three-state field: omitted
+        entirely (this call doesn't touch parent at all), explicitly
+        `None` (clear it — this account becomes top-level), or a real
+        Account id (reassign it). Plain `None` as the default
+        couldn't distinguish "don't touch" from "clear" the way every
+        other field here safely can, since every other field's
+        "don't touch" state (`None`) is not itself a real, valid value
+        a caller would ever intentionally set — `parent` is the one
+        exception, since NULL is a genuine, meaningful state for it
+        (top-level account).
 
-        `is_control_account` is deliberately NOT covered by this
-        guard — toggling it changes only whether FUTURE manual
-        journals are blocked (`JournalEntry.post()`'s own check); it
-        never reinterprets a single already-posted line. Real
-        protection for this one instead comes from the view layer —
-        `AccountDetailView.patch()` is owner-only, matching the same
-        stakes class as every other real, consequential write path in
-        this app.
+        Real, deliberate split in what gets guarded and what doesn't:
+        the classification guard below (account_subtype/is_contra vs.
+        real posted history) is UNCHANGED from Task 17.1 and does NOT
+        cover `parent` — reassigning a parent never touches
+        Account.balance()'s own arithmetic for a single existing
+        JournalLine (see this class's own docstring: parent is pure
+        presentation metadata, zero rollup math anywhere). A real
+        cycle check (`_would_create_cycle()` above) is the only real
+        guard `parent` itself needs — a structural validity check,
+        not a financial-integrity one.
         """
         classification_changed = (
             (account_subtype is not None and account_subtype != self.account_subtype)
@@ -427,6 +475,20 @@ class Account(TenantScopedModel):
             self.is_contra = is_contra
         if is_control_account is not None:
             self.is_control_account = is_control_account
+
+        if parent is not _UNSET:
+            if parent is None:
+                self.parent = None
+            else:
+                parent_account = Account.objects.filter(organization=self.organization, pk=parent).first()
+                if parent_account is None:
+                    raise ValueError("Akun induk (parent) tidak ditemukan untuk organisasi ini.")
+                if self._would_create_cycle(parent_account):
+                    raise ValueError(
+                        f"Tidak bisa menjadikan {parent_account.code} sebagai induk dari "
+                        f"{self.code} — akan membuat struktur akun melingkar (circular)."
+                    )
+                self.parent = parent_account
 
         self.save()
         return self        
