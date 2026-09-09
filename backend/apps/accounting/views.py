@@ -64,9 +64,11 @@ from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
                      OpeningBalanceCashLine, OpeningBalanceOtherLine,
                      OpeningBalancePartLine, OpeningBalancePayable,
                      OpeningBalanceReceivable, OpeningBalanceSession)
-from .serializers import (AccountingPeriodSerializer, AssetRecordSerializer,
-                          AssetSerializer, DepreciationRunSerializer,
-                          FailedPostingSerializer, JournalEntrySerializer,
+from .serializers import (AccountEditSerializer, AccountingPeriodSerializer,
+                          AccountRecordSerializer, AccountSerializer,
+                          AssetRecordSerializer, AssetSerializer,
+                          DepreciationRunSerializer, FailedPostingSerializer,
+                          JournalEntrySerializer,
                           ManualJournalRecordSerializer,
                           OpeningBalanceAssetLineRecordSerializer,
                           OpeningBalanceAssetLineSerializer,
@@ -101,6 +103,132 @@ def _require_owner(request, organization):
     membership = request.user.memberships.filter(organization=organization, is_active=True).first()
     return membership is not None and membership.role == "owner"
 
+class AccountListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/accounting/accounts/  — every real Account for this org
+    POST /api/accounting/accounts/  — create a new custom Account
+
+    9 Sep 2026 — Phase 17, Task 17.1. The real, previously-missing
+    Account management endpoint, found absent during Phase 17 design
+    review: no such endpoint existed anywhere in this codebase before
+    now — the only paths that ever created an Account were seed_coa
+    and direct DB/admin access. A hard precondition for Task 17.2
+    (Sub-Accounts) to be usable at all — a hierarchy nobody can edit
+    isn't a real feature.
+
+    POST is owner-only, matching every other real, consequential
+    write path in this app (ManualJournalListCreateView,
+    AccountingPeriodCloseView, OpeningBalanceSessionView.post()) — a
+    shop's own Chart of Accounts is foundational, same stakes class
+    as closing a period. GET is open to any authenticated org member
+    — reading the COA is not itself a consequential action, same
+    split already established between opening-balance session
+    creation (owner-only) and its line-item endpoints (any member).
+    """
+    model = Account
+
+    def get(self, request):
+        accounts = self.get_queryset().order_by("code")
+        return Response({"success": True, "accounts": AccountSerializer(accounts, many=True).data})
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa membuat akun baru."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        input_serializer = AccountRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        try:
+            account = Account.record(
+                organization=organization,
+                code=data["code"],
+                name=data["name"],
+                account_subtype=data["account_subtype"],
+                is_contra=data["is_contra"],
+                is_control_account=data["is_control_account"],
+                description=data["description"],
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "account": AccountSerializer(account).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AccountDetailView(TenantScopedAPIView):
+    """
+    GET   /api/accounting/accounts/<uuid:pk>/  — one Account
+    PATCH /api/accounting/accounts/<uuid:pk>/  — edit an existing
+          Account. Owner-only, same stakes class as create.
+
+    Deliberately NO DELETE anywhere in this view — a real, considered
+    design call, not an oversight. Hard-deleting an Account is
+    genuinely dangerous in a way editing isn't: JournalLine.account
+    is PROTECT (models.py), so a real posted history already makes
+    deletion impossible for any account that has ever been used — but
+    even an unused custom account is safer handled as a deactivation
+    (is_active=False, via PATCH) than a real delete, matching this
+    codebase's own established "immutable, never silently vanish"
+    philosophy (Principle #15) and standing in deliberate contrast to
+    the exact kind of Delete-on-Purchase-Invoice behavior flagged as
+    a real open question in the Mekari Jurnal comparison (Open
+    Decision #23). If a genuinely unused, mistakenly-created account
+    ever needs to be fully removed, that stays a deliberate, rare
+    DB/admin action — never a routine API affordance.
+    """
+    model = Account
+
+    def get(self, request, pk):
+        account = self.get_queryset().filter(pk=pk).first()
+        if account is None:
+            return Response(
+                {"success": False, "message": "Akun tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response({"success": True, "account": AccountSerializer(account).data})
+
+    def patch(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa mengubah akun."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        account = Account.objects.filter(organization=organization, pk=pk).first()
+        if account is None:
+            return Response(
+                {"success": False, "message": "Akun tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = AccountEditSerializer(data=request.data, partial=True)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        try:
+            account.apply_edit(**data)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"success": True, "account": AccountSerializer(account).data})
 
 class TrialBalanceView(TenantScopedAPIView):
     """GET /api/accounting/trial-balance/?as_of=YYYY-MM-DD"""
