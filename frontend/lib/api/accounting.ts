@@ -575,9 +575,6 @@ export type OpeningBalanceOtherSide = "debit" | "credit";
 export interface OpeningBalanceOtherLineRow {
   id: string;
   account_code: string;
-  // Best-effort on the backend — null if account_code doesn't
-  // (yet) resolve to a real Account. See that serializer's own
-  // docstring: only ever validated for real at post() time.
   account_name: string | null;
   side: OpeningBalanceOtherSide;
   amount: string | number;
