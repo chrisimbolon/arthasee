@@ -226,19 +226,25 @@ class AccountSerializer(serializers.ModelSerializer):
 
     has_posted_history lets the frontend edit form lock the
     classification fields (account_subtype/is_contra) BEFORE the
-    user even tries, rather than making them discover the real guard
-    in Account.apply_edit() only after a 400 comes back. Computed on
-    read, never cached — same "never a second source of truth"
-    discipline as Asset.book_value and every other computed property
-    in this codebase.
+    user even tries. 9 Sep 2026 — Phase 17, Task 17.2 adds parent_code/
+    parent_name (flat, read-friendly fields — same convention as
+    OpeningBalanceReceivableSerializer's own customer_name) and
+    children_count, a cheap SerializerMethodField so a Chart of
+    Accounts UI can show "3 sub-accounts" without needing to fetch
+    and count every account's own children client-side. `parent`
+    itself is a real Account UUID or null.
     """
     has_posted_history = serializers.SerializerMethodField()
+    parent_code = serializers.CharField(source="parent.code", read_only=True, default=None)
+    parent_name = serializers.CharField(source="parent.name", read_only=True, default=None)
+    children_count = serializers.SerializerMethodField()
 
     class Meta:
         model  = Account
         fields = [
             "id", "code", "name", "account_type", "normal_balance",
             "account_subtype", "is_contra", "is_control_account",
+            "parent", "parent_code", "parent_name", "children_count",
             "description", "is_active", "has_posted_history",
             "created_at", "updated_at",
         ]
@@ -247,18 +253,26 @@ class AccountSerializer(serializers.ModelSerializer):
     def get_has_posted_history(self, obj):
         return JournalLine.objects.filter(account=obj).exists()
 
+    def get_children_count(self, obj):
+        return obj.children.count()
 
 class AccountRecordSerializer(serializers.Serializer):
     """
     Write-only input for POST /api/accounting/accounts/. account_type
     and normal_balance are deliberately NOT fields on this serializer
     at all — account_subtype is required, and account_type/
-    normal_balance are always derived server-side by Account.save(),
-    matching the exact "Ditentukan otomatis..." auto-derivation
-    behavior Phase 16 already established for the standard COA. This
-    closes off the one way a custom account could otherwise be
-    created internally inconsistent (a subtype that says one thing,
-    a type/normal_balance that says another).
+    normal_balance are always derived server-side by Account.save().
+
+    9 Sep 2026 — Phase 17, Task 17.2 adds `parent` (optional, real
+    Account UUID). `default=None` here is deliberate and different
+    from AccountEditSerializer's own `parent` field below — on
+    CREATE there is no "don't touch" state to preserve, so omitting
+    it simply means "no parent," a plain, unambiguous default.
+    Resolved and validated for real (existence + same-organization
+    tenant isolation) inside Account.record() itself, never trusted
+    as a bare id at this layer — same "shape only here, business
+    rules in the model" split every RecordSerializer in this file
+    already follows.
     """
     code = serializers.CharField(max_length=10)
     name = serializers.CharField(max_length=200)
@@ -266,6 +280,7 @@ class AccountRecordSerializer(serializers.Serializer):
     is_contra = serializers.BooleanField(default=False)
     is_control_account = serializers.BooleanField(default=False)
     description = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+    parent = serializers.UUIDField(required=False, allow_null=True, default=None)
 
     def validate_code(self, value):
         value = value.strip()
@@ -279,19 +294,22 @@ class AccountRecordSerializer(serializers.Serializer):
             raise serializers.ValidationError("Nama akun tidak boleh kosong.")
         return value
 
-
 class AccountEditSerializer(serializers.Serializer):
     """
     Write-only input for PATCH /api/accounting/accounts/<pk>/. Every
-    field is optional — this is a genuine partial update, not a
-    full-replace. `code` is deliberately absent as a field entirely —
-    immutable after creation (see Account.apply_edit()'s own
-    docstring in models.py for why). account_subtype/is_contra ARE
-    accepted here at the serializer layer, but Account.apply_edit()
-    itself will reject changing either once the account has any real
-    posted JournalLine — this serializer only validates SHAPE (a real
-    choice from AccountSubtype, a real boolean), never the
-    has-history business rule, which is the model's job.
+    field is optional — a genuine partial update. `code` is
+    deliberately absent as a field entirely — immutable after
+    creation.
+
+    9 Sep 2026 — Phase 17, Task 17.2 adds `parent`
+    (`required=False, allow_null=True`, deliberately NO `default`
+    here — this is what makes DRF exclude the key from
+    validated_data entirely when the client omits it, which is
+    exactly the "untouched" signal Account.apply_edit()'s own
+    `_UNSET` sentinel is built to detect. Sending `"parent": null`
+    explicitly clears it; sending a real Account id reassigns it;
+    omitting the key leaves it alone. See apply_edit()'s own
+    docstring in models.py for the full three-state reasoning.
     """
     name = serializers.CharField(max_length=200, required=False)
     description = serializers.CharField(max_length=255, required=False, allow_blank=True)
@@ -299,6 +317,7 @@ class AccountEditSerializer(serializers.Serializer):
     account_subtype = serializers.ChoiceField(choices=Account.AccountSubtype.choices, required=False)
     is_contra = serializers.BooleanField(required=False)
     is_control_account = serializers.BooleanField(required=False)
+    parent = serializers.UUIDField(required=False, allow_null=True)
 
     def validate_name(self, value):
         value = value.strip()
