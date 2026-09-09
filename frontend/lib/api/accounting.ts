@@ -595,10 +595,6 @@ export interface OpeningBalanceSessionResponse {
   receivable_lines: OpeningBalanceReceivableRow[];
   payable_lines: OpeningBalancePayableRow[];
   other_lines: OpeningBalanceOtherLineRow[];
-  // Live PREVIEW totals, computed the same way post() itself
-  // assembles the real journal — see OpeningBalanceSessionSerializer's
-  // own docstring for why this is a client-facing preview, not the
-  // same code path as the real balance check inside post().
   total_debit: string | number;
   total_credit: string | number;
   is_balanced: boolean;
