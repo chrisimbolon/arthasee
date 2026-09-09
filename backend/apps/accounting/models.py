@@ -284,6 +284,153 @@ class Account(TenantScopedModel):
                 f"seeded (python manage.py seed_coa)?"
             ) from exc
 
+    @classmethod
+    def record(
+        cls, *, organization, code, name, account_subtype,
+        is_contra=False, is_control_account=False, description="",
+    ):
+        """
+        9 Sep 2026 — Phase 17, Task 17.1. The one real entry point for
+        creating a CUSTOM Account via the live API
+        (AccountListCreateView.post()) — found genuinely MISSING
+        during Phase 17 design review: no such endpoint existed
+        anywhere in this codebase before now. `seed_coa.py`'s own
+        idempotent `get_or_create()` remains the separate, deliberate
+        path for the standard COA at signup/backfill time —
+        unchanged by this, and deliberately not routed through this
+        method (seeding 26 known-good rows at once is a different
+        real operation from a live, single, user-typed creation).
+
+        `account_subtype` is REQUIRED here, unlike the model field's
+        own `blank=True` default (kept only so hundreds of existing
+        test fixtures across this codebase can keep constructing an
+        `Account` directly with a manually-set `account_type`/
+        `normal_balance` and no subtype at all). The real, user-facing
+        creation endpoint always requires a real subtype so
+        `account_type`/`normal_balance` are ALWAYS derived by
+        `save()` itself — `account_type`/`normal_balance` are
+        deliberately not even parameters of this method; there is no
+        way to call this and have them independently guessed by
+        whichever person is filling out the form. Matches the exact
+        "Ditentukan otomatis..." auto-derivation behavior Phase 16
+        already established for the standard COA.
+
+        Real, explicit duplicate-code guard, not left to a bare
+        `IntegrityError` bubbling up as a 500: `Account.Meta.
+        unique_together = [("organization", "code")]` is the real,
+        final backstop at the DB level (guards a genuine race between
+        two concurrent requests), but this method checks first and
+        raises a clean, real `ValueError` with the actual code named
+        — the same "validate before writing, never trust a caller to
+        get this right" discipline as every other real write path in
+        this codebase (Cheat Sheet §1). The `except IntegrityError`
+        fallback exists specifically for that narrow race window
+        between the check and the write — it should be genuinely rare
+        in practice, not the primary way this ever surfaces an error.
+        """
+        code = (code or "").strip()
+        if not code:
+            raise ValueError("Kode akun tidak boleh kosong.")
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Nama akun tidak boleh kosong.")
+        if account_subtype not in cls.SUBTYPE_CLASSIFICATION:
+            raise ValueError(f"Sub-tipe akun tidak valid: {account_subtype!r}.")
+
+        with transaction.atomic():
+            if cls.objects.filter(organization=organization, code=code).exists():
+                raise ValueError(f"Akun dengan kode {code!r} sudah ada untuk organisasi ini.")
+            try:
+                account = cls.objects.create(
+                    organization=organization,
+                    code=code,
+                    name=name,
+                    account_subtype=account_subtype,
+                    is_contra=is_contra,
+                    is_control_account=is_control_account,
+                    description=description,
+                )
+            except IntegrityError:
+                # Real, narrow race window between the exists() check
+                # above and this create() — two concurrent requests
+                # for the same new code. Translated into the same
+                # clean ValueError shape as the pre-check above,
+                # never a raw 500.
+                raise ValueError(f"Akun dengan kode {code!r} sudah ada untuk organisasi ini.")
+
+        return account
+
+    def apply_edit(
+        self, *, name=None, description=None, is_active=None,
+        account_subtype=None, is_contra=None, is_control_account=None,
+    ):
+        """
+        9 Sep 2026 — Phase 17, Task 17.1. The one real path for
+        editing an existing Account — called only from
+        AccountDetailView.patch(). `code` is deliberately not a
+        parameter here at all: immutable once created, since a real
+        account code may already be referenced on historical
+        documents, exports, or a shop's own accountant's paper
+        records built around it. There is no method signature that
+        can even attempt to change it.
+
+        Real, deliberate guard — the actual reason this is a method
+        on the model and not a bare `serializer.save()`: once this
+        account has ANY real posted `JournalLine`, its classification
+        (`account_subtype`/`is_contra`, and therefore the DERIVED
+        `account_type`/`normal_balance` — see `save()` above) can
+        never be changed again. Changing `normal_balance` on an
+        account with real history wouldn't touch a single existing
+        `JournalLine` row — it would silently REINTERPRET every
+        debit/credit already posted to it, flipping the sign of
+        `Account.balance()`'s own arithmetic for every past
+        transaction without moving a single rupiah. This is the same
+        "never let a change silently reinterpret already-posted
+        history" discipline Phase 16's control-account enforcement
+        and Phase 15's immutability hardening are both built on — see
+        Roadmap Principle #15 (Immutable-on-Post, Never
+        Recompute-on-Read).
+
+        `is_control_account` is deliberately NOT covered by this
+        guard — toggling it changes only whether FUTURE manual
+        journals are blocked (`JournalEntry.post()`'s own check); it
+        never reinterprets a single already-posted line. Real
+        protection for this one instead comes from the view layer —
+        `AccountDetailView.patch()` is owner-only, matching the same
+        stakes class as every other real, consequential write path in
+        this app.
+        """
+        classification_changed = (
+            (account_subtype is not None and account_subtype != self.account_subtype)
+            or (is_contra is not None and is_contra != self.is_contra)
+        )
+        if classification_changed and JournalLine.objects.filter(account=self).exists():
+            raise ValueError(
+                f"Akun {self.code} sudah memiliki riwayat transaksi terposting — "
+                f"sub-tipe akun dan status akun kontra tidak bisa diubah lagi, "
+                f"karena akan membalik interpretasi saldo dari transaksi yang "
+                f"sudah ada. Buat akun baru jika klasifikasi yang benar berbeda."
+            )
+
+        if name is not None:
+            stripped = name.strip()
+            if not stripped:
+                raise ValueError("Nama akun tidak boleh kosong.")
+            self.name = stripped
+        if description is not None:
+            self.description = description
+        if is_active is not None:
+            self.is_active = is_active
+        if account_subtype is not None:
+            self.account_subtype = account_subtype
+        if is_contra is not None:
+            self.is_contra = is_contra
+        if is_control_account is not None:
+            self.is_control_account = is_control_account
+
+        self.save()
+        return self        
+
 class AccountingPeriod(TenantScopedModel):
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     year       = models.PositiveIntegerField(verbose_name="Tahun")
