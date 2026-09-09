@@ -206,6 +206,105 @@ class DepreciationRunSerializer(serializers.ModelSerializer):
         fields = ["id", "accounting_period", "journal_entry_id", "total_amount", "run_at", "entries"]
         read_only_fields = fields
 
+"""
+The real, previously-missing Account management serializers — found
+absent during Phase 17 design review (no such endpoint existed
+anywhere in this codebase before now). Same real read/write split
+every other write path in this file already establishes: a plain
+ModelSerializer for the READ representation, and a separate,
+dedicated `...RecordSerializer`/`...EditSerializer` pair for WRITE
+input — matching AssetSerializer/AssetRecordSerializer's own exact
+naming and shape.
+"""
+
+
+class AccountSerializer(serializers.ModelSerializer):
+    """
+    Entirely read-only — an Account is only ever created/edited via
+    the real Account.record()/Account.apply_edit() model methods
+    (models.py), never through a generic serializer.save().
+
+    has_posted_history lets the frontend edit form lock the
+    classification fields (account_subtype/is_contra) BEFORE the
+    user even tries, rather than making them discover the real guard
+    in Account.apply_edit() only after a 400 comes back. Computed on
+    read, never cached — same "never a second source of truth"
+    discipline as Asset.book_value and every other computed property
+    in this codebase.
+    """
+    has_posted_history = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Account
+        fields = [
+            "id", "code", "name", "account_type", "normal_balance",
+            "account_subtype", "is_contra", "is_control_account",
+            "description", "is_active", "has_posted_history",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_has_posted_history(self, obj):
+        return JournalLine.objects.filter(account=obj).exists()
+
+
+class AccountRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/accounting/accounts/. account_type
+    and normal_balance are deliberately NOT fields on this serializer
+    at all — account_subtype is required, and account_type/
+    normal_balance are always derived server-side by Account.save(),
+    matching the exact "Ditentukan otomatis..." auto-derivation
+    behavior Phase 16 already established for the standard COA. This
+    closes off the one way a custom account could otherwise be
+    created internally inconsistent (a subtype that says one thing,
+    a type/normal_balance that says another).
+    """
+    code = serializers.CharField(max_length=10)
+    name = serializers.CharField(max_length=200)
+    account_subtype = serializers.ChoiceField(choices=Account.AccountSubtype.choices)
+    is_contra = serializers.BooleanField(default=False)
+    is_control_account = serializers.BooleanField(default=False)
+    description = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+    def validate_code(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Kode akun tidak boleh kosong.")
+        return value
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Nama akun tidak boleh kosong.")
+        return value
+
+
+class AccountEditSerializer(serializers.Serializer):
+    """
+    Write-only input for PATCH /api/accounting/accounts/<pk>/. Every
+    field is optional — this is a genuine partial update, not a
+    full-replace. `code` is deliberately absent as a field entirely —
+    immutable after creation (see Account.apply_edit()'s own
+    docstring in models.py for why). account_subtype/is_contra ARE
+    accepted here at the serializer layer, but Account.apply_edit()
+    itself will reject changing either once the account has any real
+    posted JournalLine — this serializer only validates SHAPE (a real
+    choice from AccountSubtype, a real boolean), never the
+    has-history business rule, which is the model's job.
+    """
+    name = serializers.CharField(max_length=200, required=False)
+    description = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    is_active = serializers.BooleanField(required=False)
+    account_subtype = serializers.ChoiceField(choices=Account.AccountSubtype.choices, required=False)
+    is_contra = serializers.BooleanField(required=False)
+    is_control_account = serializers.BooleanField(required=False)
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Nama akun tidak boleh kosong.")
+        return value
 
 # =============================================================================
 # Opening Balance — new-workshop onboarding (3 Sep 2026)
