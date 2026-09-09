@@ -157,6 +157,7 @@ class AccountListCreateView(TenantScopedAPIView):
                 is_contra=data["is_contra"],
                 is_control_account=data["is_control_account"],
                 description=data["description"],
+                parent=data["parent"],
             )
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
