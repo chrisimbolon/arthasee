@@ -900,3 +900,126 @@ export const generalLedgerApi = {
     }
   },
 };
+
+// =============================================================================
+// Chart of Accounts — Account CRUD (9 Sep 2026, Phase 17 Task 17.1)
+// =============================================================================
+// The real, previously-missing Account management endpoint — found
+// absent during Phase 17 design review. account_subtype is REQUIRED
+// on create; account_type/normal_balance are never accepted as
+// direct input anywhere in this file — they're always derived
+// server-side (see Account.save()'s own docstring in models.py),
+// same auto-derivation behavior the reference-ERP comparison itself
+// confirmed is the right UI pattern.
+//
+// has_posted_history tells the edit form which fields to grey out
+// BEFORE the user tries, rather than making them discover
+// Account.apply_edit()'s own real guard only after a 400 comes back.
+
+export type AccountSubtype =
+  | "KAS_SETARA_KAS" | "PIUTANG_USAHA" | "PIUTANG_LAINNYA" | "PERSEDIAAN"
+  | "BIAYA_DIBAYAR_DIMUKA" | "ASET_TETAP" | "ASET_TAKBERWUJUD" | "INVESTASI"
+  | "ASET_LAINNYA" | "UTANG_USAHA" | "UTANG_LAINNYA" | "UTANG_PAJAK"
+  | "LIABILITAS_KEUANGAN" | "PENDAPATAN_DITERIMA_DIMUKA" | "UTANG_JANGKA_PANJANG"
+  | "EKUITAS" | "PENDAPATAN" | "PENDAPATAN_LAIN_LAIN" | "BEBAN_POKOK_PENJUALAN"
+  | "BEBAN_USAHA" | "BEBAN_LAIN_LAIN";
+
+// Mirrors AccountSerializer's own field order exactly (backend
+// serializers.py) — a real, read-only Chart of Accounts row.
+export interface AccountRow {
+  id: string;
+  code: string;
+  name: string;
+  account_type: string;
+  normal_balance: "DEBIT" | "CREDIT";
+  // "" is a real, valid state — every pre-existing standard account
+  // seeded before Phase 16 backfilled account_subtype has this, and
+  // the model field itself is blank=True. A custom account created
+  // through this new endpoint will always have a real value here,
+  // since AccountRecordSerializer requires it — but the type stays
+  // honest about the field's real, full range on the READ side.
+  account_subtype: AccountSubtype | "";
+  is_contra: boolean;
+  is_control_account: boolean;
+  description: string;
+  is_active: boolean;
+  has_posted_history: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountCreatePayload {
+  code: string;
+  name: string;
+  account_subtype: AccountSubtype;
+  is_contra?: boolean;
+  is_control_account?: boolean;
+  description?: string;
+}
+
+// Every field optional — PATCH is a genuine partial update. `code`
+// is deliberately absent — immutable after creation (see
+// Account.apply_edit()'s own docstring in models.py). Sending
+// account_subtype/is_contra for an account that already has
+// has_posted_history: true will be rejected server-side with a real,
+// user-facing message — the frontend form should disable those two
+// fields when has_posted_history is true rather than relying on the
+// error round-trip, but the backend guard is the real enforcement
+// either way.
+export interface AccountEditPayload {
+  name?: string;
+  description?: string;
+  is_active?: boolean;
+  account_subtype?: AccountSubtype;
+  is_contra?: boolean;
+  is_control_account?: boolean;
+}
+
+export interface AccountActionResult {
+  success: boolean;
+  message?: string;
+  account?: AccountRow;
+}
+
+export const accountsApi = {
+  list: () => getListOrNull<AccountRow>("/api/accounting/accounts/", "accounts", {}),
+
+  // Real, honest null-on-failure — a stale/deleted id or a missing
+  // org collapses to null, same convention as
+  // depreciationRunApi.forPeriod() and accountingApi.journalEntry()
+  // above. The detail page renders its own "couldn't load" state
+  // rather than throwing.
+  async get(id: string): Promise<AccountRow | null> {
+    try {
+      const { data } = await api.get(`/api/accounting/accounts/${id}/`);
+      return data.account;
+    } catch {
+      return null;
+    }
+  },
+
+  // Real WRITE action — same discipline as assetsApi.record() above:
+  // a failure here (a duplicate code, an empty name) must surface
+  // its real message to the user, not silently collapse.
+  async create(payload: AccountCreatePayload): Promise<AccountActionResult> {
+    try {
+      const { data } = await api.post("/api/accounting/accounts/", payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal membuat akun.") };
+    }
+  },
+
+  // Real WRITE action, genuinely partial — only send the fields that
+  // actually changed. A rejected classification change (real posted
+  // history exists) surfaces its own real, specific message, same as
+  // every other real 400 in this file.
+  async edit(id: string, payload: AccountEditPayload): Promise<AccountActionResult> {
+    try {
+      const { data } = await api.patch(`/api/accounting/accounts/${id}/`, payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal mengubah akun.") };
+    }
+  },
+};
