@@ -3,8 +3,9 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (AccountingPeriodCloseView, AccountingPeriodListView,
-                    AccountingPeriodReopenView, AgingAPView, AgingARView,
+from .views import (AccountDetailView, AccountingPeriodCloseView,
+                    AccountingPeriodListView, AccountingPeriodReopenView,
+                    AccountListCreateView, AgingAPView, AgingARView,
                     AssetListCreateView, BalanceSheetView,
                     CashConversionCycleView, DailyCashActivityView,
                     DashboardFinancialSummaryView, DepreciationRunDetailView,
@@ -39,6 +40,12 @@ urlpatterns = [
     path("daily-cash-activity/", DailyCashActivityView.as_view(), name="daily-cash-activity"),
     # 4 Sep 2026 — General Ledger (Buku Besar), account-centric view.
     path("general-ledger/", GeneralLedgerView.as_view(), name="general-ledger"),
+    # 9 Sep 2026 — Phase 17, Task 17.1. The real, previously-missing
+    # Chart of Accounts management endpoint — found absent during
+    # Phase 17 design review. A hard precondition for Task 17.2
+    # (Sub-Accounts) to be usable at all.
+    path("accounts/", AccountListCreateView.as_view(), name="account-list-create"),
+    path("accounts/<uuid:pk>/", AccountDetailView.as_view(), name="account-detail"),
     path("manual-journals/", ManualJournalListCreateView.as_view(), name="manual-journal-list-create"),
     path("journal-entries/", JournalEntryListView.as_view(),       name="journal-entry-list"),
     path("journal-entries/<uuid:pk>/", JournalEntryDetailView.as_view(), name="journal-entry-detail"),
