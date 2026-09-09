@@ -53,11 +53,9 @@
 //     rule client-side" discipline as every other real write path in
 //     this app.
 //
-// Styling note: no confirmed shared button class exists in the
-// files this page was written against, so interactive buttons below
-// use plain inline styles rather than inventing a className that may
-// not exist in globals.css. Swap in a real shared button class if
-// one exists in this codebase.
+// Styling: uses the real .btn-rust (primary) / .btn-ghost (secondary)
+// classes confirmed in globals.css — same shared component classes
+// as the rest of this app, not invented inline styles.
 // =============================================================================
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
@@ -229,13 +227,7 @@ export default function ChartOfAccountsPage() {
           </div>
           <button
             onClick={() => { setCreating(!creating); setEditingId(null); }}
-            style={{
-              display: "flex", alignItems: "center", gap: 6, padding: "10px 16px",
-              borderRadius: 8, border: "1px solid var(--line, #ddd)",
-              background: creating ? "var(--paper, #fff)" : "var(--ink, #111)",
-              color: creating ? "var(--ink, #111)" : "var(--paper, #fff)",
-              fontSize: 14, cursor: "pointer", whiteSpace: "nowrap",
-            }}
+            className={creating ? "btn-ghost" : "btn-rust"}
           >
             <Plus size={16} /> Tambah Akun
           </button>
@@ -348,7 +340,7 @@ function EditPanelRow({
 }) {
   return (
     <tr>
-      <td colSpan={4} style={{ background: "var(--paper-alt, #fafafa)", padding: 16 }}>
+      <td colSpan={4} style={{ background: "var(--paper-2)", padding: 16 }}>
         {account.has_posted_history && (
           <div style={{ fontSize: 13, color: "var(--steel)", marginBottom: 12 }}>
             Akun ini sudah memiliki riwayat transaksi terposting — Sub-Tipe Akun dan status
@@ -553,28 +545,14 @@ function AccountForm({
       </div>
 
       {error && (
-        <div style={{ fontSize: 13, color: "var(--danger, #c0392b)" }}>{error}</div>
+        <div style={{ fontSize: 13, color: "var(--danger)" }}>{error}</div>
       )}
 
       <div style={{ display: "flex", gap: 8 }}>
-        <button
-          onClick={handleSubmit} disabled={submitting}
-          style={{
-            padding: "8px 16px", borderRadius: 8, border: "none",
-            background: "var(--ink, #111)", color: "var(--paper, #fff)",
-            fontSize: 14, cursor: submitting ? "default" : "pointer", opacity: submitting ? 0.6 : 1,
-          }}
-        >
+        <button onClick={handleSubmit} disabled={submitting} className="btn-rust">
           {submitting ? "Menyimpan..." : mode === "create" ? "Buat Akun" : "Simpan Perubahan"}
         </button>
-        <button
-          onClick={onCancel} disabled={submitting}
-          style={{
-            padding: "8px 16px", borderRadius: 8, border: "1px solid var(--line, #ddd)",
-            background: "var(--paper, #fff)", color: "var(--ink, #111)",
-            fontSize: 14, cursor: "pointer",
-          }}
-        >
+        <button onClick={onCancel} disabled={submitting} className="btn-ghost">
           Batal
         </button>
       </div>
