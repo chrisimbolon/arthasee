@@ -1049,9 +1049,6 @@ export const accountsApi = {
     }
   },
 
-  // Real WRITE action — same discipline as assetsApi.record() above:
-  // a failure here (a duplicate code, an empty name) must surface
-  // its real message to the user, not silently collapse.
   async create(payload: AccountCreatePayload): Promise<AccountActionResult> {
     try {
       const { data } = await api.post("/api/accounting/accounts/", payload);
