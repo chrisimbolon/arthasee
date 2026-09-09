@@ -924,6 +924,45 @@ export type AccountSubtype =
   | "EKUITAS" | "PENDAPATAN" | "PENDAPATAN_LAIN_LAIN" | "BEBAN_POKOK_PENJUALAN"
   | "BEBAN_USAHA" | "BEBAN_LAIN_LAIN";
 
+export const ACCOUNT_SUBTYPE_LABELS: Record<AccountSubtype, string> = {
+  KAS_SETARA_KAS: "Kas dan Setara Kas",
+  PIUTANG_USAHA: "Piutang Usaha",
+  PIUTANG_LAINNYA: "Piutang Lainnya",
+  PERSEDIAAN: "Persediaan",
+  BIAYA_DIBAYAR_DIMUKA: "Biaya Dibayar Dimuka",
+  ASET_TETAP: "Aset Tetap",
+  ASET_TAKBERWUJUD: "Aset Takberwujud",
+  INVESTASI: "Investasi",
+  ASET_LAINNYA: "Aset Lainnya",
+  UTANG_USAHA: "Utang Usaha",
+  UTANG_LAINNYA: "Utang Lainnya",
+  UTANG_PAJAK: "Utang Pajak",
+  LIABILITAS_KEUANGAN: "Liabilitas Keuangan",
+  PENDAPATAN_DITERIMA_DIMUKA: "Pendapatan Diterima Dimuka",
+  UTANG_JANGKA_PANJANG: "Utang Jangka Panjang",
+  EKUITAS: "Ekuitas",
+  PENDAPATAN: "Pendapatan",
+  PENDAPATAN_LAIN_LAIN: "Pendapatan Lain-lain",
+  BEBAN_POKOK_PENJUALAN: "Beban Pokok Penjualan",
+  BEBAN_USAHA: "Beban Usaha",
+  BEBAN_LAIN_LAIN: "Beban Lain-lain",
+};
+
+export const ACCOUNT_SUBTYPE_GROUPS: { label: string; subtypes: AccountSubtype[] }[] = [
+  { label: "Aset", subtypes: [
+    "KAS_SETARA_KAS", "PIUTANG_USAHA", "PIUTANG_LAINNYA", "PERSEDIAAN",
+    "BIAYA_DIBAYAR_DIMUKA", "ASET_TETAP", "ASET_TAKBERWUJUD", "INVESTASI", "ASET_LAINNYA",
+  ] },
+  { label: "Liabilitas", subtypes: [
+    "UTANG_USAHA", "UTANG_LAINNYA", "UTANG_PAJAK",
+    "LIABILITAS_KEUANGAN", "PENDAPATAN_DITERIMA_DIMUKA", "UTANG_JANGKA_PANJANG",
+  ] },
+  { label: "Ekuitas", subtypes: ["EKUITAS"] },
+  { label: "Pendapatan", subtypes: ["PENDAPATAN", "PENDAPATAN_LAIN_LAIN"] },
+  { label: "Harga Pokok Penjualan", subtypes: ["BEBAN_POKOK_PENJUALAN"] },
+  { label: "Beban", subtypes: ["BEBAN_USAHA", "BEBAN_LAIN_LAIN"] },
+];
+
 // Mirrors AccountSerializer's own field order exactly (backend
 // serializers.py) — a real, read-only Chart of Accounts row.
 export interface AccountRow {
