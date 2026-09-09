@@ -932,15 +932,20 @@ export interface AccountRow {
   name: string;
   account_type: string;
   normal_balance: "DEBIT" | "CREDIT";
-  // "" is a real, valid state — every pre-existing standard account
-  // seeded before Phase 16 backfilled account_subtype has this, and
-  // the model field itself is blank=True. A custom account created
-  // through this new endpoint will always have a real value here,
-  // since AccountRecordSerializer requires it — but the type stays
-  // honest about the field's real, full range on the READ side.
   account_subtype: AccountSubtype | "";
   is_contra: boolean;
   is_control_account: boolean;
+  // 9 Sep 2026 — Phase 17, Task 17.2. `parent` is a real Account id
+  // or null (top-level). parent_code/parent_name are flat,
+  // read-friendly display fields — same convention as
+  // OpeningBalanceReceivableRow's own customer_name. PURELY
+  // organizational — never used in any balance/total math anywhere
+  // in this file; see Account's own class docstring in models.py for
+  // the full "no rollup" design reasoning (Open Decision #21).
+  parent: string | null;
+  parent_code: string | null;
+  parent_name: string | null;
+  children_count: number;
   description: string;
   is_active: boolean;
   has_posted_history: boolean;
@@ -955,17 +960,13 @@ export interface AccountCreatePayload {
   is_contra?: boolean;
   is_control_account?: boolean;
   description?: string;
+  // 9 Sep 2026 — Phase 17, Task 17.2. Omit for a top-level account;
+  // pass a real Account id to create it directly as a sub-account.
+  parent?: string | null;
 }
 
 // Every field optional — PATCH is a genuine partial update. `code`
-// is deliberately absent — immutable after creation (see
-// Account.apply_edit()'s own docstring in models.py). Sending
-// account_subtype/is_contra for an account that already has
-// has_posted_history: true will be rejected server-side with a real,
-// user-facing message — the frontend form should disable those two
-// fields when has_posted_history is true rather than relying on the
-// error round-trip, but the backend guard is the real enforcement
-// either way.
+// is deliberately absent — immutable after creation.
 export interface AccountEditPayload {
   name?: string;
   description?: string;
@@ -973,6 +974,17 @@ export interface AccountEditPayload {
   account_subtype?: AccountSubtype;
   is_contra?: boolean;
   is_control_account?: boolean;
+  // 9 Sep 2026 — Phase 17, Task 17.2. Real three-state field on the
+  // wire, matching Account.apply_edit()'s own _UNSET sentinel on the
+  // backend: DON'T include this key at all to leave parent
+  // untouched; include it as `null` to clear it (make this account
+  // top-level again); include a real Account id to reassign it. A
+  // plain TypeScript optional (`parent?: string | null`) can't
+  // enforce "omit vs. explicit null" at the type level — the caller
+  // is responsible for only including the key when a real change is
+  // intended, e.g. build the payload object conditionally rather
+  // than always spreading `{ parent: someMaybeUndefinedValue }`.
+  parent?: string | null;
 }
 
 export interface AccountActionResult {
