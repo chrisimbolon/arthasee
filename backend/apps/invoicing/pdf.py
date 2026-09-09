@@ -78,18 +78,34 @@ to the real invoice-detail page:
      module: apps.estimates.pdf's own status badge uses the exact
      same <span>-in-<td> pattern with identical CSS, so this same
      rendering gap exists there too (flagged, not fixed here — out of
-     this module's own scope). xhtml2pdf's padding support on inline
-     elements (<span>) is unreliable; table cells (<td>) reliably
-     support both padding and background-color, which is why every
-     OTHER real bordered/shaded element in this file already uses a
-     table, never a styled span. Replaced the <span>-in-100%-width-
-     table wrapper with a single, auto-width, right-aligned table
-     (align="right" — xhtml2pdf's own reportlab-flowable positioning
-     honors this legacy HTML attribute far more reliably than CSS
-     margin/float tricks for table placement) whose one real <td> IS
-     the badge — background-color and padding now live directly on a
-     table cell, the one element type this renderer is documented to
-     handle correctly.
+     this module's own scope). The first attempted fix (a table-cell-
+     based badge) is itself superseded below by round three — see
+     that entry for why.
+
+9 Sep 2026 — real, third-round fix, found against an actually
+printed PDF of the second-round fix itself:
+  6. The table-based status badge (fix #5's own first attempt)
+     rendered as a wide, solid block ("too brutal") rather than a
+     compact pill — the table did not shrink to fit its own text
+     content in xhtml2pdf the way a normal table would in a browser.
+     Replaced entirely with the simplest, safest primitive already
+     proven correct everywhere else in this exact file: a plain
+     <div>, bold and colored, no background, no padding, no table. A
+     printed document conveying status via bold colored text is a
+     completely ordinary, real convention — not a downgrade from the
+     web page's own pill badge, which has no such rendering
+     constraint to work around.
+  7. Real, excess vertical whitespace between org-name and org-
+     address, and separately between the Pelanggan label and a long
+     customer name — the same visual signature in two unrelated
+     places, meaning a systemic gap rather than something local to
+     any one element: nothing in this file's CSS ever explicitly
+     zeroed default margin/padding on these divs, and xhtml2pdf does
+     not reliably collapse margins the way a browser does. Every
+     header/label/value element now sets margin and padding
+     explicitly rather than relying on an assumed default — the same
+     "verified, not assumed" discipline this module's own docstring
+     has always claimed for its CSS.
 """
 from decimal import Decimal
 from io import BytesIO
@@ -316,17 +332,17 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
         body {{ font-family: Helvetica, Arial, sans-serif; font-size: 10pt; color: #17181a; }}
         .header-table {{ width: 100%; margin-bottom: 20px; }}
         .header-table td {{ vertical-align: top; }}
-        .org-name {{ font-size: 16pt; font-weight: bold; }}
-        .org-address {{ font-size: 9pt; color: #52514e; margin-top: 2px; }}
-        .doc-title {{ font-size: 10pt; color: #6b6b6b; margin-top: 4px; }}
+        .org-name {{ font-size: 16pt; font-weight: bold; margin: 0; padding: 0; }}
+        .org-address {{ font-size: 9pt; color: #52514e; margin: 2px 0 0 0; padding: 0; }}
+        .doc-title {{ font-size: 10pt; color: #6b6b6b; margin: 4px 0 0 0; padding: 0; }}
         .est-number {{ font-size: 12pt; font-weight: bold; text-align: right; }}
         .est-date {{ font-size: 9.5pt; color: #6b6b6b; text-align: right; margin-top: 2px; }}
-        .status-badge-cell {{ font-size: 8.5pt; font-weight: bold; color: #ffffff;
-                         background-color: {STATUS_COLOR.get(invoice.status, "#6b6b6b")};
-                         padding: 4px 12px; text-align: center; }}
+        .status-badge {{ font-size: 11pt; font-weight: bold; text-align: right;
+                         color: {STATUS_COLOR.get(invoice.status, "#6b6b6b")};
+                         margin: 6px 0 0 0; padding: 0; }}
         .info-table {{ width: 100%; margin-bottom: 20px; border-bottom: 1px solid #d8d8d8; padding-bottom: 14px; }}
-        .label {{ font-size: 8.5pt; color: #6b6b6b; text-transform: uppercase; }}
-        .value {{ font-size: 11pt; font-weight: bold; margin-top: 2px; }}
+        .label {{ font-size: 8.5pt; color: #6b6b6b; text-transform: uppercase; margin: 0; padding: 0; }}
+        .value {{ font-size: 11pt; font-weight: bold; margin: 2px 0 0 0; padding: 0; }}
         .section-title {{ font-size: 9pt; font-weight: bold; text-transform: uppercase;
                           color: #52514e; margin-top: 16px; margin-bottom: 6px; }}
         .line-table {{ width: 100%; border-collapse: collapse; margin-bottom: 4px; }}
@@ -361,9 +377,7 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
                 <td style="width: 45%;">
                     <div class="est-number">{invoice.number}</div>
                     <div class="est-date">{_format_date_id(invoice.created_at)}</div>
-                    <table align="right" style="margin-top: 6px;">
-                        <tr><td class="status-badge-cell">{STATUS_LABEL.get(invoice.status, invoice.status)}</td></tr>
-                    </table>
+                    <div class="status-badge">{STATUS_LABEL.get(invoice.status, invoice.status)}</div>
                 </td>
             </tr>
         </table>
