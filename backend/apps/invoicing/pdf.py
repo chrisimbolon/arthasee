@@ -54,6 +54,42 @@ compared directly to the real invoice-detail web page:
      web page's own presentation exactly, and picks "Sisa Tagihan"
      whenever any real amount has been paid, regardless of which
      mechanism paid it.
+
+9 Sep 2026 — real, second-round fix, found against an actually
+opened/printed PDF (not just its extracted text) compared directly
+to the real invoice-detail page:
+  4. Terbilang used to spell out invoice.balance_due — but this
+     builder is ONLY ever invoked for a PAID invoice (see the view's
+     own hard PAID-only gate), and Invoice.PAID is itself only ever
+     reached via Payment.record() the moment balance_due reaches
+     zero. That made terbilang read "Nol Rupiah" — Zero Rupiah — on
+     every single real invoice this system will ever produce, not an
+     edge case. Now spells out invoice.total instead, the real
+     transacted amount, matching what a real Indonesian kwitansi
+     actually shows (the amount received), and matching this
+     module's own original, correct behavior before real payment
+     tracking existed (back when balance_due and total were always
+     the same figure for an unpaid invoice).
+  5. The status badge (.status-badge, a <span> with background-color
+     and padding) rendered visibly cramped in the real, opened PDF —
+     text touching its own edges, no visible padding — while the
+     identical markup renders as a clean pill on the web page. A
+     genuine, documented xhtml2pdf limitation, not unique to this
+     module: apps.estimates.pdf's own status badge uses the exact
+     same <span>-in-<td> pattern with identical CSS, so this same
+     rendering gap exists there too (flagged, not fixed here — out of
+     this module's own scope). xhtml2pdf's padding support on inline
+     elements (<span>) is unreliable; table cells (<td>) reliably
+     support both padding and background-color, which is why every
+     OTHER real bordered/shaded element in this file already uses a
+     table, never a styled span. Replaced the <span>-in-100%-width-
+     table wrapper with a single, auto-width, right-aligned table
+     (align="right" — xhtml2pdf's own reportlab-flowable positioning
+     honors this legacy HTML attribute far more reliably than CSS
+     margin/float tricks for table placement) whose one real <td> IS
+     the badge — background-color and padding now live directly on a
+     table cell, the one element type this renderer is documented to
+     handle correctly.
 """
 from decimal import Decimal
 from io import BytesIO
@@ -257,12 +293,14 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
         <tr><td class="num">Sudah Dibayar</td><td class="num">− {_format_rupiah(paid_total)}</td></tr>"""
 
     total_label = "Sisa Tagihan" if paid_total > 0 else "Total"
-    # Terbilang describes the SAME figure total_label/the grand-total
-    # row actually shows — balance_due, not the pre-payment subtotal.
-    # Spelling out a different number than what's printed as the
-    # bottom-line total would be a real, confusing inconsistency on a
-    # financial document, not a cosmetic mismatch.
-    terbilang_text = terbilang_rupiah(invoice.balance_due)
+    # 9 Sep 2026 — real fix: was terbilang_rupiah(invoice.balance_due).
+    # This builder only ever runs for a PAID invoice (balance_due is
+    # therefore always 0 here — see this module's own updated
+    # docstring above for the full reasoning), so that produced "Nol
+    # Rupiah" on every real invoice this system ever generates. Spells
+    # out the real transacted amount instead — what a real kwitansi
+    # actually shows.
+    terbilang_text = terbilang_rupiah(invoice.total)
 
     created_by_block = ""
     if invoice.created_by_id and invoice.created_by.full_name:
@@ -283,9 +321,9 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
         .doc-title {{ font-size: 10pt; color: #6b6b6b; margin-top: 4px; }}
         .est-number {{ font-size: 12pt; font-weight: bold; text-align: right; }}
         .est-date {{ font-size: 9.5pt; color: #6b6b6b; text-align: right; margin-top: 2px; }}
-        .status-badge {{ font-size: 8.5pt; font-weight: bold; color: #ffffff;
+        .status-badge-cell {{ font-size: 8.5pt; font-weight: bold; color: #ffffff;
                          background-color: {STATUS_COLOR.get(invoice.status, "#6b6b6b")};
-                         padding: 3px 10px; text-align: center; }}
+                         padding: 4px 12px; text-align: center; }}
         .info-table {{ width: 100%; margin-bottom: 20px; border-bottom: 1px solid #d8d8d8; padding-bottom: 14px; }}
         .label {{ font-size: 8.5pt; color: #6b6b6b; text-transform: uppercase; }}
         .value {{ font-size: 11pt; font-weight: bold; margin-top: 2px; }}
@@ -323,9 +361,9 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
                 <td style="width: 45%;">
                     <div class="est-number">{invoice.number}</div>
                     <div class="est-date">{_format_date_id(invoice.created_at)}</div>
-                    <table style="width: 100%; margin-top: 6px;"><tr><td>
-                        <span class="status-badge">{STATUS_LABEL.get(invoice.status, invoice.status)}</span>
-                    </td></tr></table>
+                    <table align="right" style="margin-top: 6px;">
+                        <tr><td class="status-badge-cell">{STATUS_LABEL.get(invoice.status, invoice.status)}</td></tr>
+                    </table>
                 </td>
             </tr>
         </table>
