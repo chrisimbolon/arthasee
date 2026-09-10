@@ -40,7 +40,7 @@ uniformly:
     defeated the actual point of the test.
 """
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -5052,3 +5052,35 @@ class ReconciliationSummaryAPITests(APITestCase):
         resp = self.client.get("/api/accounting/reconciliation/1001/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["unmatched_statement_lines"], [])
+
+class ReversalTimezoneTests(TestCase):
+    """
+    9 Sep 2026 — real regression test for the midnight-boundary
+    timezone bug in cancellations.py (backporting journal_generator.
+    post_for_event()'s own 5 Sep 2026 fix, missed here at the time).
+    Constructs a bare stand-in object carrying only the one attribute
+    _safe_posting_date() actually reads (occurred_at) — a real event
+    class isn't needed to prove this pure date-conversion logic in
+    isolation, same "isolate the branch logic" reasoning
+    TraceForwardResolverTests' own patch.dict() tests already use
+    elsewhere in this file.
+    """
+
+    def test_reversal_posting_date_uses_local_calendar_day_not_utc(self):
+        from apps.accounting.cancellations import _safe_posting_date
+
+        fake_event = type("FakeEvent", (), {})()
+
+        # 2026-09-10 01:00 UTC = 2026-09-10 08:00 local (Asia/Jakarta,
+        # UTC+7) — same real day either way, a deliberate sanity
+        # check that the ordinary case still works before proving the
+        # real regression case below.
+        fake_event.occurred_at = timezone.make_aware(datetime(2026, 9, 10, 1, 0))
+        self.assertEqual(_safe_posting_date(fake_event), date(2026, 9, 10))
+
+        # 2026-09-10 20:00 UTC = 2026-09-11 03:00 local — THE real
+        # regression case. The old event.occurred_at.date() would
+        # have returned 2026-09-10 (the UTC calendar day); the real
+        # local calendar day is 2026-09-11.
+        fake_event.occurred_at = timezone.make_aware(datetime(2026, 9, 10, 20, 0))
+        self.assertEqual(_safe_posting_date(fake_event), date(2026, 9, 11))
