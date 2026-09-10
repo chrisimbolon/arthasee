@@ -57,7 +57,40 @@ class AccountAdmin(admin.ModelAdmin):
     # historical balance calculation for that account. name/
     # description/is_active stay editable — genuinely safe, ordinary
     # lifecycle edits, no historical-interpretation risk.
-    readonly_fields = ("code", "account_type", "normal_balance", "organization")
+    #
+    # 9 Sep 2026 — real, follow-up fix: account_subtype/is_contra
+    # added to this tuple. Both predate this lockdown (Phase 16, 8
+    # Sep 2026) and were never added when Account.record()/
+    # apply_edit() shipped (Phase 17, Tasks 17.1/17.2) — a genuine
+    # gap, found during that work's own test-writing pass, not a
+    # live incident. Worse than merely "unprotected": Account.save()
+    # DERIVES account_type/normal_balance from account_subtype
+    # unconditionally (see that method's own docstring) — editing
+    # account_subtype directly here would silently overwrite the
+    # very two fields this tuple already locks down, making that
+    # existing protection illusory. Locked down UNCONDITIONALLY
+    # (always readonly, not just once real history exists) —
+    # deliberately matching the same simple, categorical, static
+    # pattern code/account_type/normal_balance already use here,
+    # rather than a dynamic per-object check. Now that a real,
+    # guarded creation/edit path exists (AccountListCreateView/
+    # AccountDetailView, backend views.py — Account.apply_edit()'s
+    # own has-posted-history guard, enforced there, not here), Admin
+    # no longer needs to be a fallback way to set classification at
+    # all.
+    #
+    # is_control_account and parent are DELIBERATELY NOT in this
+    # tuple — neither reinterprets historical balances the way
+    # account_type/normal_balance do. is_control_account only gates
+    # FUTURE manual journals (JournalEntry.post()'s own check); parent
+    # is pure presentation metadata with zero rollup math anywhere
+    # (Account's own class docstring) — matching Account.apply_edit()'s
+    # own deliberate split exactly (that method's classification
+    # guard never covered is_control_account, and parent reassignment
+    # is never blocked by history at all).
+    readonly_fields = (
+        "code", "account_type", "normal_balance", "account_subtype", "is_contra", "organization",
+    )
 
 
 @admin.register(AccountingPeriod)
