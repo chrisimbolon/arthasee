@@ -52,21 +52,26 @@ implementation:
      — see that serializer's own updated docstring.
 """
 from datetime import date
+from decimal import Decimal
 
 from apps.core.models import Outbox
 from apps.core.views import TenantScopedAPIView
+from django.db.models import ProtectedError, Sum
 from rest_framework import status
 from rest_framework.response import Response
 
 from . import reports, trace_forward
-from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
-                     JournalEntry, OpeningBalanceAssetLine,
-                     OpeningBalanceCashLine, OpeningBalanceOtherLine,
-                     OpeningBalancePartLine, OpeningBalancePayable,
-                     OpeningBalanceReceivable, OpeningBalanceSession)
+from .models import (Account, AccountingPeriod, Asset, BankStatementLine,
+                     DepreciationRun, JournalEntry, JournalLine,
+                     OpeningBalanceAssetLine, OpeningBalanceCashLine,
+                     OpeningBalanceOtherLine, OpeningBalancePartLine,
+                     OpeningBalancePayable, OpeningBalanceReceivable,
+                     OpeningBalanceSession, ReconciliationMatch)
 from .serializers import (AccountEditSerializer, AccountingPeriodSerializer,
                           AccountRecordSerializer, AccountSerializer,
                           AssetRecordSerializer, AssetSerializer,
+                          BankStatementLineRecordSerializer,
+                          BankStatementLineSerializer,
                           DepreciationRunSerializer, FailedPostingSerializer,
                           JournalEntrySerializer,
                           ManualJournalRecordSerializer,
@@ -84,7 +89,10 @@ from .serializers import (AccountEditSerializer, AccountingPeriodSerializer,
                           OpeningBalanceReceivableRecordSerializer,
                           OpeningBalanceReceivableSerializer,
                           OpeningBalanceSessionRecordSerializer,
-                          OpeningBalanceSessionSerializer)
+                          OpeningBalanceSessionSerializer,
+                          ReconciliationJournalLineSerializer,
+                          ReconciliationMatchRecordSerializer,
+                          ReconciliationMatchSerializer)
 
 
 def _parse_date(value, default=None):
@@ -230,6 +238,224 @@ class AccountDetailView(TenantScopedAPIView):
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"success": True, "account": AccountSerializer(account).data})
+
+# =============================================================================
+# Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
+# =============================================================================
+"""
+Every endpoint below is open to any authenticated org member, NOT
+owner-only — same stakes class as OpeningBalance's own line-item
+endpoints (ordinary, reversible data entry and corrective actions,
+never a consequential/irreversible one). Entering a statement line,
+matching it, or unmatching it never touches the real ledger at all
+(Principle #15) — there is no equivalent here to closing a period or
+posting a manual journal.
+"""
+
+
+class BankStatementLineListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/accounting/reconciliation/statement-lines/?account=1001
+    POST /api/accounting/reconciliation/statement-lines/
+
+    9 Sep 2026 — Phase 17, Task 17.3. Real, manual bank-statement
+    entry — v1 scope is manual entry only, no live bank-feed
+    integration (Open Decision #20).
+    """
+    model = BankStatementLine
+
+    def get(self, request):
+        lines = self.get_queryset().select_related("account", "created_by")
+        account_code = request.query_params.get("account")
+        if account_code:
+            lines = lines.filter(account__code=account_code)
+        return Response({"success": True, "statement_lines": BankStatementLineSerializer(lines, many=True).data})
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = BankStatementLineRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        try:
+            line = BankStatementLine.record(
+                organization=organization, account_code=data["account_code"],
+                statement_date=data["statement_date"], description=data["description"],
+                amount=data["amount"], created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "statement_line": BankStatementLineSerializer(line).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class BankStatementLineDetailView(TenantScopedAPIView):
+    """
+    DELETE /api/accounting/reconciliation/statement-lines/<pk>/
+
+    A statement line is safe to delete — it never touches the real
+    ledger. `ReconciliationMatch.statement_line` is PROTECT, though,
+    so a line that's already matched can't be deleted until the
+    match itself is removed first — a real DB-level guard, translated
+    here into a clean, real message instead of a raw ProtectedError.
+    """
+    model = BankStatementLine
+
+    def delete(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        line = BankStatementLine.objects.filter(organization=organization, pk=pk).first()
+        if line is None:
+            return Response({"success": False, "message": "Baris tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            line.delete()
+        except ProtectedError:
+            return Response(
+                {"success": False, "message": "Baris ini sudah dicocokkan — hapus pencocokannya (unmatch) terlebih dahulu."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response({"success": True})
+
+
+class ReconciliationSummaryView(TenantScopedAPIView):
+    """
+    GET /api/accounting/reconciliation/<str:account_code>/?as_of=YYYY-MM-DD
+
+    The real two-column summary — bank statement lines on one side,
+    journal activity on the other, matching the exact UI pattern
+    observed in the Mekari Jurnal comparison (running totals + an
+    unmatched list on each side). total_bank_balance is the sum of
+    every real entered BankStatementLine for this account (v1 has no
+    live feed, so "the bank's own balance" is only ever what's been
+    manually entered so far); total_journal_balance is the real,
+    already-trusted Account.balance() — no new balance calculation
+    invented here.
+    """
+
+    def get(self, request, account_code):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            account = Account.resolve(organization, account_code)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        as_of = _parse_date(request.query_params.get("as_of"), default=date.today())
+
+        statement_lines = BankStatementLine.objects.filter(organization=organization, account=account)
+        total_bank_balance = statement_lines.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        unmatched_statement_lines = (
+            statement_lines.filter(matches__isnull=True).select_related("created_by").order_by("-statement_date")
+        )
+
+        total_journal_balance = account.balance(as_of=as_of)
+        unmatched_journal_lines = (
+            JournalLine.objects
+            .filter(organization=organization, account=account, journal_entry__posting_date__lte=as_of)
+            .filter(reconciliation_matches__isnull=True)
+            .select_related("journal_entry")
+            .order_by("-journal_entry__posting_date")
+        )
+
+        return Response({
+            "success": True,
+            "account": {"code": account.code, "name": account.name},
+            "as_of": as_of,
+            "total_bank_balance": total_bank_balance,
+            "total_journal_balance": total_journal_balance,
+            "unmatched_statement_lines": BankStatementLineSerializer(unmatched_statement_lines, many=True).data,
+            "unmatched_journal_lines": ReconciliationJournalLineSerializer(unmatched_journal_lines, many=True).data,
+        })
+
+
+class ReconciliationMatchListCreateView(TenantScopedAPIView):
+    """
+    POST /api/accounting/reconciliation/matches/
+
+    Real, single (statement_line, journal_line) pairing per call —
+    matches ReconciliationMatch's own real grain; a 1-to-many
+    correspondence is supported by calling this once per pairing.
+    Full N-to-N combination matching is deliberately deferred (Open
+    Decision #22). Both ids resolved and tenant-scoped here BEFORE
+    handing off to ReconciliationMatch.record() — that method's own
+    business-rule validation (same org, same account) still runs
+    regardless, this just guarantees neither id can be a bare
+    cross-tenant lookup in the first place.
+    """
+    model = ReconciliationMatch
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = ReconciliationMatchRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        statement_line = BankStatementLine.objects.filter(organization=organization, pk=data["statement_line"]).first()
+        if statement_line is None:
+            return Response({"success": False, "message": "Baris rekening koran tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        journal_line = JournalLine.objects.filter(organization=organization, pk=data["journal_line"]).first()
+        if journal_line is None:
+            return Response({"success": False, "message": "Baris jurnal tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            match = ReconciliationMatch.record(
+                statement_line=statement_line, journal_line=journal_line, matched_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "match": ReconciliationMatchSerializer(match).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ReconciliationMatchDetailView(TenantScopedAPIView):
+    """
+    DELETE /api/accounting/reconciliation/matches/<pk>/ — unmatch.
+    Removing a match is always safe — it never touches the real
+    ledger or either side's own real record, only the correspondence
+    annotation between them.
+    """
+    model = ReconciliationMatch
+
+    def delete(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        match = ReconciliationMatch.objects.filter(organization=organization, pk=pk).first()
+        if match is None:
+            return Response({"success": False, "message": "Pencocokan tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        match.delete()
+        return Response({"success": True})
 
 class TrialBalanceView(TenantScopedAPIView):
     """GET /api/accounting/trial-balance/?as_of=YYYY-MM-DD"""
