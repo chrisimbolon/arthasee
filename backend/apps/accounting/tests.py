@@ -4950,6 +4950,33 @@ class ReconciliationMatchAPITests(APITestCase):
         }, format="json")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_list_matches_filtered_by_account(self):
+        create = self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(self.statement_line.id), "journal_line": str(self.cash_line.id),
+        }, format="json")
+        self.assertEqual(create.status_code, status.HTTP_201_CREATED)
+
+        resp = self.client.get("/api/accounting/reconciliation/matches/?account=1001")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["matches"]), 1)
+        self.assertEqual(resp.data["matches"][0]["statement_line_id"], str(self.statement_line.id))
+
+    def test_list_matches_scoped_to_organization(self):
+        self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(self.statement_line.id), "journal_line": str(self.cash_line.id),
+        }, format="json")
+
+        other_org = Organization.objects.create(name="Bengkel Lain Recon Match List")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.reconmatchlist@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/reconciliation/matches/")
+        self.assertEqual(resp.data["matches"], [])
+
 
 class ReconciliationSummaryAPITests(APITestCase):
     """HTTP-level coverage for GET /api/accounting/reconciliation/
