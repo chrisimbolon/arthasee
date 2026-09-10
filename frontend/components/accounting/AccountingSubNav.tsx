@@ -18,12 +18,17 @@ import { usePathname } from "next/navigation";
 // 4 Sep 2026 — /general-ledger added: Buku Besar, an account-centric
 // view of the same real ledger /journal shows chronologically. Slotted
 // right after Jurnal, matching the design review's own tab ordering.
+// 9 Sep 2026 — /reconciliation added: Rekonsiliasi Bank, manual
+// bank-statement matching against the real ledger (Phase 17, Task
+// 17.3). Slotted right after Kas Harian — both are Cash/Bank-account
+// lenses on the same underlying ledger.
 const SUBNAV = [
   { href: "/dashboard/accounting/reports",  label: "Laporan" },
   { href: "/dashboard/accounting/accounts", label: "Daftar Akun" },
   { href: "/dashboard/accounting/journal",  label: "Jurnal" },
   { href: "/dashboard/accounting/general-ledger", label: "Buku Besar" },
   { href: "/dashboard/accounting/kas-harian", label: "Kas Harian" },
+  { href: "/dashboard/accounting/reconciliation", label: "Rekonsiliasi" },
   { href: "/dashboard/accounting/operating-expenses", label: "Beban Operasional" },
   { href: "/dashboard/accounting/assets", label: "Aset Tetap" },
 ];
