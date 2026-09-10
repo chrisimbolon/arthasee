@@ -388,10 +388,20 @@ class ReconciliationSummaryView(TenantScopedAPIView):
 
 class ReconciliationMatchListCreateView(TenantScopedAPIView):
     """
+    GET  /api/accounting/reconciliation/matches/?account=1001
     POST /api/accounting/reconciliation/matches/
 
-    Real, single (statement_line, journal_line) pairing per call —
-    matches ReconciliationMatch's own real grain; a 1-to-many
+    9 Sep 2026 — GET added as a follow-up, found missing while
+    designing the reconciliation UI: ReconciliationSummaryView shows
+    only the unmatched sides by design — this is the real, previously
+    -missing way to see which pairs are ALREADY matched, which the
+    UI's own unmatch affordance needs. `account`, if given, filters
+    to matches whose statement_line belongs to that account — the
+    natural real-world scope (reconciling one Cash/Bank account at a
+    time), matching ReconciliationSummaryView's own per-account shape.
+
+    POST: real, single (statement_line, journal_line) pairing per
+    call — matches ReconciliationMatch's own real grain; a 1-to-many
     correspondence is supported by calling this once per pairing.
     Full N-to-N combination matching is deliberately deferred (Open
     Decision #22). Both ids resolved and tenant-scoped here BEFORE
@@ -401,6 +411,17 @@ class ReconciliationMatchListCreateView(TenantScopedAPIView):
     cross-tenant lookup in the first place.
     """
     model = ReconciliationMatch
+
+    def get(self, request):
+        matches = self.get_queryset().select_related(
+            "statement_line", "statement_line__account",
+            "journal_line", "journal_line__account", "journal_line__journal_entry",
+            "matched_by",
+        ).order_by("-matched_at")
+        account_code = request.query_params.get("account")
+        if account_code:
+            matches = matches.filter(statement_line__account__code=account_code)
+        return Response({"success": True, "matches": ReconciliationMatchSerializer(matches, many=True).data})
 
     def post(self, request):
         organization = self.get_organization()
