@@ -3960,3 +3960,604 @@ class AccountingAdminLockdownTests(TestCase):
         self.assertIn("normal_balance", readonly)
         self.assertNotIn("name", readonly)
         self.assertNotIn("is_active", readonly)
+
+"""
+Real coverage for Account.record()/Account.apply_edit() (models.py)
+and the two endpoints built on top of them
+(AccountListCreateView/AccountDetailView, views.py) — deferred twice
+during the actual build (17.1 shipped, then 17.2 on top, both without
+tests, by explicit real-time decision to keep moving). Written after
+the fact, against the real, already-merged code, same discipline as
+every other class in this file: one test per real guarantee the
+design review established, not incidental behavior.
+
+Three real guarantees get their own dedicated proof, matching what
+the Phase 17 design spec itself called for:
+  1. AccountApplyEditTests.test_classification_change_blocked_once_
+     history_exists — the has_posted_history guard actually holds.
+  2. AccountApplyEditTests.test_setting_parent_to_own_descendant_
+     rejected — _would_create_cycle() actually rejects a real cycle,
+     not just the trivial self-parent case.
+  3. NoRollupRegressionTests — the actual, automated proof that
+     adding a parent/child relationship never changes a single
+     trial_balance()/balance_sheet() total, the concrete guardrail
+     the Phase 17 spec promised against a repeat of the Phase 12
+     contra-asset summation bug.
+"""
+
+
+class AccountRecordTests(TestCase):
+    """Model-layer coverage for Account.record() — the one real entry
+    point for creating a custom Account (Task 17.1, extended in Task
+    17.2 with `parent`)."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_record_derives_type_and_normal_balance_from_subtype(self):
+        account = Account.record(
+            organization=self.org, code="1-10015", name="Kas Kecil Pluit",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        self.assertEqual(account.account_type, Account.AccountType.ASSET)
+        self.assertEqual(account.normal_balance, Account.NormalBalance.DEBIT)
+
+    def test_record_with_is_contra_flips_normal_balance(self):
+        """Same real mechanism 1402 (Accumulated Depreciation) already
+        uses in production — proven here against a fresh custom
+        account rather than the seeded one."""
+        account = Account.record(
+            organization=self.org, code="1-14020", name="Akumulasi Penyusutan Lain",
+            account_subtype=Account.AccountSubtype.ASET_TETAP, is_contra=True,
+        )
+        self.assertEqual(account.account_type, Account.AccountType.ASSET)
+        self.assertEqual(account.normal_balance, Account.NormalBalance.CREDIT)
+
+    def test_record_requires_non_empty_code(self):
+        with self.assertRaises(ValueError):
+            Account.record(
+                organization=self.org, code="   ", name="Akun Tanpa Kode",
+                account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+            )
+
+    def test_record_requires_non_empty_name(self):
+        with self.assertRaises(ValueError):
+            Account.record(
+                organization=self.org, code="6-00700", name="",
+                account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+            )
+
+    def test_record_rejects_invalid_subtype(self):
+        with self.assertRaises(ValueError):
+            Account.record(
+                organization=self.org, code="6-00700", name="Akun Aneh",
+                account_subtype="NOT_A_REAL_SUBTYPE",
+            )
+
+    def test_record_rejects_duplicate_code_for_same_org(self):
+        with self.assertRaises(ValueError):
+            Account.record(
+                organization=self.org, code="1001", name="Kas Duplikat",
+                account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+            )
+        self.assertEqual(Account.objects.filter(organization=self.org, code="1001").count(), 1)
+
+    def test_record_allows_same_code_in_a_different_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Account Record")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        account = Account.record(
+            organization=other_org, code="1-10015", name="Kas Kecil Bengkel Lain",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        self.assertIsNotNone(account.id)
+
+    def test_record_with_real_parent_sets_the_relationship(self):
+        parent = Account.record(
+            organization=self.org, code="1-10000", name="Kas & Bank",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        child = Account.record(
+            organization=self.org, code="1-10015", name="Kas Kecil Pluit",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS, parent=parent.id,
+        )
+        self.assertEqual(child.parent_id, parent.id)
+
+    def test_record_with_nonexistent_parent_rejected(self):
+        with self.assertRaises(ValueError):
+            Account.record(
+                organization=self.org, code="1-10015", name="Kas Kecil Pluit",
+                account_subtype=Account.AccountSubtype.KAS_SETARA_KAS, parent=uuid.uuid4(),
+            )
+        self.assertFalse(Account.objects.filter(organization=self.org, code="1-10015").exists())
+
+    def test_record_rejects_parent_belonging_to_another_organization(self):
+        """The real tenant-isolation proof — `parent` is resolved
+        against THIS org only, same discipline as every other
+        cross-tenant FK resolution in this codebase (e.g.
+        OpeningBalanceReceivableListCreateView's own Customer
+        lookup)."""
+        other_org = Organization.objects.create(name="Bengkel Lain Account Parent")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        foreign_parent = Account.objects.get(organization=other_org, code="1001")
+
+        with self.assertRaises(ValueError):
+            Account.record(
+                organization=self.org, code="1-10015", name="Kas Kecil Pluit",
+                account_subtype=Account.AccountSubtype.KAS_SETARA_KAS, parent=foreign_parent.id,
+            )
+
+
+class AccountApplyEditTests(TestCase):
+    """
+    Model-layer coverage for Account.apply_edit() — the real path
+    every edit goes through (AccountDetailView.patch()). The two
+    tests marked THE REAL PROOF below are the ones the Phase 17
+    design spec specifically called for before this feature could be
+    considered done.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.account = Account.record(
+            organization=self.org, code="6-00700", name="Beban Lain Custom",
+            account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+        )
+
+    def test_edit_name_and_description(self):
+        self.account.apply_edit(name="Beban Lain Diubah", description="Deskripsi baru")
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.name, "Beban Lain Diubah")
+        self.assertEqual(self.account.description, "Deskripsi baru")
+
+    def test_edit_rejects_empty_name(self):
+        with self.assertRaises(ValueError):
+            self.account.apply_edit(name="   ")
+
+    def test_edit_is_active_toggle(self):
+        self.account.apply_edit(is_active=False)
+        self.account.refresh_from_db()
+        self.assertFalse(self.account.is_active)
+
+    def test_classification_change_allowed_when_no_history(self):
+        """A brand-new, never-posted-to account can freely change
+        classification — the guard only ever fires once real
+        JournalLine history exists."""
+        self.account.apply_edit(
+            account_subtype=Account.AccountSubtype.BEBAN_USAHA, is_contra=False,
+        )
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.account_subtype, Account.AccountSubtype.BEBAN_USAHA)
+        self.assertEqual(self.account.account_type, Account.AccountType.EXPENSE)
+
+    def test_classification_change_blocked_once_history_exists(self):
+        """
+        THE REAL PROOF — once this account has a real posted
+        JournalLine, changing account_subtype/is_contra must be
+        rejected outright, because it would silently reinterpret
+        every already-posted debit/credit's sign without moving a
+        single rupiah (see apply_edit()'s own docstring, models.py).
+        Posted via source=MANUAL against Cash (1001) — a real,
+        non-control account, so this doesn't trip the separate
+        control-account guard.
+        """
+        cash = Account.objects.get(organization=self.org, code="1001")
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[
+                {"account": self.account, "debit": Decimal("50000")},
+                {"account": cash, "credit": Decimal("50000")},
+            ],
+        )
+        with self.assertRaises(ValueError):
+            self.account.apply_edit(account_subtype=Account.AccountSubtype.BEBAN_USAHA)
+
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.account_subtype, Account.AccountSubtype.BEBAN_LAIN_LAIN)
+
+    def test_name_and_is_active_still_editable_once_history_exists(self):
+        """The classification guard is deliberately narrow — name,
+        description, is_active, and is_control_account must all
+        remain freely editable even with real posted history."""
+        cash = Account.objects.get(organization=self.org, code="1001")
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[
+                {"account": self.account, "debit": Decimal("10000")},
+                {"account": cash, "credit": Decimal("10000")},
+            ],
+        )
+        self.account.apply_edit(name="Nama Baru", is_active=False, is_control_account=True)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.name, "Nama Baru")
+        self.assertFalse(self.account.is_active)
+        self.assertTrue(self.account.is_control_account)
+
+    def test_parent_omitted_leaves_relationship_untouched(self):
+        """
+        Real proof of the _UNSET sentinel — calling apply_edit()
+        without ever mentioning `parent` at all must not clear an
+        existing one.
+        """
+        parent = Account.record(
+            organization=self.org, code="1-10000", name="Kas & Bank",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        self.account.apply_edit(parent=parent.id)
+        self.account.apply_edit(name="Nama Lain")  # parent kwarg NOT passed at all
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.parent_id, parent.id)
+
+    def test_parent_can_be_explicitly_cleared_to_null(self):
+        parent = Account.record(
+            organization=self.org, code="1-10000", name="Kas & Bank",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        self.account.apply_edit(parent=parent.id)
+        self.account.apply_edit(parent=None)
+        self.account.refresh_from_db()
+        self.assertIsNone(self.account.parent_id)
+
+    def test_parent_reassignment_is_not_blocked_by_posted_history(self):
+        """
+        Real proof of the deliberate split — unlike account_subtype/
+        is_contra, reassigning parent never touches Account.
+        balance()'s own arithmetic for a single existing JournalLine
+        (parent is pure presentation metadata, zero rollup math
+        anywhere), so it's never blocked by has_posted_history.
+        """
+        cash = Account.objects.get(organization=self.org, code="1001")
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[
+                {"account": self.account, "debit": Decimal("10000")},
+                {"account": cash, "credit": Decimal("10000")},
+            ],
+        )
+        parent = Account.record(
+            organization=self.org, code="6-00000", name="Beban Induk",
+            account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+        )
+        self.account.apply_edit(parent=parent.id)  # must NOT raise
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.parent_id, parent.id)
+
+    def test_setting_parent_to_self_rejected(self):
+        with self.assertRaises(ValueError):
+            self.account.apply_edit(parent=self.account.id)
+
+    def test_setting_parent_to_own_descendant_rejected(self):
+        """
+        THE REAL PROOF for _would_create_cycle() — A -> B -> C is a
+        real, valid chain; making A a child of C (its own
+        grandchild) must be rejected outright, not silently create a
+        real, live infinite loop the first time anything ever walks
+        this hierarchy.
+        """
+        a = self.account
+        b = Account.record(
+            organization=self.org, code="6-00001", name="B", parent=a.id,
+            account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+        )
+        c = Account.record(
+            organization=self.org, code="6-00002", name="C", parent=b.id,
+            account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+        )
+        with self.assertRaises(ValueError):
+            a.apply_edit(parent=c.id)
+
+        a.refresh_from_db()
+        self.assertIsNone(a.parent_id)  # unchanged — the rejected edit wrote nothing
+
+    def test_setting_parent_to_an_unrelated_account_still_works(self):
+        """The real, ordinary case the cycle guard must never
+        accidentally block."""
+        unrelated = Account.record(
+            organization=self.org, code="6-00003", name="Tidak Terkait",
+            account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+        )
+        self.account.apply_edit(parent=unrelated.id)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.parent_id, unrelated.id)
+
+    def test_edit_with_nonexistent_parent_rejected(self):
+        with self.assertRaises(ValueError):
+            self.account.apply_edit(parent=uuid.uuid4())
+
+    def test_edit_rejects_parent_belonging_to_another_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Account Edit Parent")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        foreign_account = Account.objects.get(organization=other_org, code="1001")
+
+        with self.assertRaises(ValueError):
+            self.account.apply_edit(parent=foreign_account.id)
+
+
+class AccountListCreateAPITests(APITestCase):
+    """
+    HTTP-level coverage for GET/POST /api/accounting/accounts/ — same
+    setup/authorization conventions as ManualJournalAPITests and
+    OpeningBalanceSessionAPITests elsewhere in this file. Real model-
+    layer correctness is already proven by AccountRecordTests above;
+    this layer proves the thin view + owner-only gate are wired
+    correctly.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+        self.owner = CustomUser.objects.create_user(
+            email="owner.accountscrud@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+
+        self.staff = CustomUser.objects.create_user(
+            email="staff.accountscrud@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+
+        self.client.force_authenticate(user=self.owner)
+
+    def _create(self, **overrides):
+        payload = {
+            "code": "1-10015", "name": "Kas Kecil Pluit",
+            "account_subtype": "KAS_SETARA_KAS",
+        }
+        payload.update(overrides)
+        return self.client.post("/api/accounting/accounts/", payload, format="json")
+
+    def test_owner_can_create_account(self):
+        resp = self._create()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["account"]["account_type"], "ASSET")
+        self.assertEqual(resp.data["account"]["normal_balance"], "DEBIT")
+        self.assertFalse(resp.data["account"]["has_posted_history"])
+
+    def test_non_owner_cannot_create_account(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self._create()
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_duplicate_code_returns_clean_400(self):
+        resp = self._create(code="1001")  # already seeded
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_subtype_returns_400(self):
+        resp = self.client.post("/api/accounting/accounts/", {
+            "code": "1-10015", "name": "Kas Kecil Pluit",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_with_real_parent(self):
+        parent_resp = self._create(code="1-10000", name="Kas & Bank")
+        parent_id = parent_resp.data["account"]["id"]
+
+        child_resp = self._create(code="1-10015", name="Kas Kecil Pluit", parent=parent_id)
+        self.assertEqual(child_resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(str(child_resp.data["account"]["parent"]), parent_id)
+        self.assertEqual(child_resp.data["account"]["parent_code"], "1-10000")
+
+    def test_list_returns_every_account_including_standard_and_custom(self):
+        self._create()
+        resp = self.client.get("/api/accounting/accounts/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        codes = [a["code"] for a in resp.data["accounts"]]
+        self.assertIn("1001", codes)       # standard, seeded
+        self.assertIn("1-10015", codes)    # custom, just created
+
+    def test_list_scoped_to_organization(self):
+        self._create()
+        other_org = Organization.objects.create(name="Bengkel Lain Accounts List")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.accountslist@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/accounts/")
+        codes = [a["code"] for a in resp.data["accounts"]]
+        self.assertNotIn("1-10015", codes)
+
+
+class AccountDetailAPITests(APITestCase):
+    """
+    HTTP-level coverage for GET/PATCH /api/accounting/accounts/<pk>/.
+    The two tests marked THE REAL PROOF are the actual end-to-end
+    (HTTP, not just model-layer) confirmation that the has-history
+    guard and the cycle guard both surface correctly through a real
+    request, not just when called directly on the model.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+        self.owner = CustomUser.objects.create_user(
+            email="owner.accountdetail@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+
+        self.staff = CustomUser.objects.create_user(
+            email="staff.accountdetail@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+
+        self.client.force_authenticate(user=self.owner)
+        self.account = Account.record(
+            organization=self.org, code="6-00700", name="Beban Lain Custom",
+            account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+        )
+
+    def test_get_single_account(self):
+        resp = self.client.get(f"/api/accounting/accounts/{self.account.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["account"]["code"], "6-00700")
+
+    def test_get_returns_404_for_nonexistent_id(self):
+        resp = self.client.get(f"/api/accounting/accounts/{uuid.uuid4()}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_owner_can_patch_name(self):
+        resp = self.client.patch(f"/api/accounting/accounts/{self.account.id}/", {
+            "name": "Nama Baru",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["account"]["name"], "Nama Baru")
+
+    def test_non_owner_cannot_patch(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f"/api/accounting/accounts/{self.account.id}/", {
+            "name": "Nama Baru",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_patch_classification_blocked_once_posted_journal_line_exists(self):
+        """THE REAL PROOF, end-to-end via HTTP — mirrors
+        AccountApplyEditTests.test_classification_change_blocked_
+        once_history_exists but through the real endpoint."""
+        cash = Account.objects.get(organization=self.org, code="1001")
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[
+                {"account": self.account, "debit": Decimal("20000")},
+                {"account": cash, "credit": Decimal("20000")},
+            ],
+        )
+        resp = self.client.patch(f"/api/accounting/accounts/{self.account.id}/", {
+            "account_subtype": "BEBAN_USAHA",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_rejects_circular_parent_via_http(self):
+        """THE REAL PROOF, end-to-end via HTTP — mirrors
+        AccountApplyEditTests.test_setting_parent_to_own_descendant_
+        rejected but through the real endpoint."""
+        b = Account.record(
+            organization=self.org, code="6-00001", name="B", parent=self.account.id,
+            account_subtype=Account.AccountSubtype.BEBAN_LAIN_LAIN,
+        )
+        resp = self.client.patch(f"/api/accounting/accounts/{self.account.id}/", {
+            "parent": str(b.id),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_omitting_parent_in_patch_leaves_it_untouched_via_http(self):
+        """Real, HTTP-level proof of the _UNSET sentinel semantics —
+        a PATCH body that never mentions "parent" at all must not
+        clear an existing one."""
+        parent = Account.record(
+            organization=self.org, code="1-10000", name="Kas & Bank",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        self.account.apply_edit(parent=parent.id)
+
+        resp = self.client.patch(f"/api/accounting/accounts/{self.account.id}/", {
+            "name": "Nama Lain",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(str(resp.data["account"]["parent"]), str(parent.id))
+
+    def test_explicit_null_parent_in_patch_clears_it_via_http(self):
+        parent = Account.record(
+            organization=self.org, code="1-10000", name="Kas & Bank",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        self.account.apply_edit(parent=parent.id)
+
+        resp = self.client.patch(f"/api/accounting/accounts/{self.account.id}/", {
+            "parent": None,
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["account"]["parent"])
+
+    def test_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Account Detail")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.accountdetail@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get(f"/api/accounting/accounts/{self.account.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_delete_is_not_a_supported_method(self):
+        """
+        Real, deliberate design proof — no DELETE method exists
+        anywhere on this view (see AccountDetailView's own docstring,
+        views.py, for the full reasoning). DRF's default dispatch
+        returns 405 for any HTTP method a view doesn't define.
+        """
+        resp = self.client.delete(f"/api/accounting/accounts/{self.account.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class NoRollupRegressionTests(TestCase):
+    """
+    9 Sep 2026 — the actual, automated proof the Phase 17 design spec
+    itself called for: trial_balance()/balance_sheet() totals must be
+    BYTE-IDENTICAL before and after a parent/child relationship is
+    added to a fixture with real posted activity. This is the
+    concrete guardrail against Task 17.2's `parent` field ever
+    quietly growing into a repeat of the Phase 12 contra-asset
+    summation bug — not just a doc claim, a real regression test.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        ap = Account.objects.get(organization=self.org, code="2001")
+        revenue = Account.objects.get(organization=self.org, code="4001")
+
+        # Real, varied activity touching several account types, so a
+        # rollup bug (if one were ever introduced) would have real
+        # numbers to actually corrupt, not a trivially-empty ledger.
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": cash, "debit": Decimal("1000000")}, {"account": revenue, "credit": Decimal("1000000")}],
+        )
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
+            lines=[{"account": bank, "debit": Decimal("500000")}, {"account": ap, "credit": Decimal("500000")}],
+        )
+
+    def test_trial_balance_totals_unchanged_after_adding_a_parent_relationship(self):
+        before = reports.trial_balance(self.org, as_of=date.today())
+
+        bank = Account.objects.get(organization=self.org, code="1101")
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank.apply_edit(parent=cash.id)  # real, live parent/child relationship now exists
+
+        after = reports.trial_balance(self.org, as_of=date.today())
+
+        self.assertEqual(before["total_debit"], after["total_debit"])
+        self.assertEqual(before["total_credit"], after["total_credit"])
+        self.assertTrue(after["is_balanced"])
+        # Per-account balances themselves must also be untouched —
+        # not just the two grand totals happening to still agree.
+        before_by_code = {r["code"]: r["balance"] for r in before["accounts"]}
+        after_by_code = {r["code"]: r["balance"] for r in after["accounts"]}
+        self.assertEqual(before_by_code, after_by_code)
+
+    def test_balance_sheet_totals_unchanged_after_adding_a_parent_relationship(self):
+        before = reports.balance_sheet(self.org, as_of=date.today())
+
+        bank = Account.objects.get(organization=self.org, code="1101")
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank.apply_edit(parent=cash.id)
+
+        after = reports.balance_sheet(self.org, as_of=date.today())
+
+        self.assertEqual(before["total_assets"], after["total_assets"])
+        self.assertEqual(before["total_liabilities"], after["total_liabilities"])
+        self.assertEqual(before["total_equity"], after["total_equity"])
+        self.assertEqual(before["is_balanced"], after["is_balanced"])
