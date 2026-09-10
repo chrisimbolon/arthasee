@@ -882,6 +882,157 @@ class JournalLine(TenantScopedModel):
     def _resolve_organization(self):
         return self.journal_entry.organization
 
+"""
+Real, manual bank-statement reconciliation — v1 scope, per the Phase
+17 design spec: manual statement entry only, no live bank-feed
+integration (Open Decision #20). Synchronous, no event bus — matching
+BankStatementLine/ReconciliationMatch are both a read-and-match
+concern entirely internal to this app, never a domain event another
+app needs to react to (same "would this still make sense if the
+event bus were deleted?" test Asset.record()/AccountingPeriod.close()
+already pass).
+
+Neither model ever touches JournalEntry/JournalLine's own write path
+— a BankStatementLine is never part of the real ledger, and a
+ReconciliationMatch creates or alters NOTHING in it either. Directly
+aligned with Principle #15 (Immutable-on-Post): reconciling a
+statement line can never cause drift, because it never mutates a
+posted fact, only annotates a correspondence between two already-
+real, already-correct records.
+"""
+
+
+class BankStatementLine(TenantScopedModel):
+    """
+    One real, manually-entered line from a bank statement. Never
+    itself part of the real ledger — purely a second, independent
+    record of what the bank itself reports, to be compared against
+    what this system already posted.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        Account, on_delete=models.PROTECT, related_name="statement_lines",
+        verbose_name="Akun",
+    )
+    statement_date = models.DateField(verbose_name="Tanggal Transaksi")
+    description = models.CharField(max_length=255, verbose_name="Keterangan")
+    amount = models.DecimalField(
+        max_digits=14, decimal_places=2, verbose_name="Jumlah",
+        help_text="Positif untuk uang masuk, negatif untuk uang keluar.",
+    )
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="Dicatat Oleh",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Bank Statement Line"
+        verbose_name_plural  = "Bank Statement Lines"
+        ordering             = ["-statement_date"]
+
+    def __str__(self):
+        return f"{self.account.code} {self.statement_date} {self.amount}"
+
+    @property
+    def is_matched(self) -> bool:
+        """
+        Computed, never stored — same "never a second source of
+        truth" discipline as Asset.accumulated_depreciation/
+        book_value (both derived live from real
+        AssetDepreciationEntry rows, never a cached field that could
+        drift). A statement line is matched exactly when a real
+        ReconciliationMatch row references it — nothing else needs
+        to track or sync this.
+        """
+        return self.matches.exists()
+
+    @classmethod
+    def record(cls, *, organization, account_code, statement_date, description, amount, created_by=None):
+        """The one real entry point for manually entering a
+        statement line. `account_code` resolved the same way every
+        other real posting in this codebase resolves one
+        (Account.resolve()) — never a bare Account UUID."""
+        account = Account.resolve(organization, account_code)
+        if amount == Decimal("0"):
+            raise ValueError("Jumlah baris rekening koran tidak boleh nol.")
+        return cls.objects.create(
+            organization=organization, account=account, statement_date=statement_date,
+            description=description, amount=amount, created_by=created_by,
+        )
+
+
+class ReconciliationMatch(TenantScopedModel):
+    """
+    One real correspondence between a BankStatementLine and a
+    JournalLine. `statement_line`/`journal_line` are both PROTECT —
+    same "a target with real linked history must never vanish out
+    from under it" discipline as JournalLine.account: deleting a
+    matched statement line or journal line is blocked until the
+    match itself is removed first.
+
+    Real grain: one row per (statement_line, journal_line) PAIR — a
+    genuine 1-to-many correspondence (one statement line matching
+    several journal lines, or vice versa) is supported by
+    CONSTRUCTION, simply as multiple rows sharing one side. Full
+    N-to-N combination matching is deliberately deferred (Open
+    Decision #22).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    statement_line = models.ForeignKey(
+        BankStatementLine, on_delete=models.PROTECT, related_name="matches",
+        verbose_name="Baris Rekening Koran",
+    )
+    journal_line = models.ForeignKey(
+        JournalLine, on_delete=models.PROTECT, related_name="reconciliation_matches",
+        verbose_name="Baris Jurnal",
+    )
+    matched_at = models.DateTimeField(auto_now_add=True)
+    matched_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="Dicocokkan Oleh",
+    )
+
+    class Meta:
+        verbose_name        = "Reconciliation Match"
+        verbose_name_plural  = "Reconciliation Matches"
+        ordering             = ["-matched_at"]
+        unique_together      = [("statement_line", "journal_line")]
+
+    def __str__(self):
+        return f"{self.statement_line} <-> {self.journal_line}"
+
+    def _resolve_organization(self):
+        return self.statement_line.organization
+
+    @classmethod
+    def record(cls, *, statement_line, journal_line, matched_by=None):
+        """
+        The one real entry point. Validates BEFORE writing: same
+        organization on both sides (tenant isolation — a match must
+        never span two different shops), and journal_line's own
+        account must be the SAME account as statement_line — the
+        entire point of reconciliation is comparing one real account
+        against its own bank statement; matching a Cash statement
+        line against a COGS journal line would be structurally
+        meaningless. The unique_together above is the final DB-level
+        backstop against a genuine duplicate pairing.
+        """
+        if statement_line.organization_id != journal_line.journal_entry.organization_id:
+            raise ValueError("Baris rekening koran dan baris jurnal harus berasal dari organisasi yang sama.")
+        if journal_line.account_id != statement_line.account_id:
+            raise ValueError(
+                f"Baris jurnal ini terkait akun {journal_line.account.code}, bukan "
+                f"{statement_line.account.code} — hanya baris jurnal pada akun yang sama "
+                f"dengan baris rekening koran yang bisa dicocokkan."
+            )
+        if cls.objects.filter(statement_line=statement_line, journal_line=journal_line).exists():
+            raise ValueError("Baris ini sudah pernah dicocokkan satu sama lain.")
+
+        return cls.objects.create(
+            organization=statement_line.organization,
+            statement_line=statement_line, journal_line=journal_line, matched_by=matched_by,
+        )
 
 class AssetSequence(TenantScopedModel):
     """Mirrors every other Sequence model in this codebase exactly."""
