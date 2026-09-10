@@ -1064,3 +1064,143 @@ export const accountsApi = {
     }
   },
 };
+
+// =============================================================================
+// Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
+// =============================================================================
+// Mirrors BankStatementLineSerializer / ReconciliationJournalLineSerializer /
+// ReconciliationMatchSerializer exactly (backend serializers.py).
+
+export interface BankStatementLineRow {
+  id: string;
+  account: string;
+  account_code: string;
+  account_name: string;
+  statement_date: string;
+  description: string;
+  amount: string | number;
+  is_matched: boolean;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export interface BankStatementLineCreatePayload {
+  account_code: string;
+  statement_date: string;
+  description: string;
+  amount: string | number;
+}
+
+// A real, dedicated shape for the reconciliation summary's own
+// "unmatched journal lines" column — NOT the same as the shared
+// JournalLineSerializer used inside JournalEntrySerializer
+// elsewhere; this one carries its own posting_date/entry_number
+// since each line stands alone here (see
+// ReconciliationJournalLineSerializer's own docstring, backend
+// serializers.py).
+export interface ReconciliationJournalLineRow {
+  id: string;
+  account_code: string;
+  posting_date: string;
+  entry_number: string;
+  debit_amount: string | number;
+  credit_amount: string | number;
+  description: string;
+}
+
+export interface ReconciliationMatchRow {
+  id: string;
+  statement_line_id: string;
+  statement_line_description: string;
+  statement_line_amount: string | number;
+  journal_line_id: string;
+  journal_line_description: string;
+  matched_by: string | null;
+  matched_by_name: string | null;
+  matched_at: string;
+}
+
+export interface ReconciliationSummary {
+  account: { code: string; name: string };
+  as_of: string;
+  total_bank_balance: string | number;
+  total_journal_balance: string | number;
+  unmatched_statement_lines: BankStatementLineRow[];
+  unmatched_journal_lines: ReconciliationJournalLineRow[];
+}
+
+export const reconciliationApi = {
+  statementLines: {
+    list: (accountCode?: string) =>
+      getListOrNull<BankStatementLineRow>(
+        "/api/accounting/reconciliation/statement-lines/", "statement_lines",
+        accountCode ? { account: accountCode } : {},
+      ),
+
+    async create(payload: BankStatementLineCreatePayload):
+      Promise<{ success: boolean; message?: string; statement_line?: BankStatementLineRow }> {
+      try {
+        const { data } = await api.post("/api/accounting/reconciliation/statement-lines/", payload);
+        return data;
+      } catch (err) {
+        return { success: false, message: extractErrorMessage(err, "Gagal menyimpan baris rekening koran.") };
+      }
+    },
+
+    // A conflict (matched line, real 409) surfaces its own real
+    // message the same way as any other failure here — the caller
+    // decides how to present it (e.g. "unmatch dulu").
+    async delete(id: string): Promise<{ success: boolean; message?: string }> {
+      try {
+        const { data } = await api.delete(`/api/accounting/reconciliation/statement-lines/${id}/`);
+        return data;
+      } catch (err) {
+        return { success: false, message: extractErrorMessage(err, "Gagal menghapus baris.") };
+      }
+    },
+  },
+
+  matches: {
+    // account is required here (unlike statementLines.list) — the
+    // real UI always operates within one account's own reconciliation
+    // view; there's no real use case for an unscoped, cross-account
+    // matched-pairs list.
+    list: (accountCode: string) =>
+      getListOrNull<ReconciliationMatchRow>(
+        "/api/accounting/reconciliation/matches/", "matches", { account: accountCode },
+      ),
+
+    async create(statementLineId: string, journalLineId: string):
+      Promise<{ success: boolean; message?: string; match?: ReconciliationMatchRow }> {
+      try {
+        const { data } = await api.post("/api/accounting/reconciliation/matches/", {
+          statement_line: statementLineId, journal_line: journalLineId,
+        });
+        return data;
+      } catch (err) {
+        return { success: false, message: extractErrorMessage(err, "Gagal mencocokkan baris.") };
+      }
+    },
+
+    async delete(id: string): Promise<{ success: boolean; message?: string }> {
+      try {
+        const { data } = await api.delete(`/api/accounting/reconciliation/matches/${id}/`);
+        return data;
+      } catch (err) {
+        return { success: false, message: extractErrorMessage(err, "Gagal membatalkan pencocokan.") };
+      }
+    },
+  },
+
+  async summary(accountCode: string, asOf?: string): Promise<ReconciliationSummary | null> {
+    try {
+      const { data } = await api.get(`/api/accounting/reconciliation/${accountCode}/`, {
+        params: asOf ? { as_of: asOf } : {},
+      });
+      return data;
+    } catch {
+      return null;
+    }
+  },
+};
