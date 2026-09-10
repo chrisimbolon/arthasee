@@ -7,11 +7,12 @@ from apps.core.models import Outbox
 from rest_framework import serializers
 
 from .models import (Account, AccountingPeriod, Asset, AssetDepreciationEntry,
-                     DepreciationRun, JournalEntry, JournalLine,
-                     OpeningBalanceAssetLine, OpeningBalanceCashLine,
-                     OpeningBalanceOtherLine, OpeningBalancePartLine,
-                     OpeningBalancePayable, OpeningBalanceReceivable,
-                     OpeningBalanceSession)
+                     BankStatementLine, DepreciationRun, JournalEntry,
+                     JournalLine, OpeningBalanceAssetLine,
+                     OpeningBalanceCashLine, OpeningBalanceOtherLine,
+                     OpeningBalancePartLine, OpeningBalancePayable,
+                     OpeningBalanceReceivable, OpeningBalanceSession,
+                     ReconciliationMatch)
 
 
 class ManualJournalLineInputSerializer(serializers.Serializer):
@@ -324,6 +325,109 @@ class AccountEditSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError("Nama akun tidak boleh kosong.")
         return value
+
+# =============================================================================
+# Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
+# =============================================================================
+"""
+Same real read/write split every other write path in this file
+already establishes: a plain ModelSerializer for READ, a separate
+`...RecordSerializer` for WRITE input.
+"""
+
+
+class BankStatementLineSerializer(serializers.ModelSerializer):
+    """
+    Entirely read-only — a BankStatementLine is only ever created via
+    the real BankStatementLine.record() model method, never through a
+    generic serializer.save(). is_matched is the real, computed
+    property (models.py) — never a stored, syncable flag.
+    """
+    account_code   = serializers.CharField(source="account.code", read_only=True)
+    account_name   = serializers.CharField(source="account.name", read_only=True)
+    is_matched     = serializers.BooleanField(read_only=True)
+    created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = BankStatementLine
+        fields = [
+            "id", "account", "account_code", "account_name",
+            "statement_date", "description", "amount", "is_matched",
+            "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class BankStatementLineRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/accounting/reconciliation/
+    statement-lines/. `account_code`, not an Account UUID — same
+    "the one identifier a human types directly" treatment
+    ManualJournalLineInputSerializer's own account_code already gets.
+    """
+    account_code   = serializers.CharField(max_length=10)
+    statement_date = serializers.DateField()
+    description    = serializers.CharField(max_length=255)
+    amount         = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+    def validate_amount(self, value):
+        if value == Decimal("0"):
+            raise serializers.ValidationError("Jumlah tidak boleh nol.")
+        return value
+
+
+class ReconciliationJournalLineSerializer(serializers.ModelSerializer):
+    """
+    A real, DEDICATED (not reused) view of a JournalLine for the
+    reconciliation summary's own "unmatched journal lines" column.
+    The existing JournalLineSerializer (used elsewhere, nested inside
+    JournalEntrySerializer) deliberately carries no posting_date/
+    entry_number — those live on the parent JournalEntry in that
+    context and would be redundant. Reconciliation needs exactly the
+    opposite: each line stands alone here, so its own entry's date/
+    number matter directly. A second, purpose-built serializer, not a
+    reused one stretched to cover two different shapes.
+    """
+    account_code = serializers.CharField(source="account.code", read_only=True)
+    posting_date = serializers.DateField(source="journal_entry.posting_date", read_only=True)
+    entry_number = serializers.CharField(source="journal_entry.entry_number", read_only=True)
+
+    class Meta:
+        model  = JournalLine
+        fields = ["id", "account_code", "posting_date", "entry_number", "debit_amount", "credit_amount", "description"]
+        read_only_fields = fields
+
+
+class ReconciliationMatchSerializer(serializers.ModelSerializer):
+    """Entirely read-only — a ReconciliationMatch is only ever
+    created via the real ReconciliationMatch.record() model method."""
+    statement_line_id          = serializers.UUIDField(source="statement_line.id", read_only=True)
+    statement_line_description = serializers.CharField(source="statement_line.description", read_only=True)
+    statement_line_amount      = serializers.DecimalField(source="statement_line.amount", max_digits=14, decimal_places=2, read_only=True)
+    journal_line_id            = serializers.UUIDField(source="journal_line.id", read_only=True)
+    journal_line_description   = serializers.CharField(source="journal_line.description", read_only=True)
+    matched_by_name            = serializers.CharField(source="matched_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = ReconciliationMatch
+        fields = [
+            "id", "statement_line_id", "statement_line_description", "statement_line_amount",
+            "journal_line_id", "journal_line_description", "matched_by", "matched_by_name", "matched_at",
+        ]
+        read_only_fields = fields
+
+
+class ReconciliationMatchRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/accounting/reconciliation/matches/.
+    Both real UUIDs — resolved and validated for real (existence +
+    tenant isolation + same-account check) inside ReconciliationMatch.
+    record() itself, never trusted as bare ids at this layer — same
+    "shape only here, business rules in the model" split every
+    RecordSerializer in this file already follows.
+    """
+    statement_line = serializers.UUIDField()
+    journal_line    = serializers.UUIDField()
 
 # =============================================================================
 # Opening Balance — new-workshop onboarding (3 Sep 2026)
