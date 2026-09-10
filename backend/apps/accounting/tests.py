@@ -68,11 +68,12 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import (Account, AccountingPeriod, Asset, DepreciationRun,
-                     JournalEntry, JournalLine, OpeningBalanceAssetLine,
-                     OpeningBalanceCashLine, OpeningBalanceOtherLine,
-                     OpeningBalancePartLine, OpeningBalancePayable,
-                     OpeningBalanceReceivable, OpeningBalanceSession)
+from .models import (Account, AccountingPeriod, Asset, BankStatementLine,
+                     DepreciationRun, JournalEntry, JournalLine,
+                     OpeningBalanceAssetLine, OpeningBalanceCashLine,
+                     OpeningBalanceOtherLine, OpeningBalancePartLine,
+                     OpeningBalancePayable, OpeningBalanceReceivable,
+                     OpeningBalanceSession, ReconciliationMatch)
 
 
 def _seed_all_months(org, year):
@@ -4576,3 +4577,451 @@ class NoRollupRegressionTests(TestCase):
         self.assertEqual(before["total_liabilities"], after["total_liabilities"])
         self.assertEqual(before["total_equity"], after["total_equity"])
         self.assertEqual(before["is_balanced"], after["is_balanced"])
+
+"""
+Real coverage for BankStatementLine.record()/ReconciliationMatch.
+record() (models.py) and the five endpoints built on top of them
+(BankStatementLineListCreateView/DetailView,
+ReconciliationMatchListCreateView/DetailView,
+ReconciliationSummaryView, views.py) — deferred once during the
+actual build, same real-time-tradeoff pattern as Tasks 17.1/17.2.
+Written after the fact against the real, already-merged code.
+
+Two real guarantees get their own dedicated proof, matching the
+actual design decisions made while building this feature:
+  1. ReconciliationMatchRecordTests.test_record_rejects_mismatched_
+     account — the "same account on both sides" guard actually holds,
+     not just documented.
+  2. ReconciliationMatchAPITests.test_unmatch_deletes_match_and_
+     unblocks_statement_line_delete — the real, end-to-end proof
+     tying the whole feature together: match blocks delete via a
+     real PROTECT constraint, unmatch removes that block, exactly as
+     designed.
+"""
+
+
+class BankStatementLineRecordTests(TestCase):
+    """Model-layer coverage for BankStatementLine.record()."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_record_creates_line_for_real_account(self):
+        line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran tunai", amount=Decimal("500000"),
+        )
+        self.assertEqual(line.account.code, "1001")
+        self.assertEqual(line.amount, Decimal("500000"))
+        self.assertFalse(line.is_matched)
+
+    def test_negative_amount_is_allowed_real_money_out(self):
+        line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Penarikan", amount=Decimal("-200000"),
+        )
+        self.assertEqual(line.amount, Decimal("-200000"))
+
+    def test_record_rejects_zero_amount(self):
+        with self.assertRaises(ValueError):
+            BankStatementLine.record(
+                organization=self.org, account_code="1001", statement_date=date.today(),
+                description="Nol", amount=Decimal("0"),
+            )
+
+    def test_record_rejects_unknown_account_code(self):
+        with self.assertRaises(ValueError):
+            BankStatementLine.record(
+                organization=self.org, account_code="9999", statement_date=date.today(),
+                description="Salah kode", amount=Decimal("100000"),
+            )
+
+
+class ReconciliationMatchRecordTests(TestCase):
+    """Model-layer coverage for ReconciliationMatch.record()."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+        entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        self.cash_line = entry.lines.get(account=self.cash)
+        self.revenue_line = entry.lines.get(account=self.revenue)
+        self.statement_line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran", amount=Decimal("500000"),
+        )
+
+    def test_record_creates_match(self):
+        match = ReconciliationMatch.record(statement_line=self.statement_line, journal_line=self.cash_line)
+        self.assertEqual(match.statement_line_id, self.statement_line.id)
+        self.assertEqual(match.journal_line_id, self.cash_line.id)
+        self.statement_line.refresh_from_db()
+        self.assertTrue(self.statement_line.is_matched)
+
+    def test_record_rejects_mismatched_account(self):
+        """
+        THE REAL PROOF — the journal line touches revenue (4001), the
+        statement line is on cash (1001). Matching a Cash statement
+        against a COGS/Revenue journal line is structurally
+        meaningless — rejected outright, not left to the user to
+        notice.
+        """
+        with self.assertRaises(ValueError):
+            ReconciliationMatch.record(statement_line=self.statement_line, journal_line=self.revenue_line)
+
+    def test_record_rejects_duplicate_pairing(self):
+        ReconciliationMatch.record(statement_line=self.statement_line, journal_line=self.cash_line)
+        with self.assertRaises(ValueError):
+            ReconciliationMatch.record(statement_line=self.statement_line, journal_line=self.cash_line)
+
+    def test_record_rejects_cross_organization_pair(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Reconciliation")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        foreign_statement_line = BankStatementLine.record(
+            organization=other_org, account_code="1001", statement_date=date.today(),
+            description="Punya bengkel lain", amount=Decimal("500000"),
+        )
+        with self.assertRaises(ValueError):
+            ReconciliationMatch.record(statement_line=foreign_statement_line, journal_line=self.cash_line)
+
+    def test_deleting_match_touches_neither_the_ledger_nor_the_statement_line(self):
+        """
+        Real proof unmatching is pure metadata removal (Principle
+        #15) — the real JournalLine and BankStatementLine rows, and
+        the real account balance, survive completely unchanged.
+        """
+        match = ReconciliationMatch.record(statement_line=self.statement_line, journal_line=self.cash_line)
+        match.delete()
+
+        self.statement_line.refresh_from_db()
+        self.assertFalse(self.statement_line.is_matched)
+        self.assertTrue(JournalLine.objects.filter(pk=self.cash_line.pk).exists())
+        self.assertEqual(self.cash.balance(), Decimal("500000.00"))
+
+    def test_statement_line_delete_blocked_while_matched(self):
+        """Real, DB-level PROTECT proof at the model layer — the
+        API-layer version of this same guarantee is proven separately
+        in BankStatementLineDetailAPITests below."""
+        from django.db.models.deletion import ProtectedError
+        ReconciliationMatch.record(statement_line=self.statement_line, journal_line=self.cash_line)
+        with self.assertRaises(ProtectedError):
+            self.statement_line.delete()
+
+
+class BankStatementLineAPITests(APITestCase):
+    """
+    HTTP-level coverage for GET/POST /api/accounting/reconciliation/
+    statement-lines/.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.bankstmt@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.staff = CustomUser.objects.create_user(
+            email="staff.bankstmt@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+        # Deliberately authenticated as STAFF, not owner — proves
+        # this endpoint is NOT owner-gated (see this class's own
+        # first test).
+        self.client.force_authenticate(user=self.staff)
+
+    def test_any_member_can_create_statement_line(self):
+        """Real proof this endpoint is open to any org member — same
+        stakes class as OpeningBalance's own line-item endpoints,
+        since entering a statement line never touches the real
+        ledger at all."""
+        resp = self.client.post("/api/accounting/reconciliation/statement-lines/", {
+            "account_code": "1001", "statement_date": str(date.today()),
+            "description": "Setoran tunai", "amount": "500000",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["statement_line"]["account_code"], "1001")
+
+    def test_create_rejects_zero_amount(self):
+        resp = self.client.post("/api/accounting/reconciliation/statement-lines/", {
+            "account_code": "1001", "statement_date": str(date.today()),
+            "description": "Nol", "amount": "0",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_filters_by_account(self):
+        self.client.post("/api/accounting/reconciliation/statement-lines/", {
+            "account_code": "1001", "statement_date": str(date.today()), "description": "Kas", "amount": "100000",
+        }, format="json")
+        self.client.post("/api/accounting/reconciliation/statement-lines/", {
+            "account_code": "1101", "statement_date": str(date.today()), "description": "Bank", "amount": "200000",
+        }, format="json")
+
+        resp = self.client.get("/api/accounting/reconciliation/statement-lines/?account=1001")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["statement_lines"]), 1)
+        self.assertEqual(resp.data["statement_lines"][0]["account_code"], "1001")
+
+    def test_list_scoped_to_organization(self):
+        self.client.post("/api/accounting/reconciliation/statement-lines/", {
+            "account_code": "1001", "statement_date": str(date.today()), "description": "Org A", "amount": "100000",
+        }, format="json")
+
+        other_org = Organization.objects.create(name="Bengkel Lain Statement Lines")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.stmt@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/reconciliation/statement-lines/")
+        self.assertEqual(resp.data["statement_lines"], [])
+
+
+class BankStatementLineDetailAPITests(APITestCase):
+    """HTTP-level coverage for DELETE /api/accounting/reconciliation/
+    statement-lines/<pk>/."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.bankstmtdetail@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+
+    def test_delete_removes_unmatched_line(self):
+        line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran", amount=Decimal("500000"),
+        )
+        resp = self.client.delete(f"/api/accounting/reconciliation/statement-lines/{line.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(BankStatementLine.objects.filter(pk=line.id).exists())
+
+    def test_delete_blocked_while_matched(self):
+        """The real, clean 409 — the raw ProtectedError from the
+        model layer's own test above, translated into a real, user-
+        facing message here (BankStatementLineDetailView.delete())."""
+        revenue = Account.objects.get(organization=self.org, code="4001")
+        entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": revenue, "credit": Decimal("500000")}],
+        )
+        cash_line = entry.lines.get(account=self.cash)
+        statement_line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran", amount=Decimal("500000"),
+        )
+        ReconciliationMatch.record(statement_line=statement_line, journal_line=cash_line)
+
+        resp = self.client.delete(f"/api/accounting/reconciliation/statement-lines/{statement_line.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertTrue(BankStatementLine.objects.filter(pk=statement_line.id).exists())
+
+    def test_delete_returns_404_for_nonexistent(self):
+        resp = self.client.delete(f"/api/accounting/reconciliation/statement-lines/{uuid.uuid4()}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_scoped_to_organization(self):
+        line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran", amount=Decimal("500000"),
+        )
+        other_org = Organization.objects.create(name="Bengkel Lain Statement Detail")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.stmtdetail@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.delete(f"/api/accounting/reconciliation/statement-lines/{line.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ReconciliationMatchAPITests(APITestCase):
+    """
+    HTTP-level coverage for POST /api/accounting/reconciliation/
+    matches/ and DELETE .../matches/<pk>/.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.reconmatch@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+        entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        self.cash_line = entry.lines.get(account=self.cash)
+        self.revenue_line = entry.lines.get(account=self.revenue)
+        self.statement_line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran", amount=Decimal("500000"),
+        )
+
+    def test_create_match_success(self):
+        resp = self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(self.statement_line.id), "journal_line": str(self.cash_line.id),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["match"]["statement_line_id"], str(self.statement_line.id))
+
+    def test_create_match_rejects_mismatched_account(self):
+        resp = self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(self.statement_line.id), "journal_line": str(self.revenue_line.id),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_match_404_for_nonexistent_statement_line(self):
+        resp = self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(uuid.uuid4()), "journal_line": str(self.cash_line.id),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_create_match_404_for_nonexistent_journal_line(self):
+        resp = self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(self.statement_line.id), "journal_line": str(uuid.uuid4()),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unmatch_deletes_match_and_unblocks_statement_line_delete(self):
+        """
+        THE REAL PROOF — a real, end-to-end integration test tying
+        the whole feature together: match -> confirm delete is
+        blocked by the real PROTECT constraint -> unmatch -> confirm
+        delete now succeeds. Not three separate assumptions, one
+        continuous real sequence.
+        """
+        create = self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(self.statement_line.id), "journal_line": str(self.cash_line.id),
+        }, format="json")
+        match_id = create.data["match"]["id"]
+
+        blocked = self.client.delete(f"/api/accounting/reconciliation/statement-lines/{self.statement_line.id}/")
+        self.assertEqual(blocked.status_code, status.HTTP_409_CONFLICT)
+
+        unmatch = self.client.delete(f"/api/accounting/reconciliation/matches/{match_id}/")
+        self.assertEqual(unmatch.status_code, status.HTTP_200_OK)
+        self.assertFalse(ReconciliationMatch.objects.filter(pk=match_id).exists())
+
+        now_allowed = self.client.delete(f"/api/accounting/reconciliation/statement-lines/{self.statement_line.id}/")
+        self.assertEqual(now_allowed.status_code, status.HTTP_200_OK)
+
+    def test_unmatch_returns_404_for_nonexistent(self):
+        resp = self.client.delete(f"/api/accounting/reconciliation/matches/{uuid.uuid4()}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_scoped_to_organization(self):
+        """Both real ids belong to self.org — a different org's own
+        tenant-scoped lookups must find neither, surfacing as a real
+        404, never leaking a cross-tenant match."""
+        other_org = Organization.objects.create(name="Bengkel Lain Recon Match")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.reconmatch@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.post("/api/accounting/reconciliation/matches/", {
+            "statement_line": str(self.statement_line.id), "journal_line": str(self.cash_line.id),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ReconciliationSummaryAPITests(APITestCase):
+    """HTTP-level coverage for GET /api/accounting/reconciliation/
+    <str:account_code>/."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.reconsummary@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+
+    def test_summary_returns_totals_and_unmatched_lists(self):
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran", amount=Decimal("500000"),
+        )
+        resp = self.client.get("/api/accounting/reconciliation/1001/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # This view builds its response as a plain dict (not through
+        # a serializer) — resp.data holds the real, native Decimal
+        # objects directly, same "date object, not a string" pattern
+        # ReportingAPITests.test_profit_loss_accepts_explicit_date_range
+        # already relies on elsewhere in this file.
+        self.assertEqual(resp.data["total_bank_balance"], Decimal("500000"))
+        self.assertEqual(resp.data["total_journal_balance"], Decimal("500000.00"))
+        self.assertEqual(len(resp.data["unmatched_statement_lines"]), 1)
+        self.assertEqual(len(resp.data["unmatched_journal_lines"]), 1)
+
+    def test_summary_excludes_matched_lines_from_unmatched_lists(self):
+        entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[{"account": self.cash, "debit": Decimal("500000")}, {"account": self.revenue, "credit": Decimal("500000")}],
+        )
+        cash_line = entry.lines.get(account=self.cash)
+        statement_line = BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Setoran", amount=Decimal("500000"),
+        )
+        ReconciliationMatch.record(statement_line=statement_line, journal_line=cash_line)
+
+        resp = self.client.get("/api/accounting/reconciliation/1001/")
+        self.assertEqual(resp.data["unmatched_statement_lines"], [])
+        self.assertEqual(resp.data["unmatched_journal_lines"], [])
+
+    def test_summary_invalid_account_code_returns_400(self):
+        resp = self.client.get("/api/accounting/reconciliation/9999/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_summary_scoped_to_organization(self):
+        BankStatementLine.record(
+            organization=self.org, account_code="1001", statement_date=date.today(),
+            description="Org A", amount=Decimal("500000"),
+        )
+        other_org = Organization.objects.create(name="Bengkel Lain Recon Summary")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.reconsummary@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/accounting/reconciliation/1001/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["unmatched_statement_lines"], [])
