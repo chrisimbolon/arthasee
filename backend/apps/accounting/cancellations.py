@@ -39,6 +39,7 @@ from decimal import Decimal
 from apps.accounting.models import Account, JournalEntry
 from apps.accounting.posting_engine import cash_or_bank_account_code
 from apps.organizations.models import Organization
+from django.utils import timezone
 
 
 def _resolve_actor(user_id):
@@ -54,6 +55,27 @@ def _resolve_actor(user_id):
     from apps.authentication.models import CustomUser
     return CustomUser.objects.filter(pk=user_id).first()
 
+def _safe_posting_date(event):
+    """
+    9 Sep 2026 — real fix, backporting journal_generator.
+    post_for_event()'s own 5 Sep 2026 timezone fix, missed here at
+    the time: occurred_at is a UTC-aware datetime under this
+    project's real USE_TZ=True / TIME_ZONE="Asia/Jakarta" (UTC+7)
+    settings — calling .date() directly on it extracts the UTC
+    calendar day, not the shop's real local one, silently misdating
+    any reversal posted between local midnight and 7am local time.
+    timezone.localtime() converts back to the project's configured
+    local zone first. Shared here, not duplicated across both
+    reversal functions below — same "one real definition" discipline
+    cash_or_bank_account_code() already established in
+    posting_engine.py. Defensive is_aware() guard mirrors journal_
+    generator.py's own — occurred_at is expected to always be aware,
+    but this falls back to the raw date rather than crash if that
+    assumption is ever wrong for some caller this fix didn't see.
+    """
+    if timezone.is_aware(event.occurred_at):
+        return timezone.localtime(event.occurred_at).date()
+    return event.occurred_at.date()
 
 def reverse_for_event(event) -> JournalEntry | None:
     """
@@ -98,7 +120,7 @@ def reverse_for_event(event) -> JournalEntry | None:
 
     return JournalEntry.post(
         organization=organization,
-        posting_date=event.occurred_at.date(),
+        posting_date=_safe_posting_date(event),
         source=JournalEntry.Source.DOMAIN_EVENT,
         event_type=event.event_type,
         reference_event_id=event.event_id,
@@ -168,7 +190,7 @@ def reverse_for_refund_event(event) -> JournalEntry | None:
 
     return JournalEntry.post(
         organization=organization,
-        posting_date=event.occurred_at.date(),
+        posting_date=_safe_posting_date(event),
         source=JournalEntry.Source.DOMAIN_EVENT,
         event_type=event.event_type,
         reference_event_id=event.event_id,
