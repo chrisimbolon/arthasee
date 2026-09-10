@@ -3951,6 +3951,17 @@ class AccountingAdminLockdownTests(TestCase):
         balance() reads these live, so changing one retroactively
         reinterprets historical balances), while name/is_active stay
         genuinely editable — safe, ordinary lifecycle edits.
+
+        9 Sep 2026 — extended, Phase 17 follow-up: account_subtype/
+        is_contra now belong in the SAME locked category as account_
+        type/normal_balance — Account.save() derives the latter from
+        the former unconditionally, so leaving account_subtype
+        editable would have made the original lockdown illusory (see
+        AccountAdmin's own updated comment, admin.py). is_control_
+        account/parent are proven to REMAIN editable — the
+        deliberate, narrower split Account.apply_edit() itself
+        already makes (classification only; is_control_account and
+        parent carry no retroactive-reinterpretation risk).
         """
         from apps.accounting.admin import AccountAdmin
         account_admin = AccountAdmin(Account, admin.site)
@@ -3958,8 +3969,12 @@ class AccountingAdminLockdownTests(TestCase):
         self.assertIn("code", readonly)
         self.assertIn("account_type", readonly)
         self.assertIn("normal_balance", readonly)
+        self.assertIn("account_subtype", readonly)
+        self.assertIn("is_contra", readonly)
         self.assertNotIn("name", readonly)
         self.assertNotIn("is_active", readonly)
+        self.assertNotIn("is_control_account", readonly)
+        self.assertNotIn("parent", readonly)
 
 """
 Real coverage for Account.record()/Account.apply_edit() (models.py)
