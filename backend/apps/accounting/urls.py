@@ -7,11 +7,12 @@ from .views import (AccountDetailView, AccountingPeriodCloseView,
                     AccountingPeriodListView, AccountingPeriodReopenView,
                     AccountListCreateView, AgingAPView, AgingARView,
                     AssetListCreateView, BalanceSheetView,
-                    CashConversionCycleView, DailyCashActivityView,
-                    DashboardFinancialSummaryView, DepreciationRunDetailView,
-                    FailedPostingsView, GeneralLedgerView,
-                    JournalEntryDetailView, JournalEntryListView,
-                    ManualJournalListCreateView,
+                    BankStatementLineDetailView,
+                    BankStatementLineListCreateView, CashConversionCycleView,
+                    DailyCashActivityView, DashboardFinancialSummaryView,
+                    DepreciationRunDetailView, FailedPostingsView,
+                    GeneralLedgerView, JournalEntryDetailView,
+                    JournalEntryListView, ManualJournalListCreateView,
                     OpeningBalanceAssetLineDetailView,
                     OpeningBalanceAssetLineListCreateView,
                     OpeningBalanceCashLineView,
@@ -25,7 +26,9 @@ from .views import (AccountDetailView, AccountingPeriodCloseView,
                     OpeningBalanceReceivableDetailView,
                     OpeningBalanceReceivableListCreateView,
                     OpeningBalanceSessionView, ProfitLossTrendView,
-                    ProfitLossView, TrialBalanceView)
+                    ProfitLossView, ReconciliationMatchDetailView,
+                    ReconciliationMatchListCreateView,
+                    ReconciliationSummaryView, TrialBalanceView)
 
 urlpatterns = [
     path("trial-balance/",   TrialBalanceView.as_view(),           name="trial-balance"),
@@ -46,6 +49,16 @@ urlpatterns = [
     # (Sub-Accounts) to be usable at all.
     path("accounts/", AccountListCreateView.as_view(), name="account-list-create"),
     path("accounts/<uuid:pk>/", AccountDetailView.as_view(), name="account-detail"),
+    # 9 Sep 2026 — Phase 17, Task 17.3. Bank Reconciliation — manual
+    # statement entry v1 (Open Decision #20 defers a real live bank-
+    # feed integration). Literal paths (statement-lines/, matches/)
+    # BEFORE the <str:account_code> catch-all — see this file's own
+    # header note for why the order matters here.
+    path("reconciliation/statement-lines/", BankStatementLineListCreateView.as_view(), name="reconciliation-statement-line-list-create"),
+    path("reconciliation/statement-lines/<uuid:pk>/", BankStatementLineDetailView.as_view(), name="reconciliation-statement-line-detail"),
+    path("reconciliation/matches/", ReconciliationMatchListCreateView.as_view(), name="reconciliation-match-list-create"),
+    path("reconciliation/matches/<uuid:pk>/", ReconciliationMatchDetailView.as_view(), name="reconciliation-match-detail"),
+    path("reconciliation/<str:account_code>/", ReconciliationSummaryView.as_view(), name="reconciliation-summary"),
     path("manual-journals/", ManualJournalListCreateView.as_view(), name="manual-journal-list-create"),
     path("journal-entries/", JournalEntryListView.as_view(),       name="journal-entry-list"),
     path("journal-entries/<uuid:pk>/", JournalEntryDetailView.as_view(), name="journal-entry-detail"),
