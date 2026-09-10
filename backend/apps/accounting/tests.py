@@ -5064,6 +5064,13 @@ class ReversalTimezoneTests(TestCase):
     isolation, same "isolate the branch logic" reasoning
     TraceForwardResolverTests' own patch.dict() tests already use
     elsewhere in this file.
+
+    occurred_at is built as an explicitly UTC-aware datetime via
+    Python's own datetime.timezone.utc — NOT via Django's
+    timezone.make_aware(), which interprets a naive value as already
+    being in the CURRENT/local timezone (Asia/Jakarta) rather than
+    UTC, and would silently fail to exercise the real conversion this
+    test exists to prove.
     """
 
     def test_reversal_posting_date_uses_local_calendar_day_not_utc(self):
@@ -5075,12 +5082,12 @@ class ReversalTimezoneTests(TestCase):
         # UTC+7) — same real day either way, a deliberate sanity
         # check that the ordinary case still works before proving the
         # real regression case below.
-        fake_event.occurred_at = timezone.make_aware(datetime(2026, 9, 10, 1, 0))
+        fake_event.occurred_at = datetime(2026, 9, 10, 1, 0, tzinfo=dt_timezone.utc)
         self.assertEqual(_safe_posting_date(fake_event), date(2026, 9, 10))
 
         # 2026-09-10 20:00 UTC = 2026-09-11 03:00 local — THE real
         # regression case. The old event.occurred_at.date() would
         # have returned 2026-09-10 (the UTC calendar day); the real
         # local calendar day is 2026-09-11.
-        fake_event.occurred_at = timezone.make_aware(datetime(2026, 9, 10, 20, 0))
+        fake_event.occurred_at = datetime(2026, 9, 10, 20, 0, tzinfo=dt_timezone.utc)
         self.assertEqual(_safe_posting_date(fake_event), date(2026, 9, 11))
