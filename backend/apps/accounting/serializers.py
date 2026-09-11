@@ -54,6 +54,24 @@ class ManualJournalRecordSerializer(serializers.Serializer):
             raise serializers.ValidationError("Jurnal manual harus memiliki minimal dua baris.")
         return value
 
+class JournalEntryCorrectRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/accounting/journal-entries/<pk>/
+    correct/. Deliberately mirrors ManualJournalRecordSerializer's
+    own exact shape (posting_date, reason, lines via the same real
+    ManualJournalLineInputSerializer) — a correction's corrected
+    lines are entered the same real way a manual journal's lines
+    are; no reason to invent a second input shape for what is, at
+    the input layer, the identical kind of data.
+    """
+    posting_date = serializers.DateField()
+    reason       = serializers.CharField(max_length=500)
+    lines        = ManualJournalLineInputSerializer(many=True)
+
+    def validate_lines(self, value):
+        if len(value) < 2:
+            raise serializers.ValidationError("Koreksi harus memiliki minimal dua baris.")
+        return value
 
 class JournalLineSerializer(serializers.ModelSerializer):
     account_code = serializers.CharField(source="account.code", read_only=True)
