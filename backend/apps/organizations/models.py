@@ -38,6 +38,27 @@ class Organization(models.Model):
             "di Pengaturan Bengkel."
         ),
     )
+    # 9 Sep 2026 — Phase 18, Task 18.6. Real, deliberate LOOSENING of
+    # an existing, hardened invariant — AccountingPeriod.close()'s own
+    # strict sequential-closing guard (added 4 Sep 2026, with its own
+    # dedicated test class) — not a toggle added to something
+    # previously unconstrained. default=True is non-negotiable: every
+    # existing organization keeps today's exact behavior on the day
+    # this ships. Same "real, owner-configurable business-rule field
+    # sitting directly on Organization" precedent as
+    # daily_appointment_capacity above — no dedicated settings model
+    # exists anywhere in this codebase, confirmed by reading this
+    # exact file before this field was added, not assumed.
+    requires_sequential_period_closing = models.BooleanField(
+        default=True, verbose_name="Wajib Tutup Buku Berurutan",
+        help_text=(
+            "Jika aktif (default), periode akuntansi harus ditutup secara "
+            "berurutan — periode sebelumnya harus ditutup dulu sebelum "
+            "periode berikutnya bisa ditutup. Nonaktifkan hanya jika bengkel "
+            "benar-benar membutuhkan fleksibilitas menutup periode di luar "
+            "urutan."
+        ),
+    )    
     # 29 Aug 2026 — real onboarding gate, Chris's own confirmed
     # design. blank=True, default="" — matches invoice_code's own
     # established convention exactly (an empty string, not NULL, as
