@@ -633,7 +633,14 @@ class AccountingPeriodLockTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        self.wip       = Account.objects.get(organization=self.org, code="1302")
+        # 9 Sep 2026 — real, SECOND fix: 1302 (WIP) itself became a
+        # real control account too, once Phase 18 Task 18.1 derived
+        # is_control_account from account_subtype (1302 shares 1301's
+        # own PERSEDIAAN subtype — see Account.IS_CONTROL_SUBTYPES,
+        # models.py). Swapped to 5003, the same real, non-control
+        # account ManualJournalAPITests' own _post() default already
+        # uses — neither side of this pair is a control account.
+        self.wip       = Account.objects.get(organization=self.org, code="5003")
         # 8 Sep 2026 — real fix: was code="1301" (Inventory), now a
         # real control account. This class's own
         # test_posting_into_locked_period_is_allowed_for_manual_journals
@@ -1554,7 +1561,13 @@ class JournalEntryAndFailedPostingsAPITests(APITestCase):
         OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
         self.client.force_authenticate(user=self.owner)
 
-        self.wip       = Account.objects.get(organization=self.org, code="1302")
+        # 9 Sep 2026 — real, SECOND fix: 1302 (WIP) itself became a
+        # real control account too, once Phase 18 Task 18.1 derived
+        # is_control_account from account_subtype (1302 shares 1301's
+        # own PERSEDIAAN subtype). Swapped to 5003, same real, non-
+        # control account used throughout this file for exactly this
+        # "any two valid, non-control accounts" fixture need.
+        self.wip       = Account.objects.get(organization=self.org, code="5003")
         # 8 Sep 2026 — real fix: was code="1301" (Inventory), now a
         # real control account. This class's own tests below
         # specifically prove MANUAL-source filtering/listing — kept
@@ -1594,7 +1607,7 @@ class JournalEntryAndFailedPostingsAPITests(APITestCase):
         resp = self.client.get("/api/accounting/journal-entries/")
         lines = resp.data["journal_entries"][0]["lines"]
         self.assertEqual(len(lines), 2)
-        self.assertEqual({l["account_code"] for l in lines}, {"2010", "1302"})
+        self.assertEqual({l["account_code"] for l in lines}, {"2010", "5003"})
 
     def test_journal_entries_scoped_to_organization(self):
         self._post(JournalEntry.Source.MANUAL)
@@ -3959,11 +3972,16 @@ class AccountingAdminLockdownTests(TestCase):
         type/normal_balance — Account.save() derives the latter from
         the former unconditionally, so leaving account_subtype
         editable would have made the original lockdown illusory (see
-        AccountAdmin's own updated comment, admin.py). is_control_
-        account/parent are proven to REMAIN editable — the
-        deliberate, narrower split Account.apply_edit() itself
-        already makes (classification only; is_control_account and
-        parent carry no retroactive-reinterpretation risk).
+        AccountAdmin's own updated comment, admin.py).
+
+        9 Sep 2026 — real, SECOND extension, Phase 18 Task 18.1:
+        is_control_account joins the SAME locked set for the same
+        reason — Account.save() now derives it unconditionally from
+        account_subtype too, so leaving it editable in Admin would
+        make that new derivation illusory the same way account_
+        subtype editability would have. `parent` remains the one
+        real exception — pure presentation metadata, zero rollup
+        math anywhere, genuinely unaffected by either derivation.
         """
         from apps.accounting.admin import AccountAdmin
         account_admin = AccountAdmin(Account, admin.site)
@@ -3973,9 +3991,9 @@ class AccountingAdminLockdownTests(TestCase):
         self.assertIn("normal_balance", readonly)
         self.assertIn("account_subtype", readonly)
         self.assertIn("is_contra", readonly)
+        self.assertIn("is_control_account", readonly)
         self.assertNotIn("name", readonly)
         self.assertNotIn("is_active", readonly)
-        self.assertNotIn("is_control_account", readonly)
         self.assertNotIn("parent", readonly)
 
 """
@@ -4175,8 +4193,12 @@ class AccountApplyEditTests(TestCase):
 
     def test_name_and_is_active_still_editable_once_history_exists(self):
         """The classification guard is deliberately narrow — name,
-        description, is_active, and is_control_account must all
-        remain freely editable even with real posted history."""
+        description, and is_active must all remain freely editable
+        even with real posted history. is_control_account is no
+        longer part of this test — Phase 18, Task 18.1 made it a
+        derived field, no longer a free apply_edit() parameter at
+        all (see ControlAccountDerivationTests for its own real
+        coverage)."""
         cash = Account.objects.get(organization=self.org, code="1001")
         JournalEntry.post(
             organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
@@ -4185,11 +4207,10 @@ class AccountApplyEditTests(TestCase):
                 {"account": cash, "credit": Decimal("10000")},
             ],
         )
-        self.account.apply_edit(name="Nama Baru", is_active=False, is_control_account=True)
+        self.account.apply_edit(name="Nama Baru", is_active=False)
         self.account.refresh_from_db()
         self.assertEqual(self.account.name, "Nama Baru")
         self.assertFalse(self.account.is_active)
-        self.assertTrue(self.account.is_control_account)
 
     def test_parent_omitted_leaves_relationship_untouched(self):
         """
@@ -5548,3 +5569,93 @@ class JournalEntryCorrectAPITests(APITestCase):
 
         resp = self._correct()
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+class ControlAccountDerivationTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.1. Real coverage for the new
+    derivation — is_control_account is no longer a free checkbox,
+    derived unconditionally from account_subtype the moment one is
+    set, matching account_type/normal_balance's own existing
+    treatment exactly.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_control_subtypes_derive_true(self):
+        for subtype, code in [
+            (Account.AccountSubtype.PIUTANG_USAHA, "9101"),
+            (Account.AccountSubtype.PERSEDIAAN, "9102"),
+            (Account.AccountSubtype.UTANG_USAHA, "9103"),
+        ]:
+            account = Account.record(
+                organization=self.org, code=code, name=f"Test {subtype}", account_subtype=subtype,
+            )
+            self.assertTrue(account.is_control_account, f"{subtype} should derive is_control_account=True")
+
+    def test_non_control_subtypes_derive_false(self):
+        account = Account.record(
+            organization=self.org, code="9104", name="Test Non-Control",
+            account_subtype=Account.AccountSubtype.BEBAN_USAHA,
+        )
+        self.assertFalse(account.is_control_account)
+
+    def test_piutang_lainnya_and_utang_lainnya_deliberately_excluded(self):
+        """Real proof of Open Decision #25 — these two subtypes stay
+        NOT derived as control accounts, despite being subledger-
+        adjacent, since no real subledger relationship exists for
+        them yet."""
+        account_a = Account.record(
+            organization=self.org, code="9109", name="Piutang Lainnya Test",
+            account_subtype=Account.AccountSubtype.PIUTANG_LAINNYA,
+        )
+        account_b = Account.record(
+            organization=self.org, code="9110", name="Utang Lainnya Test",
+            account_subtype=Account.AccountSubtype.UTANG_LAINNYA,
+        )
+        self.assertFalse(account_a.is_control_account)
+        self.assertFalse(account_b.is_control_account)
+
+    def test_save_overrides_a_directly_set_value(self):
+        """Real proof this is DERIVED, not just a default — even a
+        direct attribute assignment gets overwritten the moment
+        save() runs, for any account with a real subtype set."""
+        account = Account.record(
+            organization=self.org, code="9105", name="Test Override",
+            account_subtype=Account.AccountSubtype.BEBAN_USAHA,
+        )
+        self.assertFalse(account.is_control_account)
+        account.is_control_account = True  # direct attribute set, bypassing record()/apply_edit()
+        account.save()
+        account.refresh_from_db()
+        self.assertFalse(account.is_control_account)  # save() derived it back to False
+
+    def test_record_no_longer_accepts_is_control_account_kwarg(self):
+        with self.assertRaises(TypeError):
+            Account.record(
+                organization=self.org, code="9106", name="Should Fail",
+                account_subtype=Account.AccountSubtype.BEBAN_USAHA,
+                is_control_account=True,
+            )
+
+    def test_apply_edit_no_longer_accepts_is_control_account_kwarg(self):
+        account = Account.record(
+            organization=self.org, code="9107", name="Test Apply Edit",
+            account_subtype=Account.AccountSubtype.BEBAN_USAHA,
+        )
+        with self.assertRaises(TypeError):
+            account.apply_edit(is_control_account=True)
+
+    def test_account_with_no_subtype_keeps_manually_set_value_untouched(self):
+        """Real proof of backward compatibility — an account with NO
+        subtype at all (every pre-existing test fixture, and any
+        legacy row) is untouched by this derivation, same as
+        account_type/normal_balance's own existing precedent."""
+        account = Account.objects.create(
+            organization=self.org, code="9108", name="Legacy No Subtype",
+            account_type=Account.AccountType.ASSET, normal_balance=Account.NormalBalance.DEBIT,
+            is_control_account=True,
+        )
+        account.refresh_from_db()
+        self.assertTrue(account.is_control_account)  # untouched — no subtype means no derivation runs
