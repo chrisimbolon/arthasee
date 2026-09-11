@@ -401,7 +401,6 @@ function AccountForm({
         name: values.name,
         account_subtype: values.account_subtype,
         is_contra: values.is_contra,
-        is_control_account: values.is_control_account,
         description: values.description,
         parent: values.parent || null,
       });
@@ -422,7 +421,6 @@ function AccountForm({
         name: values.name,
         description: values.description,
         is_active: values.is_active,
-        is_control_account: values.is_control_account,
         parent: values.parent || null,
       };
       if (!lockClassification) {
@@ -521,13 +519,19 @@ function AccountForm({
           />
           Akun Kontra
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14 }}>
-          <input
-            type="checkbox" checked={values.is_control_account}
-            onChange={(e) => setValues({ ...values, is_control_account: e.target.checked })}
-          />
-          Akun Kontrol
-        </label>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{
+            display: "inline-flex", alignItems: "center", padding: "2px 8px",
+            borderRadius: 4, fontSize: 12, fontWeight: 600,
+            background: values.is_control_account ? "var(--workshop-lt)" : "var(--paper-3)",
+            color: values.is_control_account ? "var(--workshop)" : "var(--steel)",
+          }}>
+            {values.is_control_account ? "Akun Kontrol" : "Bukan Akun Kontrol"}
+          </span>
+          <span style={{ fontSize: 12, color: "var(--steel)" }}>
+            — ditentukan otomatis dari Sub-Tipe Akun
+          </span>
+        </div>
         {mode === "edit" && (
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14 }}>
             <input
