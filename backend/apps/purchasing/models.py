@@ -16,6 +16,7 @@ the accounting posting engine.
 import uuid
 from decimal import Decimal
 
+from apps.accounting.periods import safe_local_date
 from apps.core.models import TenantScopedModel
 from django.db import models, transaction
 from django.utils import timezone
@@ -392,7 +393,7 @@ class GoodsReceivedNote(TenantScopedModel):
 
         with transaction.atomic():
             from apps.accounting.models import AccountingPeriod
-            AccountingPeriod.assert_open_for_posting(organization, (received_at or timezone.now()).date())
+            AccountingPeriod.assert_open_for_posting(organization, safe_local_date(received_at or timezone.now()))
             grn = cls.objects.create(
                 organization=organization, supplier=purchase_order.supplier,
                 purchase_order=purchase_order,
@@ -459,6 +460,17 @@ class GoodsReceivedNote(TenantScopedModel):
                 supplier_id=purchase_order.supplier_id,
                 amount=total_cost,
                 line_item_count=len(line_items),
+                # 9 Sep 2026 — real fix, same shape as
+                # QuickPurchaseRecorded's own 29 Aug 2026 one. grn.
+                # received_at already holds the fully-resolved real
+                # value (either the caller's own received_at, or the
+                # timezone.now() fallback GoodsReceivedNote.receive()
+                # applies above) — the real business date, not
+                # "whenever this event happens to get published."
+                # safe_local_date(), not a raw .date() call — same
+                # midnight-boundary fix as everywhere else this
+                # session (see periods.py's own docstring).
+                transaction_date=safe_local_date(grn.received_at),
             ))
 
         grn.price_variance_warnings = price_variance_warnings
@@ -820,7 +832,7 @@ class PurchaseReturn(TenantScopedModel):
 
         with transaction.atomic():
             from apps.accounting.models import AccountingPeriod
-            AccountingPeriod.assert_open_for_posting(organization, (return_date or timezone.now()).date())
+            AccountingPeriod.assert_open_for_posting(organization, safe_local_date(return_date or timezone.now()))
             ret = cls.objects.create(
                 organization=organization, goods_received_note=goods_received_note,
                 return_classification=classification,
@@ -1111,7 +1123,7 @@ class QuickPurchase(TenantScopedModel):
 
         with transaction.atomic():
             from apps.accounting.models import AccountingPeriod
-            AccountingPeriod.assert_open_for_posting(organization, (purchased_at or timezone.now()).date())
+            AccountingPeriod.assert_open_for_posting(organization, safe_local_date(purchased_at or timezone.now()))
             qp = cls.objects.create(
                 organization=organization, supplier=supplier, payment_method=payment_method,
                 purchased_at=purchased_at or timezone.now(),
@@ -1148,7 +1160,7 @@ class QuickPurchase(TenantScopedModel):
                 # not "whenever this event happens to get published."
                 # See QuickPurchaseRecorded's own docstring for the
                 # full story.
-                transaction_date=qp.purchased_at.date(),
+                transaction_date=safe_local_date(qp.purchased_at),
             ))
 
         return qp
