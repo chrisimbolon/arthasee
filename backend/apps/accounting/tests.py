@@ -51,7 +51,7 @@ from apps.core.events.bus import default_bus
 from apps.core.models import Outbox
 from apps.inventory.events import PartConsumed
 from apps.inventory.models import Part, StockAdjustment
-from apps.invoicing.events import InvoiceIssued
+from apps.invoicing.events import InvoiceCancelled, InvoiceIssued
 from apps.invoicing.models import Invoice
 from apps.invoicing.tests import InvoicingAPITestBase
 from apps.organizations.models import Organization, OrganizationMembership
@@ -5174,3 +5174,158 @@ class PeriodClosingPolicyTests(TestCase):
         self.assertTrue(self.org.requires_sequential_period_closing)
         with self.assertRaises(ValueError):
             self._period(2).close(closed_by=None)
+
+class JournalEntryReverseTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.3. Real coverage for JournalEntry.
+    reverse() — the one real entry point for reversing an already-
+    posted entry, now on the model itself rather than living only
+    inside cancellations.py's own bespoke flip logic.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+        self.original = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[
+                {"account": self.cash, "debit": Decimal("500000")},
+                {"account": self.revenue, "credit": Decimal("500000")},
+            ],
+        )
+
+    def test_reverse_flips_every_line(self):
+        reversal = self.original.reverse(posting_date=date.today(), memo="Test reversal")
+        self.assertEqual(reversal.lines.count(), 2)
+        cash_line = reversal.lines.get(account=self.cash)
+        revenue_line = reversal.lines.get(account=self.revenue)
+        self.assertEqual(cash_line.credit_amount, Decimal("500000"))
+        self.assertEqual(cash_line.debit_amount, Decimal("0"))
+        self.assertEqual(revenue_line.debit_amount, Decimal("500000"))
+        self.assertEqual(revenue_line.credit_amount, Decimal("0"))
+
+    def test_reverse_sets_reverses_link_both_directions(self):
+        """THE real proof of the direct self-FK — queryable both
+        ways, no cross-referencing event ids needed."""
+        reversal = self.original.reverse(posting_date=date.today(), memo="Test reversal")
+        self.assertEqual(reversal.reverses_id, self.original.id)
+        self.assertIn(reversal, self.original.reversed_by.all())
+
+    def test_reverse_inherits_source_by_default(self):
+        reversal = self.original.reverse(posting_date=date.today(), memo="Test reversal")
+        self.assertEqual(reversal.source, self.original.source)  # MANUAL, inherited
+
+    def test_reverse_accepts_explicit_source_override(self):
+        """Real proof of the Task 18.7 use case — the reversal is
+        created AS Source.CORRECTION from the start, never inheriting
+        the original's source and getting mutated afterward."""
+        reversal = self.original.reverse(
+            posting_date=date.today(), memo="Koreksi", source=JournalEntry.Source.CORRECTION,
+        )
+        self.assertEqual(reversal.source, JournalEntry.Source.CORRECTION)
+        self.assertEqual(self.original.source, JournalEntry.Source.MANUAL)  # original genuinely untouched
+
+    def test_reverse_net_balance_is_zero(self):
+        """Real proof the reversal actually cancels out — not just
+        that lines exist, but that the real ledger balance for every
+        touched account nets to zero."""
+        self.original.reverse(posting_date=date.today(), memo="Test reversal")
+        self.assertEqual(self.cash.balance(), Decimal("0"))
+        self.assertEqual(self.revenue.balance(), Decimal("0"))
+
+    def test_reverse_stays_within_the_same_organization(self):
+        reversal = self.original.reverse(posting_date=date.today(), memo="Test reversal")
+        self.assertEqual(reversal.organization_id, self.original.organization_id)
+
+    def test_reverse_threads_event_type_and_reference_event_id(self):
+        """Real proof the two new passthrough params actually reach
+        JournalEntry.post() — needed by cancellations.
+        reverse_for_event()'s own idempotency check and trace_forward
+        resolution."""
+        ref_id = uuid.uuid4()
+        reversal = self.original.reverse(
+            posting_date=date.today(), memo="Test reversal",
+            event_type="InvoiceCancelled", reference_event_id=ref_id,
+        )
+        self.assertEqual(reversal.event_type, "InvoiceCancelled")
+        self.assertEqual(reversal.reference_event_id, ref_id)
+
+    def test_original_cannot_be_deleted_once_reversed(self):
+        """Real, DB-level PROTECT proof — an entry that has already
+        been reversed must never be deleted out from under that
+        real link."""
+        from django.db.models.deletion import ProtectedError
+        self.original.reverse(posting_date=date.today(), memo="Test reversal")
+        with self.assertRaises(ProtectedError):
+            self.original.delete()
+
+
+class CancellationsReverseForEventRefactorTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.3. Real, end-to-end integration
+    proof that cancellations.reverse_for_event()'s own refactor
+    (now a thin wrapper around original.reverse()) still produces
+    correct output through the REAL public function, not just that
+    JournalEntry.reverse() works correctly in isolation
+    (JournalEntryReverseTests above already proves that). Uses the
+    real InvoiceCancelled event class, not a stand-in.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.ar = Account.objects.get(organization=self.org, code="1201")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+
+    def test_reverse_for_event_flips_the_real_original_and_links_it(self):
+        from apps.accounting.cancellations import reverse_for_event
+
+        issued_event_id = uuid.uuid4()
+        original = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
+            event_type="InvoiceIssued", reference_event_id=issued_event_id,
+            lines=[
+                {"account": self.ar, "debit": Decimal("350000")},
+                {"account": self.revenue, "credit": Decimal("350000")},
+            ],
+        )
+
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=uuid.uuid4(),
+            issued_event_id=issued_event_id,
+        )
+        reversal = reverse_for_event(cancel_event)
+
+        self.assertIsNotNone(reversal)
+        self.assertEqual(reversal.reverses_id, original.id)
+        self.assertEqual(reversal.reference_event_id, cancel_event.event_id)
+        self.assertEqual(reversal.source, JournalEntry.Source.DOMAIN_EVENT)  # inherited from original
+        self.assertEqual(self.ar.balance(), Decimal("0"))
+        self.assertEqual(self.revenue.balance(), Decimal("0"))
+
+    def test_reverse_for_event_still_idempotent_after_refactor(self):
+        """Real proof the refactor didn't lose the real idempotency
+        guard — calling reverse_for_event() twice for the same
+        cancellation must not double-reverse."""
+        from apps.accounting.cancellations import reverse_for_event
+
+        issued_event_id = uuid.uuid4()
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
+            event_type="InvoiceIssued", reference_event_id=issued_event_id,
+            lines=[
+                {"account": self.ar, "debit": Decimal("100000")},
+                {"account": self.revenue, "credit": Decimal("100000")},
+            ],
+        )
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=uuid.uuid4(),
+            issued_event_id=issued_event_id,
+        )
+        first = reverse_for_event(cancel_event)
+        second = reverse_for_event(cancel_event)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
