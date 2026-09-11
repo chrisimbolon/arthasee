@@ -164,7 +164,6 @@ class AccountListCreateView(TenantScopedAPIView):
                 name=data["name"],
                 account_subtype=data["account_subtype"],
                 is_contra=data["is_contra"],
-                is_control_account=data["is_control_account"],
                 description=data["description"],
                 parent=data["parent"],
             )

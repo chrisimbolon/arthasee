@@ -297,7 +297,6 @@ class AccountRecordSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=200)
     account_subtype = serializers.ChoiceField(choices=Account.AccountSubtype.choices)
     is_contra = serializers.BooleanField(default=False)
-    is_control_account = serializers.BooleanField(default=False)
     description = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     parent = serializers.UUIDField(required=False, allow_null=True, default=None)
 
@@ -335,7 +334,6 @@ class AccountEditSerializer(serializers.Serializer):
     is_active = serializers.BooleanField(required=False)
     account_subtype = serializers.ChoiceField(choices=Account.AccountSubtype.choices, required=False)
     is_contra = serializers.BooleanField(required=False)
-    is_control_account = serializers.BooleanField(required=False)
     parent = serializers.UUIDField(required=False, allow_null=True)
 
     def validate_name(self, value):
