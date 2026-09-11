@@ -5329,3 +5329,222 @@ class CancellationsReverseForEventRefactorTests(TestCase):
 
         self.assertIsNotNone(first)
         self.assertIsNone(second)
+
+class JournalEntryCorrectTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.7. Model-layer coverage for
+    JournalEntry.correct() — every one of the seven mechanically-
+    enforced guardrails gets its own dedicated proof, plus the real,
+    additional double-reversal guard found while implementing this
+    against the real reverses/reversed_by link.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.correct@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.expense = Account.objects.get(organization=self.org, code="6005")
+        self.original = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[
+                {"account": self.expense, "debit": Decimal("100000")},
+                {"account": self.cash, "credit": Decimal("100000")},
+            ],
+        )
+
+    def _corrected_lines(self, amount=Decimal("150000")):
+        return [
+            {"account": self.expense, "debit": amount},
+            {"account": self.cash, "credit": amount},
+        ]
+
+    def test_correct_creates_reversal_and_correction_both_tagged_correction(self):
+        reversal, correction = JournalEntry.correct(
+            original=self.original, corrected_lines=self._corrected_lines(),
+            posting_date=date.today(), reason="Jumlah salah input", created_by=self.owner,
+        )
+        self.assertEqual(reversal.source, JournalEntry.Source.CORRECTION)
+        self.assertEqual(correction.source, JournalEntry.Source.CORRECTION)
+        self.assertEqual(self.original.source, JournalEntry.Source.MANUAL)  # untouched
+
+    def test_reversal_is_linked_to_the_real_original(self):
+        reversal, _ = JournalEntry.correct(
+            original=self.original, corrected_lines=self._corrected_lines(),
+            posting_date=date.today(), reason="Jumlah salah input", created_by=self.owner,
+        )
+        self.assertEqual(reversal.reverses_id, self.original.id)
+
+    def test_original_stays_immutable(self):
+        original_memo = self.original.memo
+        JournalEntry.correct(
+            original=self.original, corrected_lines=self._corrected_lines(),
+            posting_date=date.today(), reason="Jumlah salah input", created_by=self.owner,
+        )
+        self.original.refresh_from_db()
+        self.assertEqual(self.original.memo, original_memo)
+        self.assertEqual(self.original.lines.count(), 2)  # untouched
+
+    def test_net_balance_reflects_only_the_corrected_amount(self):
+        """Real proof of the full flow: original (100k) reversed, new
+        correction posted at 150k — net effect on the ledger is
+        EXACTLY 150k, not 100k, not 250k."""
+        JournalEntry.correct(
+            original=self.original, corrected_lines=self._corrected_lines(Decimal("150000")),
+            posting_date=date.today(), reason="Jumlah salah input", created_by=self.owner,
+        )
+        self.assertEqual(self.expense.balance(), Decimal("150000"))
+        self.assertEqual(self.cash.balance(), Decimal("-150000"))
+
+    def test_reason_is_required(self):
+        with self.assertRaises(ValueError):
+            JournalEntry.correct(
+                original=self.original, corrected_lines=self._corrected_lines(),
+                posting_date=date.today(), reason="", created_by=self.owner,
+            )
+
+    def test_reason_cannot_be_only_whitespace(self):
+        with self.assertRaises(ValueError):
+            JournalEntry.correct(
+                original=self.original, corrected_lines=self._corrected_lines(),
+                posting_date=date.today(), reason="   ", created_by=self.owner,
+            )
+
+    def test_created_by_is_required(self):
+        with self.assertRaises(ValueError):
+            JournalEntry.correct(
+                original=self.original, corrected_lines=self._corrected_lines(),
+                posting_date=date.today(), reason="Jumlah salah input", created_by=None,
+            )
+
+    def test_cannot_correct_an_already_reversed_entry(self):
+        """THE real proof of the additional guard found while
+        implementing this — a second correction of the same original
+        must be rejected outright, not silently double-reverse it."""
+        JournalEntry.correct(
+            original=self.original, corrected_lines=self._corrected_lines(),
+            posting_date=date.today(), reason="Koreksi pertama", created_by=self.owner,
+        )
+        with self.assertRaises(ValueError):
+            JournalEntry.correct(
+                original=self.original, corrected_lines=self._corrected_lines(),
+                posting_date=date.today(), reason="Koreksi kedua", created_by=self.owner,
+            )
+
+    def test_a_failed_correction_leaves_no_partial_trace(self):
+        """Real proof both halves post atomically — an unbalanced
+        corrected_lines must roll back the reversal too, not leave a
+        real reversal sitting alone with no matching correction."""
+        unbalanced_lines = [
+            {"account": self.expense, "debit": Decimal("150000")},
+            {"account": self.cash, "credit": Decimal("999999")},
+        ]
+        entries_before = JournalEntry.objects.filter(organization=self.org).count()
+        with self.assertRaises(ValueError):
+            JournalEntry.correct(
+                original=self.original, corrected_lines=unbalanced_lines,
+                posting_date=date.today(), reason="Sengaja tidak seimbang", created_by=self.owner,
+            )
+        self.assertEqual(JournalEntry.objects.filter(organization=self.org).count(), entries_before)
+
+    def test_posting_date_resolves_into_a_real_open_period(self):
+        reversal, correction = JournalEntry.correct(
+            original=self.original, corrected_lines=self._corrected_lines(),
+            posting_date=date.today(), reason="Jumlah salah input", created_by=self.owner,
+        )
+        today_period = AccountingPeriod.objects.get(
+            organization=self.org, year=date.today().year, month=date.today().month,
+        )
+        self.assertEqual(reversal.accounting_period_id, today_period.id)
+        self.assertEqual(correction.accounting_period_id, today_period.id)
+
+
+class JournalEntryCorrectAPITests(APITestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.7. HTTP-level coverage for POST
+    /api/accounting/journal-entries/<pk>/correct/. Real model-layer
+    correctness is already proven by JournalEntryCorrectTests above;
+    this layer proves the thin view + owner-only gate are wired
+    correctly.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.correctapi@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.staff = CustomUser.objects.create_user(
+            email="staff.correctapi@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.expense = Account.objects.get(organization=self.org, code="6005")
+        self.original = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            lines=[
+                {"account": self.expense, "debit": Decimal("100000")},
+                {"account": self.cash, "credit": Decimal("100000")},
+            ],
+        )
+
+    def _correct(self, **overrides):
+        payload = {
+            "posting_date": str(date.today()),
+            "reason": "Jumlah salah input",
+            "lines": [
+                {"account_code": "6005", "debit": "150000"},
+                {"account_code": "1001", "credit": "150000"},
+            ],
+        }
+        payload.update(overrides)
+        return self.client.post(f"/api/accounting/journal-entries/{self.original.id}/correct/", payload, format="json")
+
+    def test_owner_can_correct(self):
+        resp = self._correct()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["reversal"]["source"], "CORRECTION")
+        self.assertEqual(resp.data["correction"]["source"], "CORRECTION")
+
+    def test_non_owner_cannot_correct(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self._correct()
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_correct_requires_reason(self):
+        resp = self._correct(reason="")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_correct_returns_404_for_nonexistent_entry(self):
+        resp = self.client.post(f"/api/accounting/journal-entries/{uuid.uuid4()}/correct/", {
+            "posting_date": str(date.today()), "reason": "x",
+            "lines": [{"account_code": "6005", "debit": "1000"}, {"account_code": "1001", "credit": "1000"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_correct_invalid_account_code_rejected_cleanly(self):
+        resp = self._correct(lines=[
+            {"account_code": "9999", "debit": "150000"},
+            {"account_code": "1001", "credit": "150000"},
+        ])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Correct")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.correct@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self._correct()
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
