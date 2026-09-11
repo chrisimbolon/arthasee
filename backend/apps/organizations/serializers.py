@@ -19,7 +19,10 @@ class OrganizationSerializer(serializers.ModelSerializer):
         # real onboarding gate needs onboarding_completed to decide
         # whether to intercept at all, and Settings needs phone/
         # address surfaced the same way invoice_code already is.
-        fields = ["id", "name", "invoice_code", "phone", "address", "onboarding_completed", "plan", "is_active", "created_at"]
+        fields = [
+            "id", "name", "invoice_code", "phone", "address", "onboarding_completed",
+            "requires_sequential_period_closing", "plan", "is_active", "created_at",
+        ]
         read_only_fields = ["id", "onboarding_completed", "created_at"]
 
 
@@ -43,7 +46,7 @@ class OrganizationSettingsUpdateSerializer(serializers.ModelSerializer):
         # invoice_code. onboarding_completed deliberately NOT here —
         # that flag only ever moves via OnboardingCompleteSerializer
         # below, never a generic settings edit.
-        fields = ["name", "invoice_code", "phone", "address"]
+        fields = ["name", "invoice_code", "phone", "address", "requires_sequential_period_closing"]
 
     def validate_invoice_code(self, value):
         # Blank is explicitly allowed here — an owner clearing the
