@@ -79,17 +79,21 @@ class AccountAdmin(admin.ModelAdmin):
     # no longer needs to be a fallback way to set classification at
     # all.
     #
-    # is_control_account and parent are DELIBERATELY NOT in this
-    # tuple — neither reinterprets historical balances the way
-    # account_type/normal_balance do. is_control_account only gates
-    # FUTURE manual journals (JournalEntry.post()'s own check); parent
-    # is pure presentation metadata with zero rollup math anywhere
-    # (Account's own class docstring) — matching Account.apply_edit()'s
-    # own deliberate split exactly (that method's classification
-    # guard never covered is_control_account, and parent reassignment
-    # is never blocked by history at all).
+    # 9 Sep 2026 — Phase 18, Task 18.1. is_control_account MOVED into
+    # readonly_fields above — real reversal of the 6 Sep note this
+    # replaces. It's no longer a free, independently-settable field
+    # at all: Account.save() now derives it unconditionally from
+    # account_subtype whenever one is set (IS_CONTROL_SUBTYPES,
+    # models.py), the same "derived, never a checkbox" treatment
+    # account_type/normal_balance already had. Leaving it editable
+    # here would make that derivation illusory — the same class of
+    # gap the 9 Sep 2026 account_subtype/is_contra fix above already
+    # closed once. `parent` remains deliberately NOT in this tuple —
+    # pure presentation metadata, zero rollup math anywhere, genuinely
+    # unaffected by this change.
     readonly_fields = (
-        "code", "account_type", "normal_balance", "account_subtype", "is_contra", "organization",
+        "code", "account_type", "normal_balance", "account_subtype", "is_contra",
+        "is_control_account", "organization",
     )
 
 
