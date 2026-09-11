@@ -20,6 +20,15 @@ export interface Organization {
   phone:        string;
   address:      string;
   onboarding_completed: boolean;
+// 9 Sep 2026 — Phase 18, Task 18.6. Real, owner-configurable
+  // business-rule flag — same "editable in Settings" treatment
+  // already given to phone/address/invoice_code below. default=True
+  // on the backend; see Organization.requires_sequential_period_
+  // closing's own docstring (backend models.py) for why this is a
+  // deliberate LOOSENING of an existing guard (AccountingPeriod.
+  // close()'s own strict sequential-order check), not a toggle on
+  // something previously unconstrained.
+  requires_sequential_period_closing: boolean;  
   plan:         string;
   is_active:    boolean;
   created_at:   string;
@@ -46,7 +55,10 @@ export const organizationsApi = {
   // 3 Sep 2026 — this is now ALSO the real save path for onboarding's
   // own Step 1 (see OnboardingOverlay.tsx) — completeOnboarding()
   // below no longer saves these fields itself.
-  async update(payload: { name?: string; invoice_code?: string; phone?: string; address?: string }): Promise<Organization> {
+  async update(payload: {
+    name?: string; invoice_code?: string; phone?: string; address?: string;
+    requires_sequential_period_closing?: boolean;
+  }): Promise<Organization> {
     const { data } = await api.patch("/api/organizations/mine/", payload);
     return data.organization;
   },

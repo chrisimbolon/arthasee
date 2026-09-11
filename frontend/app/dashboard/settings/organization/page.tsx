@@ -18,7 +18,17 @@ export default function OrganizationSettingsPage() {
   // 29 Aug 2026 — phone/address added, same "everything gathered at
   // onboarding stays editable in Settings afterward" philosophy
   // already established for invoice_code above.
-  const [form, setForm] = useState({ name: "", invoice_code: "", phone: "", address: "" });
+  //
+  // 9 Sep 2026 — Phase 18, Task 18.6. requires_sequential_period_
+  // closing added — defaults true here purely as a sane placeholder
+  // before the real fetched value loads below (matches the backend's
+  // own default=True) — never actually saved at this initial value,
+  // since the form is fully repopulated from the real org the moment
+  // mine() resolves.
+  const [form, setForm] = useState({
+    name: "", invoice_code: "", phone: "", address: "",
+    requires_sequential_period_closing: true,
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -36,6 +46,7 @@ export default function OrganizationSettingsPage() {
         setForm({
           name: res.organization.name, invoice_code: res.organization.invoice_code,
           phone: res.organization.phone, address: res.organization.address,
+          requires_sequential_period_closing: res.organization.requires_sequential_period_closing,
         });
         setIsOwner(res.role === "owner");
       }
@@ -51,11 +62,13 @@ export default function OrganizationSettingsPage() {
         invoice_code: form.invoice_code,
         phone: form.phone,
         address: form.address,
+        requires_sequential_period_closing: form.requires_sequential_period_closing,
       });
       setOrg(updated);
       setForm({
         name: updated.name, invoice_code: updated.invoice_code,
         phone: updated.phone, address: updated.address,
+        requires_sequential_period_closing: updated.requires_sequential_period_closing,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -135,6 +148,27 @@ export default function OrganizationSettingsPage() {
           Muncul di setiap nomor invoice, mis. <span className="mono">INV/REG/{form.invoice_code || "XX"}/0001/2026</span>.
           {" "}Dibuat otomatis dari nama bengkel Anda saat pendaftaran — ubah kapan saja di sini.
         </p>
+
+        {/* 9 Sep 2026 — Phase 18, Task 18.6. Real, owner-configurable
+            business-rule toggle — default true, same "off by default
+            risk, on by default safety" posture as the backend field
+            itself. Unlike every text field above, this one has a
+            real, meaningful accounting consequence, so it gets its
+            own explanatory paragraph underneath, same pattern as
+            Kode Invoice's own. */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, opacity: isOwner ? 1 : 0.6 }}>
+            <input
+              type="checkbox" checked={form.requires_sequential_period_closing} disabled={!isOwner}
+              onChange={(e) => setForm({ ...form, requires_sequential_period_closing: e.target.checked })}
+            />
+            Wajib Tutup Buku Berurutan
+          </label>
+          <p style={{ fontSize: 12, color: "var(--steel)", marginTop: 6 }}>
+            Jika aktif (disarankan), periode akuntansi harus ditutup secara berurutan —
+            periode sebelumnya harus ditutup dulu sebelum periode berikutnya bisa ditutup.
+          </p>
+        </div>
 
         <button className="btn-rust" type="submit" disabled={saving || !isOwner} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : saved ? <Check size={15} /> : <Save size={15} />}
