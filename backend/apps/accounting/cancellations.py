@@ -68,6 +68,15 @@ def reverse_for_event(event) -> JournalEntry | None:
         of assumed.
       - This cancellation was already reversed before (idempotency
         guard, checked first, before any lookup work happens).
+
+    9 Sep 2026 — Phase 18, Task 18.3. Real, deliberate simplification:
+    this function's own job is now ONLY resolving which original
+    entry needs reversing — the actual flip-and-post logic lives
+    once, on JournalEntry.reverse() itself (models.py), not
+    duplicated here. organization is no longer looked up separately
+    either — original.reverse() already uses original.organization
+    directly, which is always the same real tenant this event
+    belongs to.
     """
     if JournalEntry.objects.filter(reference_event_id=event.event_id).exists():
         return None
@@ -79,38 +88,12 @@ def reverse_for_event(event) -> JournalEntry | None:
     if original is None:
         return None
 
-    organization = Organization.objects.get(id=event.organization_id)
-
-    # Flip every line of the original entry — same account, same
-    # amount, opposite side. Correct by construction: whatever was
-    # ACTUALLY posted is exactly what gets undone, for any number of
-    # lines or accounts — no need to hardcode 4001/4002 here and risk
-    # drifting from what InvoiceIssued really posted for this
-    # specific invoice.
-    lines = [
-        {
-            "account": line.account,
-            "debit":  line.credit_amount if line.credit_amount > 0 else None,
-            "credit": line.debit_amount if line.debit_amount > 0 else None,
-        }
-        for line in original.lines.all()
-    ]
-
-    return JournalEntry.post(
-        organization=organization,
+    return original.reverse(
         posting_date=safe_local_date(event.occurred_at),
-        source=JournalEntry.Source.DOMAIN_EVENT,
+        memo=f"Reversal of {original.entry_number} — invoice cancelled",
+        created_by=_resolve_actor(getattr(event, "cancelled_by", None)),
         event_type=event.event_type,
         reference_event_id=event.event_id,
-        memo=f"Reversal of {original.entry_number} — invoice cancelled",
-        # 6 Sep 2026 — real audit-trail fix. See module docstring —
-        # event.cancelled_by is None until invoicing/views.py's own
-        # InvoiceStatusUpdateView.patch() is updated to actually
-        # thread the acting user through when publishing
-        # InvoiceCancelled; this resolution is already correct and
-        # ready for that moment, not a no-op waiting on it.
-        created_by=_resolve_actor(getattr(event, "cancelled_by", None)),
-        lines=lines,
     )
 
 
