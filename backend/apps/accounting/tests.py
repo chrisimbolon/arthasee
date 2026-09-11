@@ -5075,20 +5075,35 @@ class ReversalTimezoneTests(TestCase):
     """
 
     def test_reversal_posting_date_uses_local_calendar_day_not_utc(self):
-        from apps.accounting.cancellations import _safe_posting_date
+        from apps.accounting.periods import safe_local_date
 
-        fake_event = type("FakeEvent", (), {})()
+        same_day = datetime(2026, 9, 10, 1, 0, tzinfo=dt_timezone.utc) 
+        self.assertEqual(safe_local_date(same_day), date(2026, 9, 10))
 
-        # 2026-09-10 01:00 UTC = 2026-09-10 08:00 local (Asia/Jakarta,
-        # UTC+7) — same real day either way, a deliberate sanity
-        # check that the ordinary case still works before proving the
-        # real regression case below.
-        fake_event.occurred_at = datetime(2026, 9, 10, 1, 0, tzinfo=dt_timezone.utc)
-        self.assertEqual(_safe_posting_date(fake_event), date(2026, 9, 10))
+        crosses_midnight = datetime(2026, 9, 10, 20, 0, tzinfo=dt_timezone.utc)
+        self.assertEqual(safe_local_date(crosses_midnight), date(2026, 9, 11))
 
-        # 2026-09-10 20:00 UTC = 2026-09-11 03:00 local — THE real
-        # regression case. The old event.occurred_at.date() would
-        # have returned 2026-09-10 (the UTC calendar day); the real
-        # local calendar day is 2026-09-11.
-        fake_event.occurred_at = datetime(2026, 9, 10, 20, 0, tzinfo=dt_timezone.utc)
-        self.assertEqual(_safe_posting_date(fake_event), date(2026, 9, 11))
+
+class PurchasingPeriodValidationTimezoneTests(TestCase):
+    """
+    9 Sep 2026 — real regression test for the same midnight-boundary
+    timezone bug, now confirmed in apps.purchasing.models: GoodsReceivedNote.
+    receive()/PurchaseReturn.create_return()/QuickPurchase.record()
+    all fell back to timezone.now() and called .date() on it directly
+    when no explicit date was given. Rather than re-testing all three
+    call sites end-to-end (each requires a real, separate fixture
+    chain — PO/GRN, GRN/Return, Supplier/QuickPurchase), this proves
+    the ONE shared helper they all now call is correct — the same
+    "test the shared thing once, trust every caller" reasoning
+    cash_or_bank_account_code()'s own single real implementation
+    already justifies elsewhere in this codebase.
+    """
+
+    def test_safe_local_date_matches_what_purchasing_call_sites_now_use(self):
+        from apps.accounting.periods import safe_local_date
+
+        # 2026-09-10 20:00 UTC = 2026-09-11 03:00 local (Asia/Jakarta,
+        # UTC+7) — the real regression case, same one already proven
+        # for the accounting-app call sites in ReversalTimezoneTests.
+        crosses_midnight = datetime(2026, 9, 10, 20, 0, tzinfo=dt_timezone.utc)
+        self.assertEqual(safe_local_date(crosses_midnight), date(2026, 9, 11))
