@@ -566,15 +566,30 @@ class AccountingPeriod(TenantScopedModel):
                 "untuk koreksi lebih lanjut."
             )
 
-        earlier_open_period = AccountingPeriod.objects.filter(
-            organization=self.organization, start_date__lt=self.start_date, is_closed=False,
-        ).order_by("start_date").first()
-        if earlier_open_period is not None:
-            raise ValueError(
-                f"Periode {earlier_open_period.start_date}–{earlier_open_period.end_date} "
-                f"masih belum ditutup — tutup periode-periode sebelumnya secara "
-                f"berurutan terlebih dahulu."
-            )
+        # 9 Sep 2026 — Phase 18, Task 18.6. Real, deliberate LOOSENING
+        # of this exact guard (added 4 Sep 2026) — now conditional on
+        # the organization's own requires_sequential_period_closing
+        # flag (Organization model, apps.organizations). default=True
+        # means every existing organization gets byte-identical
+        # behavior to before this shipped; only an organization that
+        # explicitly opts out via Pengaturan Bengkel can close periods
+        # out of order. See that field's own docstring for the full
+        # reasoning — sequential closing is a real, deliberate ERP-
+        # level policy choice, not an accounting law, per Chris's own
+        # confirmed call. Every OTHER guard in this method (the
+        # closed_at check above, the permanent closed_at marker set
+        # below) is completely unaffected by this flag — it only ever
+        # relaxes the sequential-order check specifically.
+        if self.organization.requires_sequential_period_closing:
+            earlier_open_period = AccountingPeriod.objects.filter(
+                organization=self.organization, start_date__lt=self.start_date, is_closed=False,
+            ).order_by("start_date").first()
+            if earlier_open_period is not None:
+                raise ValueError(
+                    f"Periode {earlier_open_period.start_date}–{earlier_open_period.end_date} "
+                    f"masih belum ditutup — tutup periode-periode sebelumnya secara "
+                    f"berurutan terlebih dahulu."
+                )
 
         with transaction.atomic():
             DepreciationRun.execute(organization=self.organization, accounting_period=self, run_by=closed_by)
