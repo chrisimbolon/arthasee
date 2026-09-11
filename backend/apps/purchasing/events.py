@@ -24,11 +24,26 @@ class GoodsReceived(DomainEvent):
     Inventory - Unbilled AP (2010), both for `amount` — the real
     GR/IR clearing pattern this whole procurement flow was built
     around.
+
+    9 Sep 2026 — transaction_date added. Real bug found via Phase 18
+    design review, same class as QuickPurchaseRecorded's own 29 Aug
+    2026 fix: GoodsReceivedNote.receive() accepts a caller-settable
+    received_at (goods can genuinely arrive one day and be entered
+    into the system a later one — real procurement lag, not a
+    hypothetical), but without this field journal_generator.
+    post_for_event() fell back to occurred_at (when the event was
+    PUBLISHED, effectively "now"), silently posting to the wrong
+    AccountingPeriod whenever received_at genuinely differed. Frozen
+    here from GoodsReceivedNote.receive()'s own already-resolved
+    grn.received_at — same "capture once, don't recompute from a
+    shifting database" discipline this whole event already follows
+    for `amount`.
     """
     goods_received_note_id: uuid.UUID
     supplier_id: uuid.UUID
     amount: Decimal
     line_item_count: int
+    transaction_date: date
     event_type: str = field(init=False, default="GoodsReceived", kw_only=True)
 
 
