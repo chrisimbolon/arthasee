@@ -682,6 +682,14 @@ class JournalEntry(TenantScopedModel):
         ASSET_ACQUISITION = "ASSET_ACQUISITION", "Perolehan Aset"
         DEPRECIATION = "DEPRECIATION", "Penyusutan Aset"
         OPENING_BALANCE = "OPENING_BALANCE", "Saldo Awal"
+        # 9 Sep 2026 — Phase 18, Task 18.7. A manual closed-period
+        # correction's reversal AND its new, corrected entry are both
+        # tagged CORRECTION from creation — never inheriting the
+        # original entry's own source (e.g. DOMAIN_EVENT), so a real
+        # audit trail can tell "this was a normal automatic posting"
+        # from "this was a deliberate, human-authored correction" at
+        # a glance, without cross-referencing reverses/reversed_by.
+        CORRECTION = "CORRECTION", "Koreksi Periode Tertutup"        
 
     class Status(models.TextChoices):
         PENDING   = "PENDING", "Menunggu"
@@ -699,6 +707,22 @@ class JournalEntry(TenantScopedModel):
     source     = models.CharField(max_length=20, choices=Source.choices, verbose_name="Sumber")
     event_type = models.CharField(max_length=100, blank=True, default="", verbose_name="Tipe Event")
     reference_event_id = models.UUIDField(null=True, blank=True, verbose_name="ID Event Rujukan")
+    # 9 Sep 2026 — Phase 18, Task 18.3. Real, direct self-referential
+    # link — same PROTECT-self-FK shape Account.parent already
+    # established. Makes "show me the reversal for this entry" (and
+    # the inverse, reversed_by) a trivial, direct query instead of
+    # something that used to only be inferable by cross-referencing
+    # reference_event_id against a cancelling event's own
+    # issued_event_id (cancellations.py's own old approach) — which
+    # never generalized to a manual correction with no backing event
+    # at all. PROTECT: an entry that has already been reversed must
+    # never be deleted out from under that real link.
+    reverses = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="reversed_by", verbose_name="Membalik Entri",
+        help_text="Jika entri ini adalah pembalikan (reversal) dari entri lain, "
+                  "merujuk ke entri asli tersebut.",
+    )    
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.POSTED, verbose_name="Status",
     )
@@ -729,7 +753,7 @@ class JournalEntry(TenantScopedModel):
     def post(
         cls, *, organization, posting_date, source, lines,
         memo="", event_type="", reference_event_id=None,
-        created_by=None, accounting_period=None,
+        created_by=None, accounting_period=None, reverses=None,
     ):
         """
         The one real entry point for creating a balanced journal
@@ -759,6 +783,12 @@ class JournalEntry(TenantScopedModel):
         single day — this guard must never block any of them. Checked
         here, in the one real write path every source goes through,
         not duplicated in each individual view.
+        9 Sep 2026 — Phase 18, Task 18.3. `reverses`, if given, is
+        set on the newly-created entry at TRUE creation time, through
+        this same one real entry point — never a second write
+        correcting it after the entry already exists. See
+        JournalEntry.reverse() below for the real, one real method
+        that actually uses this.        
         """
         if len(lines) < 2:
             raise ValueError(
@@ -838,6 +868,7 @@ class JournalEntry(TenantScopedModel):
                 event_type=event_type,
                 reference_event_id=reference_event_id,
                 memo=memo,
+                reverses=reverses,
                 created_by=created_by,
                 status=cls.Status.POSTED,
             )
@@ -854,6 +885,50 @@ class JournalEntry(TenantScopedModel):
             ])
         return entry
 
+    def reverse(
+        self, *, posting_date, memo, created_by=None, source=None,
+        event_type="", reference_event_id=None,
+    ):
+        """
+        9 Sep 2026 — Phase 18, Task 18.3. The one real entry point for
+        reversing an already-posted entry — generalized out of what
+        used to be cancellations.py's own bespoke, invoice-specific
+        flip logic (reverse_for_event(), Half A). Flips every real
+        line THIS entry actually has — correct by construction, for
+        any number of lines or accounts, never hardcoding which
+        accounts are involved.
+
+        `source`, if given, overrides the reversing entry's own
+        source instead of inheriting self.source — used by
+        JournalEntry.correct() (Task 18.7) to create the reversal
+        directly as Source.CORRECTION from the start, never a
+        create-then-mutate two-step.
+
+        `event_type`/`reference_event_id`, if given, are threaded
+        straight through to the real JournalEntry.post() call below
+        — needed by cancellations.reverse_for_event(), which relies
+        on reference_event_id for its own idempotency check (has this
+        exact cancellation already been reversed?) and for
+        trace_forward's own audit-trail resolution. A manual
+        correction (Task 18.7) has no real backing event and leaves
+        both at their real, honest defaults.
+
+        `reverses` is always self — set at TRUE creation time via
+        JournalEntry.post()'s own new parameter, never a second write
+        after the fact.
+        """
+        lines = [
+            {"account": line.account,
+             "debit": line.credit_amount if line.credit_amount > 0 else None,
+             "credit": line.debit_amount if line.debit_amount > 0 else None}
+            for line in self.lines.all()
+        ]
+        return JournalEntry.post(
+            organization=self.organization, posting_date=posting_date,
+            source=source or self.source, memo=memo, created_by=created_by,
+            event_type=event_type, reference_event_id=reference_event_id,
+            lines=lines, reverses=self,
+        )
 
 class JournalLine(TenantScopedModel):
     """
