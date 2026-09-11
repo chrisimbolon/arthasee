@@ -73,6 +73,7 @@ from .serializers import (AccountEditSerializer, AccountingPeriodSerializer,
                           BankStatementLineRecordSerializer,
                           BankStatementLineSerializer,
                           DepreciationRunSerializer, FailedPostingSerializer,
+                          JournalEntryCorrectRecordSerializer,
                           JournalEntrySerializer,
                           ManualJournalRecordSerializer,
                           OpeningBalanceAssetLineRecordSerializer,
@@ -883,6 +884,70 @@ class JournalEntryDetailView(TenantScopedAPIView):
             )
         return Response({"success": True, "journal_entry": JournalEntrySerializer(entry).data})
 
+class JournalEntryCorrectView(TenantScopedAPIView):
+    """
+    POST /api/accounting/journal-entries/<uuid:pk>/correct/
+
+    9 Sep 2026 — Phase 18, Task 18.7. The real, owner-only endpoint
+    for a closed-period correction. All real logic — every one of the
+    seven mechanically-enforced guardrails — lives in JournalEntry.
+    correct() itself (models.py); this view is thin, same discipline
+    as every other real write path in this codebase. Owner-only, same
+    stakes class as ManualJournalListCreateView.post() and
+    AccountingPeriodCloseView — a closed-period correction is a real,
+    consequential accounting action, not routine data entry.
+    """
+    model = JournalEntry
+
+    def post(self, request, pk):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa membuat koreksi periode tertutup."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        original = JournalEntry.objects.filter(organization=organization, pk=pk).first()
+        if original is None:
+            return Response(
+                {"success": False, "message": "Entri jurnal tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = JournalEntryCorrectRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        lines = []
+        for line in data["lines"]:
+            try:
+                account = Account.resolve(organization, line["account_code"])
+            except ValueError as e:
+                return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            lines.append({"account": account, "debit": line.get("debit"), "credit": line.get("credit")})
+
+        try:
+            reversal, correction = JournalEntry.correct(
+                original=original, corrected_lines=lines,
+                posting_date=data["posting_date"], reason=data["reason"],
+                created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "success": True,
+                "reversal": JournalEntrySerializer(reversal).data,
+                "correction": JournalEntrySerializer(correction).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 class FailedPostingsView(TenantScopedAPIView):
     """
