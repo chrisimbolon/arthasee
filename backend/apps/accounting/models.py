@@ -930,6 +930,71 @@ class JournalEntry(TenantScopedModel):
             lines=lines, reverses=self,
         )
 
+    @classmethod
+    def correct(cls, *, original, corrected_lines, posting_date, reason, created_by):
+        """
+        9 Sep 2026 — Phase 18, Task 18.7. The one real entry point for
+        a closed-period correction — Chris's own confirmed call: no
+        approval-workflow layer in this phase, mechanical enforcement
+        of every real guardrail via one real method, not caller
+        discipline. Real flow: original posted entry (untouched,
+        immutable) -> reversal entry (Source.CORRECTION, linked via
+        reverses) -> corrected entry (Source.CORRECTION). Both new
+        entries post atomically — a correction that only half-
+        completes must never exist.
+
+        Mechanically enforces:
+          1. original stays immutable -- never written to, only read
+          2. no edit/delete of posted entries -- both new entries are
+             real, fresh JournalEntry.post() calls
+          3. reversal is linked via `reverses`, set at TRUE creation
+             time (JournalEntry.reverse(), Task 18.3) -- never a
+             second write correcting it after the fact
+          4. posting_date resolves through JournalEntry.post()'s own
+             existing period lookup -- can never land back in the
+             closed period the original belongs to
+          5. both new entries are tagged Source.CORRECTION from
+             creation, never inheriting the original's own source
+          6. `reason` is required, non-blank
+          7. `created_by` is a required parameter -- no default, and
+             explicitly checked below rather than left to a bare
+             TypeError if a caller ever passes None
+        The calling endpoint stays owner-only, same gate as
+        ManualJournalListCreateView -- guardrail #8, enforced at the
+        view layer, not duplicated here.
+
+        9 Sep 2026 — real, additional guard found while implementing
+        this against the real `reverses`/`reversed_by` link (Task
+        18.3): nothing else in this codebase stops reversing an entry
+        that has ALREADY been reversed once. A second reversal of the
+        same lines would double-reverse the original — the ledger
+        would end up NET WRONG, not neutral, for every account those
+        lines touch. Blocked outright here, not left as an
+        unenforced assumption.
+        """
+        if not reason or not reason.strip():
+            raise ValueError("Alasan koreksi wajib diisi.")
+        if created_by is None:
+            raise ValueError("Koreksi periode tertutup harus memiliki pencatat (created_by) yang jelas.")
+        if original.reversed_by.exists():
+            raise ValueError(
+                f"Entri {original.entry_number} sudah pernah dibalik sebelumnya — "
+                f"tidak bisa dibalik dua kali."
+            )
+
+        with transaction.atomic():
+            reversal = original.reverse(
+                posting_date=posting_date,
+                memo=f"Koreksi — pembalikan {original.entry_number}: {reason}",
+                created_by=created_by, source=cls.Source.CORRECTION,
+            )
+            correction = cls.post(
+                organization=original.organization, posting_date=posting_date,
+                source=cls.Source.CORRECTION, memo=f"Koreksi — {reason}",
+                created_by=created_by, lines=corrected_lines,
+            )
+        return reversal, correction    
+
 class JournalLine(TenantScopedModel):
     """
     One debit or credit line within a JournalEntry. account is
