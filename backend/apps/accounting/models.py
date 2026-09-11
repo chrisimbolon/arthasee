@@ -212,6 +212,21 @@ class Account(TenantScopedModel):
         AccountSubtype.BEBAN_LAIN_LAIN:            (AccountType.EXPENSE, NormalBalance.DEBIT),
     }
 
+    # 9 Sep 2026 — Phase 18, Task 18.1. Derived, never a free
+    # checkbox — same real reference-implementation precedent
+    # (Aris's own system: "Sistem mengatur status ini otomatis").
+    # Deliberately identical to the three codes already protected
+    # since Phase 16 (JournalEntry.post()'s own hard control-account
+    # block) — this removes the ability to set the flag independently
+    # of a classification that already implies it, not a policy
+    # change. PIUTANG_LAINNYA/UTANG_LAINNYA deliberately excluded —
+    # no real subledger relationship exists for them yet.
+    IS_CONTROL_SUBTYPES = frozenset({
+        AccountSubtype.PIUTANG_USAHA,
+        AccountSubtype.PERSEDIAAN,
+        AccountSubtype.UTANG_USAHA,
+    })
+
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     code = models.CharField(max_length=10, verbose_name="Kode Akun")
     name = models.CharField(max_length=200, verbose_name="Nama Akun")
@@ -286,6 +301,14 @@ class Account(TenantScopedModel):
                 )
             else:
                 self.normal_balance = base_normal
+            # 9 Sep 2026 — Phase 18, Task 18.1. ALWAYS overwritten
+            # whenever a subtype is set — never independently trusted
+            # from whatever was passed in, same discipline as
+            # account_type/normal_balance two lines above. An account
+            # with no subtype (every pre-existing row with no subtype
+            # at all) passes through completely unchanged, same as
+            # today.
+            self.is_control_account = self.account_subtype in self.IS_CONTROL_SUBTYPES
         super().save(*args, **kwargs)
 
     def balance(self, *, since=None, as_of=None, exclude_closing_entries=False) -> Decimal:
@@ -317,7 +340,7 @@ class Account(TenantScopedModel):
     @classmethod
     def record(
         cls, *, organization, code, name, account_subtype,
-        is_contra=False, is_control_account=False, description="", parent=None,
+        is_contra=False, description="", parent=None,
     ):
         """
         9 Sep 2026 — Phase 17, Task 17.1 (create), extended in Task
@@ -328,11 +351,13 @@ class Account(TenantScopedModel):
         the standard COA at signup/backfill time — unchanged by this.
 
         `account_subtype` is REQUIRED here — `account_type`/
-        `normal_balance` are never accepted as direct input at all,
-        always derived server-side by `save()` (see Phase 16's own
-        precedent). `parent`, if given, is resolved against a real
-        Account belonging to the SAME organization — never trusted as
-        a bare cross-tenant UUID (same tenant-isolation discipline as
+        `normal_balance`/`is_control_account` are never accepted as
+        direct input at all, always derived server-side by `save()`
+        (see Phase 16's own precedent, extended in Phase 18, Task
+        18.1 to cover is_control_account too). `parent`, if given, is
+        resolved against a real Account belonging to the SAME organization
+         — never trusted as a bare cross-tenant UUID 
+        (same tenant-isolation discipline as
         every other real FK resolution in this codebase, e.g.
         OpeningBalanceReceivableListCreateView's own Customer lookup).
         No cycle check is needed here — a brand-new account cannot
@@ -366,7 +391,6 @@ class Account(TenantScopedModel):
                     name=name,
                     account_subtype=account_subtype,
                     is_contra=is_contra,
-                    is_control_account=is_control_account,
                     description=description,
                     parent=parent_account,
                 )
@@ -415,7 +439,7 @@ class Account(TenantScopedModel):
 
     def apply_edit(
         self, *, name=None, description=None, is_active=None,
-        account_subtype=None, is_contra=None, is_control_account=None,
+        account_subtype=None, is_contra=None,
         parent=_UNSET,
     ):
         """
@@ -473,8 +497,6 @@ class Account(TenantScopedModel):
             self.account_subtype = account_subtype
         if is_contra is not None:
             self.is_contra = is_contra
-        if is_control_account is not None:
-            self.is_control_account = is_control_account
 
         if parent is not _UNSET:
             if parent is None:
