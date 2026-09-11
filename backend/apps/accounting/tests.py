@@ -5107,3 +5107,70 @@ class PurchasingPeriodValidationTimezoneTests(TestCase):
         # for the accounting-app call sites in ReversalTimezoneTests.
         crosses_midnight = datetime(2026, 9, 10, 20, 0, tzinfo=dt_timezone.utc)
         self.assertEqual(safe_local_date(crosses_midnight), date(2026, 9, 11))
+
+class PeriodClosingPolicyTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.6. Real coverage for the new
+    requires_sequential_period_closing flag — a deliberate LOOSENING
+    of AccountingPeriod.close()'s own strict sequential guard (4 Sep
+    2026), not a toggle on something previously unconstrained. The
+    real, existing regression coverage for the strict-by-default case
+    already lives in AccountingPeriodCloseTests
+    (test_cannot_close_out_of_order, etc.) elsewhere in this file —
+    this class adds the real, NEW guarantee: the flag itself actually
+    works, in both directions, without weakening any other guard.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        _seed_all_months(self.org, 2026)
+
+    def _period(self, month):
+        return AccountingPeriod.objects.get(organization=self.org, year=2026, month=month)
+
+    def test_default_policy_still_blocks_out_of_order_closing(self):
+        """Real proof the default (True) preserves today's exact
+        behavior — a fresh org, no explicit opt-out, still can't
+        close February before January."""
+        self.assertTrue(self.org.requires_sequential_period_closing)
+        with self.assertRaises(ValueError):
+            self._period(2).close(closed_by=None)
+
+    def test_disabling_policy_allows_out_of_order_closing(self):
+        self.org.requires_sequential_period_closing = False
+        self.org.save(update_fields=["requires_sequential_period_closing"])
+
+        period_2 = self._period(2)
+        period_2.close(closed_by=None)  # must NOT raise
+        period_2.refresh_from_db()
+        self.assertTrue(period_2.is_closed)
+        self.assertFalse(self._period(1).is_closed)  # January genuinely untouched — not silently auto-closed
+
+    def test_disabled_policy_still_blocks_reclosing_the_same_period(self):
+        """
+        Real proof this flag only relaxes the SEQUENTIAL-ORDER check
+        specifically — every other real guard in close() (the
+        closed_at permanent marker) stays fully intact regardless of
+        this setting.
+        """
+        self.org.requires_sequential_period_closing = False
+        self.org.save(update_fields=["requires_sequential_period_closing"])
+
+        period_2 = self._period(2)
+        period_2.close(closed_by=None)
+        with self.assertRaises(ValueError):
+            period_2.close(closed_by=None)
+
+    def test_policy_scoped_to_organization(self):
+        """A different org's own policy setting must never affect
+        this org's real close() behavior — same tenant-isolation
+        discipline as every other real guard in this codebase."""
+        other_org = Organization.objects.create(name="Bengkel Lain Period Policy")
+        other_org.requires_sequential_period_closing = False
+        other_org.save(update_fields=["requires_sequential_period_closing"])
+
+        # self.org's own default (True) is untouched by other_org's setting.
+        self.assertTrue(self.org.requires_sequential_period_closing)
+        with self.assertRaises(ValueError):
+            self._period(2).close(closed_by=None)
