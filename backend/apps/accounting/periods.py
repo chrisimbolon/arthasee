@@ -53,7 +53,40 @@ import calendar
 from datetime import date
 
 from apps.accounting.models import AccountingPeriod
+from django.utils import timezone
 
+def safe_local_date(dt):
+    """
+    9 Sep 2026 — the one real, shared implementation of a fix applied
+    independently three times this session: journal_generator.
+    post_for_event() (5 Sep 2026), cancellations.py's two reversal
+    functions, and now three separate call sites in
+    apps.purchasing.models (GoodsReceivedNote.receive(),
+    PurchaseReturn.create_return(), QuickPurchase.record()) — all of
+    them calling .date() directly on a UTC-aware datetime (typically
+    a timezone.now() fallback when no explicit date was given).
+
+    Under this project's real USE_TZ=True / TIME_ZONE="Asia/Jakarta"
+    (UTC+7) settings, .date() on a UTC-aware datetime extracts the
+    UTC calendar day, not the shop's real local one — silently
+    misdating anything falling between local midnight and 7am. This
+    function is now the one real place that conversion happens
+    correctly — every caller that used to inline this logic should
+    import and call this instead of re-deriving it.
+
+    Lives in apps.accounting.periods, not apps.core, because every
+    current caller is already period-validation-adjacent
+    (AccountingPeriod.assert_open_for_posting()'s own date argument,
+    or a JournalEntry's own posting_date) — genuinely an accounting-
+    period concern, not a generic date utility with no real home.
+    apps.purchasing already imports directly from apps.accounting
+    for this exact validation call (AccountingPeriod itself) — one
+    more shared import from the same app is a natural extension, not
+    a new cross-app coupling.
+    """
+    if timezone.is_aware(dt):
+        return timezone.localtime(dt).date()
+    return dt.date()
 
 def ensure_period_for_org(organization, year: int, month: int) -> AccountingPeriod:
     """
