@@ -641,6 +641,32 @@ class AgingAPView(TenantScopedAPIView):
         data = reports.aging_ap(organization, as_of=as_of)
         return Response({"success": True, **data})
 
+class ControlAccountReconciliationView(TenantScopedAPIView):
+    """
+    GET /api/accounting/control-account-reconciliation/<str:account_code>/?as_of=YYYY-MM-DD
+
+    9 Sep 2026 -- Phase 18, Task 18.2. Real, on-demand diagnostic --
+    same "owner clicks, gets a real answer" pattern as
+    FailedPostingsView; never runs automatically, never blocks any
+    real workflow. All real logic lives in reports.
+    reconcile_control_account() -- this view is thin, same discipline
+    as every other real report endpoint in this file.
+    """
+
+    def get(self, request, account_code):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        as_of = _parse_date(request.query_params.get("as_of"))
+        try:
+            data = reports.reconcile_control_account(organization, account_code, as_of=as_of)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"success": True, **data})
+
 class DashboardFinancialSummaryView(TenantScopedAPIView):
     """
     GET /api/accounting/dashboard-financial-summary/?as_of=YYYY-MM-DD
