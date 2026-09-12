@@ -68,6 +68,7 @@ import {
   TrialBalanceAccount,
 } from "@/lib/api/accounting";
 import { ChevronDown, ChevronRight, Loader2, Plus } from "lucide-react";
+import Link from "next/link";
 import { ChangeEvent, ReactNode, useEffect, useState } from "react";
 
 // Same helper as the Reports page — see accounting.ts's own note on
@@ -225,6 +226,13 @@ export default function ChartOfAccountsPage() {
               onChange={(e: ChangeEvent<HTMLInputElement>) => setAsOf(e.target.value)}
             />
           </div>
+          <Link
+            href="/dashboard/accounting/accounts/import"
+            className="btn-ghost"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+          >
+            Impor Akun
+          </Link>
           <button
             onClick={() => { setCreating(!creating); setEditingId(null); }}
             className={creating ? "btn-ghost" : "btn-rust"}
