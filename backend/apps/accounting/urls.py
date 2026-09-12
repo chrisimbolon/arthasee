@@ -3,7 +3,8 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (AccountDetailView, AccountingPeriodCloseView,
+from .views import (AccountDetailView, AccountImportCommitView,
+                    AccountImportPreviewView, AccountingPeriodCloseView,
                     AccountingPeriodListView, AccountingPeriodReopenView,
                     AccountListCreateView, AgingAPView, AgingARView,
                     AssetListCreateView, BalanceSheetView,
@@ -54,6 +55,8 @@ urlpatterns = [
     # Phase 17 design review. A hard precondition for Task 17.2
     # (Sub-Accounts) to be usable at all.
     path("accounts/", AccountListCreateView.as_view(), name="account-list-create"),
+    path("accounts/import/preview/", AccountImportPreviewView.as_view(), name="account-import-preview"),
+    path("accounts/import/commit/", AccountImportCommitView.as_view(), name="account-import-commit"),
     path("accounts/<uuid:pk>/", AccountDetailView.as_view(), name="account-detail"),
     # 9 Sep 2026 — Phase 17, Task 17.3. Bank Reconciliation — manual
     # statement entry v1 (Open Decision #20 defers a real live bank-
