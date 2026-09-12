@@ -5823,3 +5823,293 @@ class ControlAccountReconciliationAPITests(APITestCase):
         resp = self.client.get("/api/accounting/control-account-reconciliation/1301/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["subledger_total"], Decimal("0"))
+
+class AccountImportValidationTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.8. Model-layer coverage for
+    account_import._validate_import_rows() (via preview_import(),
+    which is a thin wrapper around it) — every real validation rule
+    the design spec called for gets its own dedicated proof.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def _row(self, **overrides):
+        row = {
+            "code": "9-10001", "name": "Kas Kecil Impor",
+            "account_subtype": "KAS_SETARA_KAS", "is_contra": False,
+        }
+        row.update(overrides)
+        return row
+
+    def test_valid_row_produces_no_errors(self):
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [self._row()])
+        self.assertEqual(data["valid_count"], 1)
+        self.assertEqual(data["error_count"], 0)
+        self.assertTrue(data["can_commit"])
+
+    def test_missing_code_rejected(self):
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [self._row(code="")])
+        self.assertEqual(data["error_count"], 1)
+        self.assertFalse(data["can_commit"])
+
+    def test_missing_name_rejected(self):
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [self._row(name="")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_invalid_subtype_rejected(self):
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [self._row(account_subtype="NOT_REAL")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_non_boolean_is_contra_rejected(self):
+        """Real proof the backend never silently coerces a string
+        like "TRUE" — the frontend owns normalizing that BEFORE this
+        endpoint ever sees it."""
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [self._row(is_contra="TRUE")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_is_contra_defaults_false_when_omitted(self):
+        from apps.accounting import account_import
+        row = self._row()
+        del row["is_contra"]
+        data = account_import.preview_import(self.org, [row])
+        self.assertEqual(data["valid_count"], 1)
+        self.assertFalse(data["valid_rows"][0]["is_contra"])
+
+    def test_code_already_existing_in_db_rejected(self):
+        data_row = self._row(code="1001")  # already seeded
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [data_row])
+        self.assertEqual(data["error_count"], 1)
+        self.assertIn("sudah ada", data["errors"][0]["message"])
+
+    def test_duplicate_code_within_the_same_file_rejected(self):
+        """THE real proof of the in-file duplicate check — a bulk
+        file can contain two rows sharing a code, a case
+        Account.record() itself never needs to worry about (one row
+        at a time)."""
+        from apps.accounting import account_import
+        rows = [self._row(code="9-10001"), self._row(code="9-10001", name="Duplikat")]
+        data = account_import.preview_import(self.org, rows)
+        # First occurrence is fine; the second is the real duplicate.
+        self.assertEqual(data["error_count"], 1)
+        self.assertEqual(data["errors"][0]["row"], 2)
+
+    def test_parent_code_must_already_exist_in_db(self):
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [self._row(parent_code="9-99999")])
+        self.assertEqual(data["error_count"], 1)
+        self.assertIn("tidak ditemukan", data["errors"][0]["message"])
+
+    def test_parent_code_referencing_another_row_in_same_file_rejected(self):
+        """
+        THE real proof of the deliberate "no in-file hierarchy
+        resolution" rule — row 2 tries to reference row 1's own code
+        as its parent, but row 1 doesn't exist in the DB yet at
+        validation time (only after a real commit would it). This is
+        also what makes an in-file parent CYCLE structurally
+        impossible, for free — no separate cycle-detection code
+        needed here at all.
+        """
+        from apps.accounting import account_import
+        rows = [
+            self._row(code="9-10000", name="Induk Baru"),
+            self._row(code="9-10001", parent_code="9-10000"),
+        ]
+        data = account_import.preview_import(self.org, rows)
+        self.assertEqual(data["error_count"], 1)
+        self.assertEqual(data["errors"][0]["row"], 2)
+
+    def test_parent_code_already_in_db_resolves_correctly(self):
+        existing_parent = Account.record(
+            organization=self.org, code="9-20000", name="Kas & Bank Impor",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        from apps.accounting import account_import
+        data = account_import.preview_import(
+            self.org, [self._row(code="9-20001", parent_code="9-20000")],
+        )
+        self.assertEqual(data["valid_count"], 1)
+        self.assertEqual(data["valid_rows"][0]["parent_id"], str(existing_parent.id))
+
+    def test_multiple_rows_report_every_error_not_just_the_first(self):
+        """Real proof this is a genuine batch preview — every real
+        problem across the whole file surfaces at once, not stopping
+        at row 1."""
+        from apps.accounting import account_import
+        rows = [self._row(code=""), self._row(name=""), self._row(account_subtype="BAD")]
+        data = account_import.preview_import(self.org, rows)
+        self.assertEqual(data["error_count"], 3)
+
+    def test_cannot_commit_when_any_row_has_errors(self):
+        from apps.accounting import account_import
+        data = account_import.preview_import(self.org, [self._row(), self._row(code="1001")])
+        self.assertFalse(data["can_commit"])
+
+
+class AccountImportCommitTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.8. Model-layer coverage for
+    account_import.commit_import() — the real, all-or-nothing write
+    path.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_commit_creates_every_valid_row(self):
+        from apps.accounting import account_import
+        rows = [
+            {"code": "9-30001", "name": "Kas Kecil A", "account_subtype": "KAS_SETARA_KAS"},
+            {"code": "9-30002", "name": "Kas Kecil B", "account_subtype": "KAS_SETARA_KAS"},
+        ]
+        created = account_import.commit_import(self.org, rows)
+        self.assertEqual(len(created), 2)
+        self.assertTrue(Account.objects.filter(organization=self.org, code="9-30001").exists())
+        self.assertTrue(Account.objects.filter(organization=self.org, code="9-30002").exists())
+
+    def test_commit_creates_child_with_real_resolved_parent(self):
+        from apps.accounting import account_import
+        rows = [
+            {"code": "9-40000", "name": "Induk", "account_subtype": "KAS_SETARA_KAS"},
+        ]
+        account_import.commit_import(self.org, rows)  # parent exists in DB now
+
+        child_rows = [
+            {"code": "9-40001", "name": "Anak", "account_subtype": "KAS_SETARA_KAS", "parent_code": "9-40000"},
+        ]
+        created = account_import.commit_import(self.org, child_rows)
+        child = created[0]
+        parent = Account.objects.get(organization=self.org, code="9-40000")
+        self.assertEqual(child.parent_id, parent.id)
+
+    def test_commit_rejects_and_writes_nothing_when_any_row_invalid(self):
+        """THE real all-or-nothing proof — one bad row among several
+        good ones means NOTHING gets created."""
+        from apps.accounting import account_import
+        rows = [
+            {"code": "9-50001", "name": "Baik", "account_subtype": "KAS_SETARA_KAS"},
+            {"code": "9-50002", "name": "Buruk", "account_subtype": "TIDAK_VALID"},
+        ]
+        with self.assertRaises(ValueError):
+            account_import.commit_import(self.org, rows)
+        self.assertFalse(Account.objects.filter(organization=self.org, code="9-50001").exists())
+        self.assertFalse(Account.objects.filter(organization=self.org, code="9-50002").exists())
+
+    def test_commit_rejects_empty_row_list(self):
+        from apps.accounting import account_import
+        with self.assertRaises(ValueError):
+            account_import.commit_import(self.org, [])
+
+    def test_commit_re_validates_against_current_db_not_a_stale_preview(self):
+        """
+        Real proof commit() never trusts a caller's own "I already
+        previewed this" claim — a code that was free at preview time
+        but has since been taken (by a real, separate account created
+        in between) must still be rejected at commit time.
+        """
+        from apps.accounting import account_import
+        rows = [{"code": "9-60001", "name": "Race Condition", "account_subtype": "KAS_SETARA_KAS"}]
+        preview = account_import.preview_import(self.org, rows)
+        self.assertTrue(preview["can_commit"])
+
+        # A real, separate account claims the same code in between.
+        Account.record(
+            organization=self.org, code="9-60001", name="Sudah Diambil Duluan",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+
+        with self.assertRaises(ValueError):
+            account_import.commit_import(self.org, rows)
+
+
+class AccountImportAPITests(APITestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.8. HTTP-level coverage for POST
+    /api/accounting/accounts/import/preview/ and .../commit/. Real
+    logic already proven by AccountImportValidationTests/
+    AccountImportCommitTests above; this layer proves the thin views
+    + owner-only gate are wired correctly.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.accountimport@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.staff = CustomUser.objects.create_user(
+            email="staff.accountimport@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.staff, role="member", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def _rows(self, **overrides):
+        row = {"code": "9-70001", "name": "Kas Kecil API", "account_subtype": "KAS_SETARA_KAS"}
+        row.update(overrides)
+        return [row]
+
+    def test_owner_can_preview(self):
+        resp = self.client.post("/api/accounting/accounts/import/preview/", {"rows": self._rows()}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["can_commit"])
+
+    def test_preview_writes_nothing(self):
+        self.client.post("/api/accounting/accounts/import/preview/", {"rows": self._rows()}, format="json")
+        self.assertFalse(Account.objects.filter(organization=self.org, code="9-70001").exists())
+
+    def test_non_owner_cannot_preview(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post("/api/accounting/accounts/import/preview/", {"rows": self._rows()}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_can_commit(self):
+        resp = self.client.post("/api/accounting/accounts/import/commit/", {"rows": self._rows()}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["created_count"], 1)
+        self.assertTrue(Account.objects.filter(organization=self.org, code="9-70001").exists())
+
+    def test_non_owner_cannot_commit(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post("/api/accounting/accounts/import/commit/", {"rows": self._rows()}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_commit_with_invalid_row_returns_400_and_writes_nothing(self):
+        resp = self.client.post(
+            "/api/accounting/accounts/import/commit/",
+            {"rows": self._rows(account_subtype="TIDAK_VALID")}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Account.objects.filter(organization=self.org, code="9-70001").exists())
+
+    def test_empty_rows_rejected_at_the_serializer_level(self):
+        resp = self.client.post("/api/accounting/accounts/import/commit/", {"rows": []}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scoped_to_organization(self):
+        """A code taken in one org must not block the same code being
+        imported for a different org — same tenant-isolation
+        discipline as every other real write path in this app."""
+        other_org = Organization.objects.create(name="Bengkel Lain Import")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.import@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+
+        self.client.post("/api/accounting/accounts/import/commit/", {"rows": self._rows()}, format="json")
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.post("/api/accounting/accounts/import/commit/", {"rows": self._rows()}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
