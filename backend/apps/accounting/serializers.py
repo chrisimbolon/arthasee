@@ -342,6 +342,25 @@ class AccountEditSerializer(serializers.Serializer):
             raise serializers.ValidationError("Nama akun tidak boleh kosong.")
         return value
 
+class AccountImportRequestSerializer(serializers.Serializer):
+    """
+    Shared input shape for BOTH POST /accounts/import/preview/ and
+    POST /accounts/import/commit/ -- identical request body either
+    way, the only real difference between the two endpoints is what
+    happens server-side once the rows are in hand (nothing written
+    vs. a real, all-or-nothing commit).
+
+    Deliberately a bare ListField of DictFields, not a nested
+    per-field row serializer -- the real, row-indexed validation
+    (required fields, valid subtype, duplicate codes, parent
+    resolution) lives in account_import._validate_import_rows(),
+    which produces its own friendly, Indonesian-language error shape
+    -- a stricter DRF-level per-field serializer here would just
+    produce a second, worse-fitting error format for the exact same
+    checks.
+    """
+    rows = serializers.ListField(child=serializers.DictField(), min_length=1)
+
 # =============================================================================
 # Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
 # =============================================================================
