@@ -5659,3 +5659,167 @@ class ControlAccountDerivationTests(TestCase):
         )
         account.refresh_from_db()
         self.assertTrue(account.is_control_account)  # untouched — no subtype means no derivation runs
+
+class ReconcileControlAccountTests(TestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.2. Model-layer coverage for
+    reports.reconcile_control_account() — the real, on-demand
+    diagnostic comparing a control account's GL balance against its
+    own real subledger total.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_rejects_non_control_account(self):
+        with self.assertRaises(ValueError):
+            reports.reconcile_control_account(self.org, "1001")
+
+    def test_rejects_invalid_account_code(self):
+        with self.assertRaises(ValueError):
+            reports.reconcile_control_account(self.org, "9999")
+
+    def test_rejects_control_subtype_account_with_unsupported_code(self):
+        """
+        Real, reachable edge case: a custom account can share a
+        control subtype (PIUTANG_USAHA) — and therefore derive
+        is_control_account=True (Task 18.1) — without being the
+        standard 1201 code this function actually recognizes.
+        """
+        custom_ar = Account.record(
+            organization=self.org, code="9201", name="Piutang Kartu Kredit",
+            account_subtype=Account.AccountSubtype.PIUTANG_USAHA,
+        )
+        self.assertTrue(custom_ar.is_control_account)
+        with self.assertRaises(ValueError):
+            reports.reconcile_control_account(self.org, "9201")
+
+    def test_ar_mismatch_when_gl_has_no_matching_invoice(self):
+        """A direct domain-event posting to AR with no real Invoice
+        backing it is a genuine mismatch — GL moved, the real
+        subledger (aging_ar()) never heard about it."""
+        ar = Account.objects.get(organization=self.org, code="1201")
+        revenue = Account.objects.get(organization=self.org, code="4001")
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
+            lines=[{"account": ar, "debit": Decimal("500000")}, {"account": revenue, "credit": Decimal("500000")}],
+        )
+        data = reports.reconcile_control_account(self.org, "1201")
+        self.assertEqual(data["gl_balance"], Decimal("500000.00"))
+        self.assertEqual(data["subledger_total"], Decimal("0"))
+        self.assertEqual(data["difference"], Decimal("500000.00"))
+        self.assertFalse(data["is_reconciled"])
+
+    def test_ap_reconciles_when_no_activity_at_all(self):
+        """The real base case — zero GL balance, zero subledger, a
+        genuinely reconciled state with nothing posted."""
+        data = reports.reconcile_control_account(self.org, "2001")
+        self.assertEqual(data["gl_balance"], Decimal("0"))
+        self.assertEqual(data["subledger_total"], Decimal("0"))
+        self.assertTrue(data["is_reconciled"])
+
+    def test_inventory_reconciles_when_gl_matches_part_valuation(self):
+        """
+        THE real proof of the per-part cost_price/unit_price
+        fallback — a part with a real cost_price set values
+        identically on both sides.
+        """
+        Part.objects.create(
+            organization=self.org, name="Busi NGK", current_stock=Decimal("10"),
+            cost_price=Decimal("15000"), unit_price=Decimal("25000"),
+        )
+        inventory = Account.objects.get(organization=self.org, code="1301")
+        ap = Account.objects.get(organization=self.org, code="2001")
+        JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.DOMAIN_EVENT,
+            lines=[{"account": inventory, "debit": Decimal("150000")}, {"account": ap, "credit": Decimal("150000")}],
+        )
+        data = reports.reconcile_control_account(self.org, "1301")
+        self.assertEqual(data["subledger_total"], Decimal("150000.00"))
+        self.assertEqual(data["gl_balance"], Decimal("150000.00"))
+        self.assertTrue(data["is_reconciled"])
+
+    def test_inventory_falls_back_to_unit_price_when_cost_price_is_zero(self):
+        """
+        THE real regression test for the naive-aggregate bug flagged
+        while designing this function — a part with NO real GRN
+        history yet (cost_price still 0) must value at unit_price,
+        not silently at zero, which would produce a FALSE mismatch.
+        """
+        Part.objects.create(
+            organization=self.org, name="Part Baru", current_stock=Decimal("4"),
+            cost_price=Decimal("0"), unit_price=Decimal("20000"),
+        )
+        data = reports.reconcile_control_account(self.org, "1301")
+        self.assertEqual(data["subledger_total"], Decimal("80000.00"))
+
+    def test_inventory_mixed_parts_use_correct_basis_per_part(self):
+        """Real proof the fallback is evaluated PER PART, not
+        globally — one part with real cost_price, one without, both
+        correctly valued in the same aggregate."""
+        Part.objects.create(
+            organization=self.org, name="Punya Cost", current_stock=Decimal("2"),
+            cost_price=Decimal("10000"), unit_price=Decimal("99999"),
+        )
+        Part.objects.create(
+            organization=self.org, name="Belum Ada Cost", current_stock=Decimal("3"),
+            cost_price=Decimal("0"), unit_price=Decimal("5000"),
+        )
+        data = reports.reconcile_control_account(self.org, "1301")
+        # 2*10000 + 3*5000 = 20000 + 15000 = 35000
+        self.assertEqual(data["subledger_total"], Decimal("35000.00"))
+
+
+class ControlAccountReconciliationAPITests(APITestCase):
+    """
+    9 Sep 2026 — Phase 18, Task 18.2. HTTP-level coverage for GET
+    /api/accounting/control-account-reconciliation/<account_code>/.
+    Real logic already proven by ReconcileControlAccountTests above;
+    this layer proves the thin view is wired correctly, same
+    discipline as ReportingAPITests elsewhere in this file.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.reconcile@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_endpoint_returns_reconciliation_for_valid_control_account(self):
+        resp = self.client.get("/api/accounting/control-account-reconciliation/2001/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("is_reconciled", resp.data)
+        self.assertEqual(resp.data["account_code"], "2001")
+
+    def test_endpoint_rejects_non_control_account_with_400(self):
+        resp = self.client.get("/api/accounting/control-account-reconciliation/1001/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("message", resp.data)
+
+    def test_endpoint_rejects_unknown_account_code_with_400(self):
+        resp = self.client.get("/api/accounting/control-account-reconciliation/9999/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_endpoint_accepts_explicit_as_of(self):
+        resp = self.client.get("/api/accounting/control-account-reconciliation/1301/?as_of=2026-01-15")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["as_of"], date(2026, 1, 15))
+
+    def test_endpoint_scoped_to_organization(self):
+        """Real proof this reads only THIS org's own accounts/parts —
+        same tenant-isolation discipline as every other report
+        endpoint in this file."""
+        other_org = Organization.objects.create(name="Bengkel Lain Reconcile")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        Part.objects.create(
+            organization=other_org, name="Punya Bengkel Lain", current_stock=Decimal("100"),
+            cost_price=Decimal("50000"),
+        )
+        resp = self.client.get("/api/accounting/control-account-reconciliation/1301/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["subledger_total"], Decimal("0"))
