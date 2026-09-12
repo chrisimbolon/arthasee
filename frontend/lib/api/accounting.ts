@@ -1066,6 +1066,101 @@ export const accountsApi = {
 };
 
 // =============================================================================
+// Bulk Account Import — Phase 18, Task 18.8
+// =============================================================================
+// Mirrors AccountImportRequestSerializer / account_import.py's own
+// real dict shapes exactly (backend serializers.py / account_import.py).
+// The backend NEVER parses a raw file — it only ever accepts a plain
+// JSON array of row objects. Reading the user's chosen CSV file and
+// turning it into that shape is this app's own job (see
+// parseAccountImportCsv, the accounts/import page's own local
+// helper) — a deliberate choice to avoid a new backend file-parsing
+// dependency (openpyxl or similar) for a v1 feature.
+
+export interface AccountImportRow {
+  code: string;
+  name: string;
+  account_subtype: string;
+  // Deliberately `boolean | string` — the CSV parser normalizes a
+  // recognized cell ("true"/"1"/"ya"/etc.) into a real boolean, but
+  // passes an UNRECOGNIZED value through as the raw string on
+  // purpose, so the backend's own strict is-boolean check reports it
+  // as a real, visible row error — never silently guessed at on
+  // either side.
+  is_contra?: boolean | string;
+  parent_code?: string;
+  description?: string;
+}
+
+// Mirrors account_import._validate_import_rows()'s own real
+// "valid_rows" shape exactly.
+export interface AccountImportValidRow {
+  row: number;
+  code: string;
+  name: string;
+  account_subtype: string;
+  is_contra: boolean;
+  parent_code: string | null;
+  parent_id: string | null;
+  description: string;
+}
+
+// Mirrors account_import._validate_import_rows()'s own real
+// row-indexed error shape exactly.
+export interface AccountImportRowError {
+  row: number;
+  code: string;
+  message: string;
+}
+
+export interface AccountImportPreviewResult {
+  success: boolean;
+  message?: string;
+  total_rows?: number;
+  valid_count?: number;
+  error_count?: number;
+  valid_rows?: AccountImportValidRow[];
+  errors?: AccountImportRowError[];
+  can_commit?: boolean;
+}
+
+export interface AccountImportCommitResult {
+  success: boolean;
+  message?: string;
+  created_count?: number;
+  accounts?: AccountRow[];
+}
+
+export const accountImportApi = {
+  // Real, read-only pre-commit review — writes NOTHING on the
+  // backend (account_import.preview_import()'s own docstring). A
+  // genuine result-with-message-on-failure shape, not null-on-
+  // failure — a real 400 here (e.g. an empty rows array) is a real,
+  // explainable problem the UI should surface, not silently swallow.
+  async preview(rows: AccountImportRow[]): Promise<AccountImportPreviewResult> {
+    try {
+      const { data } = await api.post("/api/accounting/accounts/import/preview/", { rows });
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal memvalidasi data impor.") };
+    }
+  },
+
+  // Real, final, all-or-nothing commit — re-validates against the
+  // CURRENT real database state server-side (account_import.
+  // commit_import()'s own docstring), never trusting that a prior
+  // preview() call is still accurate by the time this fires.
+  async commit(rows: AccountImportRow[]): Promise<AccountImportCommitResult> {
+    try {
+      const { data } = await api.post("/api/accounting/accounts/import/commit/", { rows });
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal mengimpor akun.") };
+    }
+  },
+};
+
+// =============================================================================
 // Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
 // =============================================================================
 // Mirrors BankStatementLineSerializer / ReconciliationJournalLineSerializer /
