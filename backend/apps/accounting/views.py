@@ -54,6 +54,7 @@ implementation:
 from datetime import date
 from decimal import Decimal
 
+from apps.accounting import account_import
 from apps.core.models import Outbox
 from apps.core.views import TenantScopedAPIView
 from django.db.models import ProtectedError, Sum
@@ -67,10 +68,11 @@ from .models import (Account, AccountingPeriod, Asset, BankStatementLine,
                      OpeningBalanceOtherLine, OpeningBalancePartLine,
                      OpeningBalancePayable, OpeningBalanceReceivable,
                      OpeningBalanceSession, ReconciliationMatch)
-from .serializers import (AccountEditSerializer, AccountingPeriodSerializer,
-                          AccountRecordSerializer, AccountSerializer,
-                          AssetRecordSerializer, AssetSerializer,
-                          BankStatementLineRecordSerializer,
+from .serializers import (AccountEditSerializer,
+                          AccountImportRequestSerializer,
+                          AccountingPeriodSerializer, AccountRecordSerializer,
+                          AccountSerializer, AssetRecordSerializer,
+                          AssetSerializer, BankStatementLineRecordSerializer,
                           BankStatementLineSerializer,
                           DepreciationRunSerializer, FailedPostingSerializer,
                           JournalEntryCorrectRecordSerializer,
@@ -238,6 +240,84 @@ class AccountDetailView(TenantScopedAPIView):
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"success": True, "account": AccountSerializer(account).data})
+
+class AccountImportPreviewView(TenantScopedAPIView):
+    """
+    POST /api/accounting/accounts/import/preview/
+
+    9 Sep 2026 -- Phase 18, Task 18.8. The real, read-only pre-commit
+    review -- same doctrine as OpeningBalancePreviewView: Made must
+    see every real problem before anything gets created. Owner-only,
+    same stakes class as every other real write-adjacent accounting
+    endpoint -- even though this view itself writes nothing, it's the
+    first half of a real, consequential bulk action.
+    """
+    model = Account
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa mengimpor akun."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        input_serializer = AccountImportRequestSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        rows = input_serializer.validated_data["rows"]
+
+        data = account_import.preview_import(organization, rows)
+        return Response({"success": True, **data})
+
+
+class AccountImportCommitView(TenantScopedAPIView):
+    """
+    POST /api/accounting/accounts/import/commit/
+
+    9 Sep 2026 -- Phase 18, Task 18.8. The real, final, all-or-nothing
+    commit. Re-validates from scratch against the current real
+    database state -- see account_import.commit_import()'s own
+    docstring for why this never trusts a client-side "preview
+    already passed" claim.
+    """
+    model = Account
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not _require_owner(request, organization):
+            return Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa mengimpor akun."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        input_serializer = AccountImportRequestSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        rows = input_serializer.validated_data["rows"]
+
+        try:
+            created = account_import.commit_import(organization, rows, created_by=request.user)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "success": True,
+                "created_count": len(created),
+                "accounts": AccountSerializer(created, many=True).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
 
 # =============================================================================
 # Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
