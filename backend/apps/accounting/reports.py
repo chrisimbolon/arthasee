@@ -19,9 +19,10 @@ from apps.accounting.models import (Account, AccountingPeriod, JournalEntry,
                                     JournalLine, OpeningBalancePayable,
                                     OpeningBalanceReceivable,
                                     OpeningBalanceSession)
+from apps.inventory.models import Part
 from apps.invoicing.models import Invoice
 from apps.purchasing.models import SupplierInvoice
-from django.db.models import F, Sum, Window
+from django.db.models import Case, DecimalField, F, Sum, When, Window
 
 
 def trial_balance(organization, *, as_of=None) -> dict:
@@ -709,6 +710,80 @@ def aging_ap(organization, *, as_of=None) -> dict:
         "supplier_invoices": rows,
         "buckets": buckets,
         "total_outstanding": total_outstanding,
+    }
+
+def reconcile_control_account(organization, account_code, *, as_of=None) -> dict:
+    """
+    9 Sep 2026 — Phase 18, Task 18.2. Real, on-demand diagnostic —
+    compares a control account's own GL balance (Account.balance())
+    against its real subledger total. #26, confirmed: on-demand
+    only, no scheduled job — a background check would need a real
+    alerting mechanism this app doesn't have yet for anything else;
+    a genuine mismatch here means a real, historical bug in report or
+    posting logic, serious enough to investigate directly, not
+    something to leave silently accumulating in a background queue.
+
+    AR (1201) and AP (2001) reuse aging_ar()/aging_ap() DIRECTLY —
+    the exact same real functions already trusted for the Piutang/
+    Utang cards elsewhere in this app — never a second, parallel
+    calculation that could quietly drift from what an owner already
+    sees on those pages.
+
+    Inventory (1301) has no equivalent existing report function, so
+    its subledger total is computed directly from Part here — with
+    the SAME per-part fallback (cost_price if set, else unit_price)
+    StockOpnameSession.complete() already uses when valuing a real
+    GL-facing posting (models.py — see that method's own docstring
+    for the original ledger-inconsistency incident this fallback
+    fixes). A naive Sum(current_stock * cost_price) would UNDERVALUE
+    any part with no real GRN history yet (cost_price still 0),
+    producing a FALSE mismatch here — this mirrors the real posting
+    logic exactly, not a simplified approximation of it.
+
+    Raises ValueError for an account_code this function doesn't
+    support, or a real account that isn't actually is_control_account
+    at all — this is a control-account reconciliation specifically,
+    not a general-purpose balance-comparison tool.
+    """
+    account = Account.resolve(organization, account_code)
+    if not account.is_control_account:
+        raise ValueError(
+            f"Akun {account_code} bukan akun kontrol — rekonsiliasi ini hanya "
+            f"berlaku untuk akun kontrol (mis. Piutang Usaha, Persediaan, Utang Usaha)."
+        )
+
+    gl_balance = account.balance(as_of=as_of)
+
+    if account_code == "1201":
+        subledger_total = aging_ar(organization, as_of=as_of)["total_outstanding"]
+    elif account_code == "2001":
+        subledger_total = aging_ap(organization, as_of=as_of)["total_outstanding"]
+    elif account_code == "1301":
+        subledger_total = Part.objects.filter(organization=organization).aggregate(
+            total=Sum(
+                Case(
+                    When(cost_price__gt=Decimal("0"), then=F("current_stock") * F("cost_price")),
+                    default=F("current_stock") * F("unit_price"),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                )
+            )
+        )["total"] or Decimal("0")
+    else:
+        raise ValueError(
+            f"Rekonsiliasi belum didukung untuk akun {account_code} — hanya "
+            f"1201 (Piutang Usaha), 1301 (Persediaan), dan 2001 (Utang Usaha) "
+            f"yang didukung saat ini."
+        )
+
+    difference = gl_balance - subledger_total
+    return {
+        "account_code": account.code,
+        "account_name": account.name,
+        "as_of": as_of or date.today(),
+        "gl_balance": gl_balance,
+        "subledger_total": subledger_total,
+        "difference": difference,
+        "is_reconciled": difference == Decimal("0"),
     }
 
 def dashboard_financial_summary(organization, *, as_of=None) -> dict:
