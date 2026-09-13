@@ -6,9 +6,10 @@ from django.db.models import ProtectedError
 from rest_framework import status
 from rest_framework.response import Response
 
-from .models import Customer, ServiceRecord, Vehicle
-from .serializers import (CustomerSerializer, ServiceRecordSerializer,
-                          VehicleListSerializer, VehicleSerializer)
+from .models import Customer, CustomerFieldChange, ServiceRecord, Vehicle
+from .serializers import (CustomerFieldChangeSerializer, CustomerSerializer,
+                          ServiceRecordSerializer, VehicleListSerializer,
+                          VehicleSerializer)
 
 
 class CustomerListView(TenantScopedAPIView):
@@ -65,9 +66,17 @@ class CustomerDetailView(TenantScopedAPIView):
 
     def put(self, request, pk):
         customer = self.get_object(pk)
+        # 13 Sep 2026 — the serializer still owns real INPUT
+        # validation (is_valid()) exactly as before; the actual
+        # WRITE now goes through Customer.apply_edit() instead of a
+        # plain serializer.save(), so every genuine field change
+        # gets its own real CustomerFieldChange row. validated_data
+        # only ever contains this serializer's own real writable
+        # field names (name/phone/stnk_name/customer_type) — never
+        # an unknown key apply_edit() would reject.
         serializer = CustomerSerializer(customer, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
+            customer.apply_edit(changed_by=request.user, **serializer.validated_data)
             return Response({"success": True, "customer": CustomerSerializer(customer).data})
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -86,6 +95,21 @@ class CustomerDetailView(TenantScopedAPIView):
             )
         return Response({"success": True, "message": "Pelanggan berhasil dihapus"})
 
+class CustomerHistoryView(TenantScopedAPIView):
+    """
+    GET /api/customers/<id>/history/
+
+    13 Sep 2026 — real, read-only view onto Customer.apply_edit()'s
+    own real audit trail. Most-recent-first (CustomerFieldChange's
+    own Meta.ordering), matching the "Riwayat" tab's own real
+    reading order — newest change at the top.
+    """
+    model = Customer
+
+    def get(self, request, pk):
+        customer = self.get_object(pk)
+        changes = customer.field_changes.select_related("changed_by")
+        return Response({"success": True, "changes": CustomerFieldChangeSerializer(changes, many=True).data})
 
 class VehicleListView(TenantScopedAPIView):
     """
