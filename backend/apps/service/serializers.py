@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from .models import Customer, ServiceRecord, Vehicle
+from .models import Customer, CustomerFieldChange, ServiceRecord, Vehicle
 
 
 def _user_org_ids(request):
@@ -28,6 +28,19 @@ class CustomerSerializer(serializers.ModelSerializer):
         # behaves correctly — it's optional, not read-only.
         read_only_fields = ["id", "vehicle_count", "created_at", "updated_at"]
 
+class CustomerFieldChangeSerializer(serializers.ModelSerializer):
+    """
+    13 Sep 2026 — real, read-only serializer for the "Riwayat" tab.
+    Every field read-only — this is a real, immutable audit trail,
+    never something a client is meant to write to directly (writes
+    only ever happen implicitly, via Customer.apply_edit()).
+    """
+    changed_by_name = serializers.CharField(source="changed_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = CustomerFieldChange
+        fields = ["id", "field_name", "field_label", "old_value", "new_value", "changed_by_name", "changed_at"]
+        read_only_fields = fields
 
 class ServiceRecordSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
