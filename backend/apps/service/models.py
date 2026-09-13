@@ -99,6 +99,126 @@ class Customer(TenantScopedModel):
     def __str__(self):
         return self.name
 
+    # 13 Sep 2026 — real, dedicated field-change history. Deliberately
+    # scoped to Customer only for v1, not a generic contenttypes
+    # mechanism spanning every model — the same "build concretely for
+    # the one real consumer, generalize only once a second one
+    # genuinely needs it" call already made for bulk import (Phase 18,
+    # Open Decision #30). Only real, writable fields are eligible —
+    # id/created_at/updated_at/customer_type's own derived count etc.
+    # are never tracked, same as they're never accepted as direct
+    # edit input via CustomerSerializer today.
+    FIELD_LABELS = {
+        "name":          "Nama Pelanggan",
+        "phone":         "Nomor Telepon",
+        "email":         "Email",
+        "stnk_name":     "Nama di STNK",
+        "customer_type": "Jenis Pelanggan",
+    }
+
+    def _display_value(self, field_name, value):
+        """
+        Real, deliberate choice: for customer_type specifically, the
+        history log stores the human-readable label ("Perorangan"),
+        not the raw stored code ("INDIVIDUAL") — a history entry is a
+        read-only record meant for a person to actually read later,
+        never queried by raw code the way the live Customer row
+        itself might be. Every other tracked field is already plain
+        text, so this is the only field that needs translating.
+        """
+        if field_name == "customer_type":
+            return dict(self.CUSTOMER_TYPE_CHOICES).get(value, value)
+        return value
+
+    def apply_edit(self, *, changed_by=None, **fields):
+        """
+        The one real edit path for Customer — CustomerDetailView.put()
+        is the only real caller. Every field passed in `fields` is
+        compared against the CURRENT real value BEFORE anything is
+        written; only a genuine difference produces a
+        CustomerFieldChange row, with its own human-readable label
+        frozen at write time (so a future relabeling of this field
+        never silently rewrites what an old history entry says it
+        was). Fields never mentioned in `fields` at all are left
+        completely untouched — a plain PATCH-style partial update,
+        no _UNSET-sentinel complexity needed here the way Account.
+        parent required, since Customer has no field where None/blank
+        is itself a meaningful "clear this" state distinct from
+        "don't touch this."
+
+        Raises ValueError for any field name outside FIELD_LABELS —
+        same "fail loud on an unknown key" discipline as every other
+        real write path in this codebase, never a silent no-op for a
+        typo'd field name.
+        """
+        changes = []
+        for field_name, new_value in fields.items():
+            if field_name not in self.FIELD_LABELS:
+                raise ValueError(f"Field tidak dikenal: {field_name!r}.")
+            old_value = getattr(self, field_name)
+            if old_value != new_value:
+                changes.append(CustomerFieldChange(
+                    organization=self.organization, customer=self,
+                    field_name=field_name, field_label=self.FIELD_LABELS[field_name],
+                    old_value=self._display_value(field_name, old_value) or "",
+                    new_value=self._display_value(field_name, new_value) or "",
+                    changed_by=changed_by,
+                ))
+                setattr(self, field_name, new_value)
+
+        if changes:
+            self.save()
+            # bulk_create, not one .save() per change — same real
+            # precedent JournalLine.objects.bulk_create() already
+            # establishes for a TenantScopedModel written in a real
+            # batch (JournalEntry.post()) rather than one row at a
+            # time.
+            CustomerFieldChange.objects.bulk_create(changes)
+        return self
+
+
+class CustomerFieldChange(TenantScopedModel):
+    """
+    13 Sep 2026 — real, per-field audit trail for Customer edits.
+    Deliberately dedicated to Customer, not a generic contenttypes-
+    based mechanism — see Customer.apply_edit()'s own docstring for
+    the real reasoning. Never itself editable after creation — see
+    the Admin lockdown (admin.py) for the same "an editable audit
+    trail is not a trustworthy audit trail" discipline every other
+    real audit-adjacent model in this codebase already gets
+    (JournalEntry, AccountingPeriod).
+
+    Honest, real limitation: this only ever tracks changes made
+    THROUGH apply_edit() from the moment this ships — there is no
+    retroactive backfill, since no record of what a Customer row
+    looked like before this existed anywhere to reconstruct from.
+    """
+    id       = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, related_name="field_changes",
+        verbose_name="Pelanggan",
+    )
+    field_name  = models.CharField(max_length=50, verbose_name="Nama Field")
+    field_label = models.CharField(max_length=100, verbose_name="Label Field")
+    old_value   = models.TextField(blank=True, verbose_name="Nilai Lama")
+    new_value   = models.TextField(blank=True, verbose_name="Nilai Baru")
+    changed_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="Diubah Oleh",
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Customer Field Change"
+        verbose_name_plural  = "Customer Field Changes"
+        ordering             = ["-changed_at"]
+
+    def __str__(self):
+        return f"{self.customer.name} — {self.field_label}: {self.old_value!r} -> {self.new_value!r}"
+
+    def _resolve_organization(self):
+        return self.customer.organization
+
 
 class Vehicle(TenantScopedModel):
     """
