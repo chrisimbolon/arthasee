@@ -1,6 +1,7 @@
 # =============================================================================
 # === backend/apps/service/tests.py ===
 # =============================================================================
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -10,13 +11,13 @@ from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
 from django.core.management import call_command
-from django.test import override_settings
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import (Customer, ServiceRecord, ServiceReminderLog, Vehicle,
-                     _add_months)
+from .models import (Customer, CustomerFieldChange, ServiceRecord,
+                     ServiceReminderLog, Vehicle, _add_months)
 
 
 class ServiceAPITestBase(APITestCase):
@@ -756,3 +757,131 @@ class SendServiceRemindersCommandTests(ServiceAPITestBase):
         )
         call_command("send_service_reminders")
         self.assertFalse(ServiceReminderLog.objects.filter(vehicle=vehicle).exists())
+
+class CustomerApplyEditTests(TestCase):
+    """
+    13 Sep 2026 — real coverage for Customer.apply_edit() — the one
+    real edit path, and the real diff logic behind CustomerFieldChange.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.customerhistory@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        self.customer = Customer.objects.create(
+            organization=self.org, name="Yono", phone="0812", stnk_name="Yono S.",
+        )
+
+    def test_real_change_creates_a_history_row(self):
+        self.customer.apply_edit(changed_by=self.owner, phone="0899")
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.phone, "0899")
+        change = CustomerFieldChange.objects.get(customer=self.customer)
+        self.assertEqual(change.field_name, "phone")
+        self.assertEqual(change.field_label, "Nomor Telepon")
+        self.assertEqual(change.old_value, "0812")
+        self.assertEqual(change.new_value, "0899")
+        self.assertEqual(change.changed_by_id, self.owner.id)
+
+    def test_unchanged_value_creates_no_history_row(self):
+        """Real proof this is a genuine DIFF, not a blind log-every-
+        save — submitting the SAME value must produce nothing."""
+        self.customer.apply_edit(changed_by=self.owner, phone="0812")
+        self.assertFalse(CustomerFieldChange.objects.filter(customer=self.customer).exists())
+
+    def test_field_not_mentioned_at_all_stays_untouched(self):
+        self.customer.apply_edit(changed_by=self.owner, phone="0899")
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.stnk_name, "Yono S.")  # never mentioned, never touched
+        self.assertFalse(CustomerFieldChange.objects.filter(customer=self.customer, field_name="stnk_name").exists())
+
+    def test_multiple_fields_in_one_call_each_get_their_own_row(self):
+        self.customer.apply_edit(changed_by=self.owner, phone="0899", name="Yono Baru")
+        self.assertEqual(CustomerFieldChange.objects.filter(customer=self.customer).count(), 2)
+
+    def test_customer_type_stores_the_human_readable_label_not_the_raw_code(self):
+        """THE real proof of the display-value resolution — the log
+        must read "Perorangan"/"Institusi/Tender", never the raw
+        "INDIVIDUAL"/"INSTITUTIONAL" stored on the live row."""
+        self.customer.apply_edit(changed_by=self.owner, customer_type="INSTITUTIONAL")
+        change = CustomerFieldChange.objects.get(customer=self.customer, field_name="customer_type")
+        self.assertEqual(change.old_value, "Perorangan")
+        self.assertEqual(change.new_value, "Institusi/Tender")
+
+    def test_empty_to_filled_is_a_real_tracked_change(self):
+        blank_customer = Customer.objects.create(organization=self.org, name="Budi")
+        blank_customer.apply_edit(changed_by=self.owner, phone="0811")
+        change = CustomerFieldChange.objects.get(customer=blank_customer)
+        self.assertEqual(change.old_value, "")
+        self.assertEqual(change.new_value, "0811")
+
+    def test_unknown_field_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.customer.apply_edit(changed_by=self.owner, not_a_real_field="x")
+
+    def test_changed_by_is_optional(self):
+        """A system-triggered or legacy edit with no real actor must
+        still write a real history row, changed_by simply null."""
+        self.customer.apply_edit(phone="0899")
+        change = CustomerFieldChange.objects.get(customer=self.customer)
+        self.assertIsNone(change.changed_by_id)
+
+
+class CustomerHistoryAPITests(APITestCase):
+    """
+    13 Sep 2026 — HTTP-level coverage: PUT actually creates history
+    through the real endpoint, and GET .../history/ returns it
+    correctly. Depends on the history URL being registered — see the
+    separate urls.py note if this fails to route.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.customerhistoryapi@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Yono", phone="0812")
+
+    def test_put_creates_a_real_history_row(self):
+        resp = self.client.put(f"/api/customers/{self.customer.id}/", {"phone": "0899"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(CustomerFieldChange.objects.filter(customer=self.customer, field_name="phone").exists())
+
+    def test_history_endpoint_returns_real_changes_newest_first(self):
+        self.client.put(f"/api/customers/{self.customer.id}/", {"phone": "0899"}, format="json")
+        self.client.put(f"/api/customers/{self.customer.id}/", {"name": "Yono Baru"}, format="json")
+
+        resp = self.client.get(f"/api/customers/{self.customer.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        changes = resp.data["changes"]
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(changes[0]["field_name"], "name")  # most recent first
+        self.assertEqual(changes[1]["field_name"], "phone")
+
+    def test_history_returns_empty_list_for_a_never_edited_customer(self):
+        resp = self.client.get(f"/api/customers/{self.customer.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["changes"], [])
+
+    def test_history_returns_404_for_nonexistent_customer(self):
+        resp = self.client.get(f"/api/customers/{uuid.uuid4()}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_history_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Customer History")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.customerhistory@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+
+        self.client.put(f"/api/customers/{self.customer.id}/", {"phone": "0899"}, format="json")
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.get(f"/api/customers/{self.customer.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
