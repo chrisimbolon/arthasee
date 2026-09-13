@@ -254,7 +254,32 @@ export const customersApi = {
   async remove(id: string): Promise<void> {
     await api.delete(`/api/customers/${id}/`);
   },
+
+  // 13 Sep 2026 — real, single-customer fetch. customer-detail's own
+  // page needs this directly (list() only ever returns the whole
+  // org's customers, no by-id lookup existed before this).
+  async get(id: string): Promise<Customer> {
+    const { data } = await api.get(`/api/customers/${id}/`);
+    return data.customer;
+  },
+  // 13 Sep 2026 — real, read-only field-change history. Mirrors the
+  // backend's own CustomerFieldChangeSerializer shape exactly
+  // (apps/service/serializers.py).
+  async history(id: string): Promise<CustomerFieldChange[]> {
+    const { data } = await api.get(`/api/customers/${id}/history/`);
+    return data.changes;
+  },  
 };
+
+export interface CustomerFieldChange {
+  id:               string;
+  field_name:       string;
+  field_label:      string;
+  old_value:        string;
+  new_value:        string;
+  changed_by_name:  string | null;
+  changed_at:       string;
+}
 
 export interface VehicleCreatePayload {
   customer: string; plate_number: string; manufacture_year: number;
