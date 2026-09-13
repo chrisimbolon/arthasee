@@ -4,6 +4,7 @@
 // =============================================================================
 import { Customer, CustomerType, customersApi } from "@/lib/api/service";
 import { Briefcase, Loader2, Plus, Search, Trash2, X } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (c: Customer) => void }) {
@@ -76,6 +77,7 @@ export default function CustomersPage() {
   const [showAdd, setShowAdd]     = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deletingId, setDeletingId]   = useState<string | null>(null);
+  const router = useRouter();
 
   const load = (mode: FilterMode) => {
     setLoading(true);
@@ -140,7 +142,11 @@ export default function CustomersPage() {
             </thead>
             <tbody>
               {filtered.map((c) => (
-                <tr key={c.id}>
+                <tr
+                  key={c.id}
+                  onClick={() => router.push(`/dashboard/customer-detail?id=${c.id}`)}
+                  style={{ cursor: "pointer" }}
+                >
                   <td style={{ fontWeight: 600 }}>{c.name}</td>
                   <td>
                     {c.customer_type === "INSTITUTIONAL" && (
@@ -153,8 +159,11 @@ export default function CustomersPage() {
                   <td>{c.stnk_name || <span style={{ color: "var(--steel)" }}>Sama dengan nama</span>}</td>
                   <td className="mono">{c.vehicle_count}</td>
                   <td>
-                    <button onClick={() => handleDelete(c)} disabled={deletingId === c.id}
-                      style={{ background: "none", border: "none", color: "var(--steel)", display: "flex" }}>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDelete(c); }}
+                      disabled={deletingId === c.id}
+                      style={{ background: "none", border: "none", color: "var(--steel)", display: "flex" }}
+                    >
                       {deletingId === c.id ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Trash2 size={15} />}
                     </button>
                   </td>
