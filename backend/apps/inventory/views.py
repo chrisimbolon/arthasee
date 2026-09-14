@@ -9,8 +9,8 @@ from rest_framework.response import Response
 
 from . import reports
 from .models import Part, PartUsage, StockAdjustment, StockOpnameSession
-from .serializers import (PartSerializer, PartUsageSerializer,
-                          StockAdjustmentSerializer,
+from .serializers import (PartFieldChangeSerializer, PartSerializer,
+                          PartUsageSerializer, StockAdjustmentSerializer,
                           StockOpnameSessionSerializer)
 
 
@@ -98,7 +98,7 @@ class PartDetailView(TenantScopedAPIView):
         part = self.get_object(pk)
         serializer = PartSerializer(part, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
+            part.apply_edit(changed_by=request.user, **serializer.validated_data)
             return Response({"success": True, "part": PartSerializer(part).data})
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -116,6 +116,20 @@ class PartDetailView(TenantScopedAPIView):
             )
         return Response({"success": True, "message": "Part berhasil dihapus"})
 
+class PartHistoryView(TenantScopedAPIView):
+    """
+    GET /api/parts/<id>/history/
+
+    14 Sep 2026 -- real, read-only view onto Part.apply_edit()'s own
+    real audit trail. Same shape as CustomerHistoryView/
+    VehicleHistoryView (apps.service).
+    """
+    model = Part
+
+    def get(self, request, pk):
+        part = self.get_object(pk)
+        changes = part.field_changes.select_related("changed_by")
+        return Response({"success": True, "changes": PartFieldChangeSerializer(changes, many=True).data})
 
 class PartUsageListView(TenantScopedAPIView):
     """
