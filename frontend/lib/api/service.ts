@@ -311,7 +311,46 @@ export const vehiclesApi = {
   async remove(id: string): Promise<void> {
     await api.delete(`/api/vehicles/${id}/`);
   },
+// 14 Sep 2026 — real, read-only field-change history. Mirrors the
+  // backend's own VehicleFieldChangeSerializer shape exactly
+  // (apps/service/serializers.py).
+  async history(id: string): Promise<VehicleFieldChange[]> {
+    const { data } = await api.get(`/api/vehicles/${id}/history/`);
+    return data.changes;
+  },
 };
+
+export interface VehicleFieldChange {
+  id:               string;
+  field_name:       string;
+  field_label:      string;
+  old_value:        string;
+  new_value:        string;
+  changed_by_name:  string | null;
+  changed_at:       string;
+}
+
+// 14 Sep 2026 — real, DELIBERATELY narrower than
+// Partial<VehicleCreatePayload> — that type still includes
+// `customer` (required on the base VehicleCreatePayload, so still
+// technically assignable through Partial<...>). Vehicle ownership
+// reassignment is explicitly excluded from the edit flow (backend:
+// VehicleDetailView.put() rejects a `customer` key outright) — this
+// type enforces the same exclusion on the frontend at compile time,
+// not just by convention in the form's own JSX.
+export interface VehicleEditPayload {
+  plate_number?:        string;
+  vehicle_type?:         string;
+  model?:                string;
+  manufacture_year?:     number;
+  body_style?:           string;
+  color?:                string;
+  chassis_number?:       string;
+  engine_number?:        string;
+  bpkb_number?:          string;
+  registration_expiry?:  string;
+  current_odometer_km?:  number;
+}
 
 export const serviceRecordsApi = {
   async list(vehicleId: string): Promise<ServiceRecord[]> {
