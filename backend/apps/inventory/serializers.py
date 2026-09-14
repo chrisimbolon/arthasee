@@ -4,8 +4,8 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
-from .models import (Part, PartUsage, StockAdjustment, StockOpnameLineItem,
-                     StockOpnameSession)
+from .models import (Part, PartFieldChange, PartUsage, StockAdjustment,
+                     StockOpnameLineItem, StockOpnameSession)
 
 
 def _user_org_ids(request):
@@ -79,6 +79,21 @@ class PartSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(exc.message_dict)
         return data
 
+class PartFieldChangeSerializer(serializers.ModelSerializer):
+    """
+    14 Sep 2026 — real, read-only serializer for the "Riwayat
+    Perubahan" modal on the inventory page. Identical shape to
+    CustomerFieldChangeSerializer/VehicleFieldChangeSerializer
+    (apps.service) — deliberately not shared/reused as one generic
+    serializer, since these are genuinely separate models with no
+    real relationship, only a coincidentally identical field set.
+    """
+    changed_by_name = serializers.CharField(source="changed_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = PartFieldChange
+        fields = ["id", "field_name", "field_label", "old_value", "new_value", "changed_by_name", "changed_at"]
+        read_only_fields = fields
 
 class PartUsageSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source="part.name", read_only=True)
