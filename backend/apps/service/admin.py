@@ -1,6 +1,7 @@
 from django.contrib import admin
 
-from .models import Customer, CustomerFieldChange, ServiceRecord, Vehicle
+from .models import (Customer, CustomerFieldChange, ServiceRecord, Vehicle,
+                     VehicleFieldChange)
 
 
 @admin.register(Customer)
@@ -49,3 +50,27 @@ class CustomerFieldChangeAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+@admin.register(VehicleFieldChange)
+class VehicleFieldChangeAdmin(admin.ModelAdmin):
+    """
+    14 Sep 2026 — same real lockdown discipline as
+    CustomerFieldChangeAdmin — an editable audit trail is not a
+    trustworthy audit trail. Every field readonly, add/delete both
+    blocked — the only real way a row here is ever created is
+    Vehicle.apply_edit() itself (models.py).
+    """
+    list_display  = ("vehicle", "field_label", "old_value", "new_value", "changed_by", "changed_at")
+    list_filter   = ("field_name", "organization")
+    search_fields = ("vehicle__plate_number", "field_label")
+    ordering      = ("-changed_at",)
+    readonly_fields = (
+        "organization", "vehicle", "field_name", "field_label",
+        "old_value", "new_value", "changed_by", "changed_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False    
