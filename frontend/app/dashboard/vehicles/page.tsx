@@ -7,15 +7,6 @@ import { AlertTriangle, Calendar, Check, ChevronDown, Loader2, Plus, Search, X }
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-// Chris's own catch, 4 Aug: a plain <select> genuinely doesn't scale
-// once Made has 50+ real customers — scrolling and squinting through
-// a long alphabetical list every time a vehicle gets added, made
-// worse by institutional clients whose names all start similarly
-// ("Polresta Batanghari", "Polresta Tanjung Pinang"). Client-side
-// substring search, not a new backend endpoint — customersApi.list()
-// already fetches the full list once for this page, and a real shop's
-// customer count is nowhere near the scale where filtering in the
-// browser would ever be the bottleneck.
 function CustomerCombobox({ customers, value, onChange }: {
   customers: Customer[]; value: string; onChange: (id: string) => void;
 }) {
