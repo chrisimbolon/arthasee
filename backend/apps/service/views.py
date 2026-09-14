@@ -6,9 +6,11 @@ from django.db.models import ProtectedError
 from rest_framework import status
 from rest_framework.response import Response
 
-from .models import Customer, CustomerFieldChange, ServiceRecord, Vehicle
+from .models import (Customer, CustomerFieldChange, ServiceRecord, Vehicle,
+                     VehicleFieldChange)
 from .serializers import (CustomerFieldChangeSerializer, CustomerSerializer,
-                          ServiceRecordSerializer, VehicleListSerializer,
+                          ServiceRecordSerializer,
+                          VehicleFieldChangeSerializer, VehicleListSerializer,
                           VehicleSerializer)
 
 
@@ -159,7 +161,25 @@ class VehicleDetailView(TenantScopedAPIView):
         vehicle = self.get_object(pk)
         serializer = VehicleSerializer(vehicle, data=request.data, partial=True, context={"request": request})
         if serializer.is_valid():
-            serializer.save()
+            data = dict(serializer.validated_data)
+            # 14 Sep 2026 -- real, deliberate guard: `customer`
+            # reassignment is a structural ownership transfer, not a
+            # simple field correction -- explicitly excluded from
+            # Vehicle.apply_edit()'s own trackable field set (models.py).
+            # Blocked HERE, with a real, clear message, rather than
+            # letting apply_edit()'s own generic "Field tidak dikenal"
+            # fire for it -- that would be technically correct but
+            # confusing for any real caller that hits this.
+            if "customer" in data:
+                return Response(
+                    {
+                        "success": False,
+                        "message": "Pemindahan kepemilikan kendaraan belum didukung lewat endpoint ini -- "
+                                    "fitur transfer kendaraan akan dibuat terpisah.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            vehicle.apply_edit(changed_by=request.user, **data)
             return Response({"success": True, "vehicle": VehicleSerializer(vehicle).data})
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -177,6 +197,21 @@ class VehicleDetailView(TenantScopedAPIView):
                 status=status.HTTP_409_CONFLICT,
             )
         return Response({"success": True, "message": "Kendaraan berhasil dihapus"})
+
+
+class VehicleHistoryView(TenantScopedAPIView):
+    """
+    GET /api/vehicles/<id>/history/
+
+    14 Sep 2026 -- real, read-only view onto Vehicle.apply_edit()'s
+    own real audit trail. Same shape as CustomerHistoryView.
+    """
+    model = Vehicle
+
+    def get(self, request, pk):
+        vehicle = self.get_object(pk)
+        changes = vehicle.field_changes.select_related("changed_by")
+        return Response({"success": True, "changes": VehicleFieldChangeSerializer(changes, many=True).data})
 
 
 class ServiceRecordListView(TenantScopedAPIView):
