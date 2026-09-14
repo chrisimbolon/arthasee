@@ -14,7 +14,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Part, PartUsage, StockAdjustment
+from .models import Part, PartFieldChange, PartUsage, StockAdjustment
 
 
 class InventoryAPITestBase(APITestCase):
@@ -1107,3 +1107,149 @@ class StockOpnameSessionTests(InventoryAPITestBase):
         self.assertEqual(self.part_a.current_stock, Decimal("20.00"))
         self.assertEqual(self.part_b.current_stock, Decimal("10.00"))
         self.assertEqual(StockAdjustment.objects.filter(reason="correction").count(), 0)
+
+class PartApplyEditTests(InventoryAPITestBase):
+    """
+    14 Sep 2026 — real coverage for Part.apply_edit() — same real
+    diff logic as Customer.apply_edit()/Vehicle.apply_edit()
+    (apps.service), now proven against Part's own five real
+    TextChoices fields.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", sku="BSI-001", unit="pcs",
+            unit_price=Decimal("25000.00"), minimum_stock=Decimal("5.00"),
+        )
+
+    def test_real_change_creates_a_history_row(self):
+        self.part.apply_edit(changed_by=self.owner, name="Busi NGK")
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.name, "Busi NGK")
+        change = PartFieldChange.objects.get(part=self.part)
+        self.assertEqual(change.field_name, "name")
+        self.assertEqual(change.old_value, "Busi")
+        self.assertEqual(change.new_value, "Busi NGK")
+
+    def test_unchanged_value_creates_no_history_row(self):
+        self.part.apply_edit(changed_by=self.owner, name="Busi")
+        self.assertFalse(PartFieldChange.objects.filter(part=self.part).exists())
+
+    def test_decimal_field_diffs_correctly(self):
+        self.part.apply_edit(changed_by=self.owner, unit_price=Decimal("30000.00"))
+        change = PartFieldChange.objects.get(part=self.part, field_name="unit_price")
+        self.assertEqual(change.old_value, "25000.00")
+        self.assertEqual(change.new_value, "30000.00")
+
+    def test_choice_field_stores_the_human_readable_label(self):
+        """THE real proof of the label resolution — reorder_cadence
+        must log "Mingguan", never the raw "MINGGUAN" code."""
+        self.part.apply_edit(changed_by=self.owner, reorder_cadence=Part.ReorderCadence.MINGGUAN)
+        change = PartFieldChange.objects.get(part=self.part, field_name="reorder_cadence")
+        self.assertEqual(change.old_value, "")  # genuinely unset before
+        self.assertEqual(change.new_value, "Mingguan")
+
+    def test_item_type_change_logs_real_labels_both_sides(self):
+        self.part.apply_edit(
+            changed_by=self.owner, item_type=Part.ItemType.FLUID,
+            vehicle_brand="", fluid_brand=Part.FluidBrand.SHELL,
+        )
+        change = PartFieldChange.objects.get(part=self.part, field_name="item_type")
+        self.assertEqual(change.old_value, "Spare Part")
+        self.assertEqual(change.new_value, "Fluida")
+        brand_change = PartFieldChange.objects.get(part=self.part, field_name="fluid_brand")
+        self.assertEqual(brand_change.old_value, "")
+        self.assertEqual(brand_change.new_value, "Shell")
+
+    def test_current_stock_is_not_trackable(self):
+        """THE real proof of the exclusion — current_stock only ever
+        moves through PartUsage/StockAdjustment, never apply_edit()."""
+        with self.assertRaises(ValueError):
+            self.part.apply_edit(changed_by=self.owner, current_stock=Decimal("999.00"))
+
+    def test_cost_price_is_not_trackable(self):
+        """Same real exclusion as current_stock — cost_price is
+        exclusively system-maintained from real GRN history."""
+        with self.assertRaises(ValueError):
+            self.part.apply_edit(changed_by=self.owner, cost_price=Decimal("999.00"))
+
+    def test_multiple_fields_in_one_call_each_get_their_own_row(self):
+        self.part.apply_edit(changed_by=self.owner, name="Busi Baru", unit_price=Decimal("28000.00"))
+        self.assertEqual(PartFieldChange.objects.filter(part=self.part).count(), 2)
+
+    def test_unknown_field_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.part.apply_edit(changed_by=self.owner, not_a_real_field="x")
+
+
+class PartHistoryAPITests(InventoryAPITestBase):
+    """
+    14 Sep 2026 — HTTP-level coverage: PUT creates history through
+    the real endpoint, GET .../history/ returns it correctly.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", sku="BSI-001", unit="pcs",
+            unit_price=Decimal("25000.00"),
+        )
+
+    def test_put_creates_a_real_history_row(self):
+        resp = self.client.put(f"/api/parts/{self.part.id}/", {"unit_price": "28000.00"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(PartFieldChange.objects.filter(part=self.part, field_name="unit_price").exists())
+
+    def test_history_endpoint_returns_real_changes_newest_first(self):
+        self.client.put(f"/api/parts/{self.part.id}/", {"unit_price": "28000.00"}, format="json")
+        self.client.put(f"/api/parts/{self.part.id}/", {"name": "Busi Baru"}, format="json")
+
+        resp = self.client.get(f"/api/parts/{self.part.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        changes = resp.data["changes"]
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(changes[0]["field_name"], "name")
+        self.assertEqual(changes[1]["field_name"], "unit_price")
+
+    def test_history_returns_empty_list_for_a_never_edited_part(self):
+        resp = self.client.get(f"/api/parts/{self.part.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["changes"], [])
+
+    def test_history_returns_404_for_nonexistent_part(self):
+        resp = self.client.get(f"/api/parts/{uuid.uuid4()}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_history_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Part History")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.parthistory@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+
+        self.client.put(f"/api/parts/{self.part.id}/", {"unit_price": "28000.00"}, format="json")
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.get(f"/api/parts/{self.part.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_put_never_leaks_current_stock_or_cost_price_into_apply_edit(self):
+        """
+        Real, defensive proof — even if a caller includes
+        current_stock or cost_price in the PUT body, both are
+        read-only at the SERIALIZER layer (PartSerializer's own
+        read_only_fields), so validated_data never contains them —
+        apply_edit() never even sees them, let alone raises for them.
+        """
+        resp = self.client.put(
+            f"/api/parts/{self.part.id}/",
+            {"current_stock": "999.00", "cost_price": "999.00", "name": "Busi Aman"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("0.00"))
+        self.assertEqual(self.part.cost_price, Decimal("0.00"))
+        self.assertEqual(self.part.name, "Busi Aman")
