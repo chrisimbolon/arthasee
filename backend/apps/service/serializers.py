@@ -5,7 +5,8 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from .models import Customer, CustomerFieldChange, ServiceRecord, Vehicle
+from .models import (Customer, CustomerFieldChange, ServiceRecord, Vehicle,
+                     VehicleFieldChange)
 
 
 def _user_org_ids(request):
@@ -39,6 +40,22 @@ class CustomerFieldChangeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = CustomerFieldChange
+        fields = ["id", "field_name", "field_label", "old_value", "new_value", "changed_by_name", "changed_at"]
+        read_only_fields = fields
+
+class VehicleFieldChangeSerializer(serializers.ModelSerializer):
+    """
+    14 Sep 2026 — real, read-only serializer for the "Riwayat
+    Perubahan" section on vehicle-detail. Identical shape to
+    CustomerFieldChangeSerializer — deliberately not shared/reused as
+    one generic serializer, since VehicleFieldChange and
+    CustomerFieldChange are genuinely separate models with no real
+    relationship, only a coincidentally identical field set.
+    """
+    changed_by_name = serializers.CharField(source="changed_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = VehicleFieldChange
         fields = ["id", "field_name", "field_label", "old_value", "new_value", "changed_by_name", "changed_at"]
         read_only_fields = fields
 
