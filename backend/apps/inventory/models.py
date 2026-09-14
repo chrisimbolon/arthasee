@@ -233,6 +233,138 @@ class Part(TenantScopedModel):
         if errors:
             raise ValidationError(errors)
 
+    # 14 Sep 2026 — real, dedicated field-change history, same shape
+    # as Customer.apply_edit()/CustomerFieldChange and Vehicle.
+    # apply_edit()/VehicleFieldChange (apps.service) already
+    # established.
+    #
+    # Real, deliberate scope: current_stock and cost_price are BOTH
+    # excluded — both are already read-only at the serializer layer
+    # (PartSerializer's own read_only_fields), for the exact same
+    # real reasons noted there — current_stock only ever moves
+    # through a real PartUsage/StockAdjustment, cost_price is
+    # exclusively system-maintained from real GRN history. Neither
+    # should ever reach apply_edit() at all in real usage (nothing
+    # in this app's own real PUT path passes them), but they're left
+    # out of FIELD_LABELS anyway as a real, structural guarantee —
+    # not just an assumption about caller discipline.
+    #
+    # Five of the ten trackable fields are real TextChoices fields
+    # (item_type/vehicle_brand/fluid_brand/viscosity_grade/
+    # reorder_cadence) — _display_value() resolves each to its real
+    # human-readable label ("Spare Part", not "SPARE_PART") before
+    # storage, same real treatment Customer.apply_edit() already
+    # gives customer_type, just generalized across five fields
+    # instead of one.
+    FIELD_LABELS = {
+        "name":             "Nama Part",
+        "sku":              "Kode/SKU",
+        "unit":             "Satuan",
+        "unit_price":       "Harga Satuan",
+        "minimum_stock":    "Stok Minimum",
+        "item_type":        "Jenis Item",
+        "vehicle_brand":    "Merk Kendaraan",
+        "fluid_brand":      "Merk Fluida",
+        "viscosity_grade":  "Tingkat Kekentalan",
+        "reorder_cadence":  "Frekuensi Pengecekan",
+    }
+
+    # Maps a trackable choice field to the real TextChoices class
+    # that already defines its own labels (Part's own inner classes,
+    # defined above) — never a second, separately-maintained label
+    # table that could drift from the real choices.
+    _CHOICE_FIELDS = {
+        "item_type":        "ItemType",
+        "vehicle_brand":    "VehicleBrand",
+        "fluid_brand":      "FluidBrand",
+        "viscosity_grade":  "ViscosityGrade",
+        "reorder_cadence":  "ReorderCadence",
+    }
+
+    def _display_value(self, field_name, value):
+        choice_attr = self._CHOICE_FIELDS.get(field_name)
+        if choice_attr is not None:
+            choices_class = getattr(self.__class__, choice_attr)
+            return dict(choices_class.choices).get(value, value) or ""
+        return str(value) if value not in (None, "") else ""
+
+    def apply_edit(self, *, changed_by=None, **fields):
+        """
+        The one real edit path for Part — PartDetailView.put() is the
+        only real caller. Same real diff logic as Customer.
+        apply_edit()/Vehicle.apply_edit(): every field in `fields` is
+        compared against the CURRENT real value before anything is
+        written, only a genuine difference produces a
+        PartFieldChange row, and a field never mentioned at all is
+        left completely untouched.
+
+        Part.clean()'s own SPARE_PART/FLUID mutual-exclusivity
+        invariant is NOT re-checked here — PartSerializer.validate()
+        already calls it, on a real merged transient instance, BEFORE
+        serializer.is_valid() ever returns True — by the time this
+        method runs, `fields` is already guaranteed structurally
+        valid. Re-validating here would be a second copy of the same
+        check, not a real additional guarantee.
+
+        Raises ValueError for any field name outside FIELD_LABELS —
+        same fail-loud discipline as Customer/Vehicle's own
+        apply_edit().
+        """
+        changes = []
+        for field_name, new_value in fields.items():
+            if field_name not in self.FIELD_LABELS:
+                raise ValueError(f"Field tidak dikenal: {field_name!r}.")
+            old_value = getattr(self, field_name)
+            if old_value != new_value:
+                changes.append(PartFieldChange(
+                    organization=self.organization, part=self,
+                    field_name=field_name, field_label=self.FIELD_LABELS[field_name],
+                    old_value=self._display_value(field_name, old_value),
+                    new_value=self._display_value(field_name, new_value),
+                    changed_by=changed_by,
+                ))
+                setattr(self, field_name, new_value)
+
+        if changes:
+            self.save()
+            PartFieldChange.objects.bulk_create(changes)
+        return self
+
+
+class PartFieldChange(TenantScopedModel):
+    """
+    14 Sep 2026 — real, per-field audit trail for Part edits, same
+    shape and same real reasoning as CustomerFieldChange/
+    VehicleFieldChange (apps.service). Never itself editable after
+    creation — see the Admin lockdown (admin.py), same "an editable
+    audit trail is not a trustworthy audit trail" discipline as every
+    other real audit-adjacent model in this codebase.
+    """
+    id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    part = models.ForeignKey(
+        Part, on_delete=models.CASCADE, related_name="field_changes",
+        verbose_name="Part",
+    )
+    field_name  = models.CharField(max_length=50, verbose_name="Nama Field")
+    field_label = models.CharField(max_length=100, verbose_name="Label Field")
+    old_value   = models.TextField(blank=True, verbose_name="Nilai Lama")
+    new_value   = models.TextField(blank=True, verbose_name="Nilai Baru")
+    changed_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="Diubah Oleh",
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Part Field Change"
+        verbose_name_plural  = "Part Field Changes"
+        ordering             = ["-changed_at"]
+
+    def __str__(self):
+        return f"{self.part.name} — {self.field_label}: {self.old_value!r} -> {self.new_value!r}"
+
+    def _resolve_organization(self):
+        return self.part.organization
 
 class PartUsage(TenantScopedModel):
     """
