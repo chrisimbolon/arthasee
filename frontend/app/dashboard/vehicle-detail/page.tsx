@@ -61,10 +61,10 @@
 import { EstimateStatus, EstimateSummary, estimatesApi } from "@/lib/api/estimates";
 import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
 import { IncomingLetter, lettersApi } from "@/lib/api/letters";
-import { ServiceRecord, Vehicle, vehiclesApi } from "@/lib/api/service";
+import { ServiceRecord, Vehicle, VehicleEditPayload, VehicleFieldChange, vehiclesApi } from "@/lib/api/service";
 import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
 import { formatDateID } from "@/lib/format";
-import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Inbox, Loader2, Plus, Receipt, Trash2, Wrench } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Inbox, Loader2, Pencil, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -185,6 +185,202 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
     </div>
   );
 }
+
+function VehicleEditCard({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({
+    plate_number: vehicle.plate_number, vehicle_type: vehicle.vehicle_type,
+    model: vehicle.model, manufacture_year: vehicle.manufacture_year,
+    body_style: vehicle.body_style, color: vehicle.color,
+    chassis_number: vehicle.chassis_number, engine_number: vehicle.engine_number,
+    bpkb_number: vehicle.bpkb_number, registration_expiry: vehicle.registration_expiry ?? "",
+    current_odometer_km: vehicle.current_odometer_km,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function startEditing() {
+    setForm({
+      plate_number: vehicle.plate_number, vehicle_type: vehicle.vehicle_type,
+      model: vehicle.model, manufacture_year: vehicle.manufacture_year,
+      body_style: vehicle.body_style, color: vehicle.color,
+      chassis_number: vehicle.chassis_number, engine_number: vehicle.engine_number,
+      bpkb_number: vehicle.bpkb_number, registration_expiry: vehicle.registration_expiry ?? "",
+      current_odometer_km: vehicle.current_odometer_km,
+    });
+    setError(null);
+    setEditing(true);
+  }
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    const payload: VehicleEditPayload = form;
+    try {
+      await vehiclesApi.update(vehicle.id, payload);
+      setEditing(false);
+      onSaved();
+    } catch {
+      setError("Gagal menyimpan perubahan.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const displayFields = [
+    { label: "Nomor Plat", value: vehicle.plate_number },
+    { label: "Jenis Kendaraan", value: vehicle.vehicle_type },
+    { label: "Type/Model", value: vehicle.model },
+    { label: "Tahun Pembuatan", value: String(vehicle.manufacture_year) },
+    { label: "Jenis Bodi", value: vehicle.body_style },
+    { label: "Warna", value: vehicle.color },
+    { label: "No. Rangka", value: vehicle.chassis_number },
+    { label: "No. Mesin", value: vehicle.engine_number },
+    { label: "No. BPKB", value: vehicle.bpkb_number },
+    { label: "STNK Berlaku Sampai", value: vehicle.registration_expiry ?? "" },
+    { label: "KM Saat Ini", value: String(vehicle.current_odometer_km) },
+  ];
+
+  if (!editing) {
+    return (
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase" }}>Data Kendaraan</div>
+          <button onClick={startEditing} className="btn-ghost" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+            <Pencil size={13} /> Edit
+          </button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
+          {displayFields.map((f) => (
+            <div key={f.label}>
+              <div style={{ fontSize: 11.5, color: "var(--steel)" }}>{f.label}</div>
+              <div className="mono" style={{ fontSize: 13.5 }}>{f.value || "—"}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={handleSave} className="card" style={{ marginBottom: 24 }}>
+      <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 14 }}>Edit Data Kendaraan</div>
+      {error && (
+        <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>
+          {error}
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 14, marginBottom: 20 }}>
+        <div>
+          <label className="label">Nomor Plat</label>
+          <input className="input" value={form.plate_number} onChange={(e) => setForm({ ...form, plate_number: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">Jenis Kendaraan</label>
+          <input className="input" value={form.vehicle_type} onChange={(e) => setForm({ ...form, vehicle_type: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">Type/Model</label>
+          <input className="input" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">Tahun Pembuatan</label>
+          <input className="input" type="number" value={form.manufacture_year} onChange={(e) => setForm({ ...form, manufacture_year: Number(e.target.value) })} />
+        </div>
+        <div>
+          <label className="label">Jenis Bodi</label>
+          <input className="input" value={form.body_style} onChange={(e) => setForm({ ...form, body_style: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">Warna</label>
+          <input className="input" value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">No. Rangka</label>
+          <input className="input" value={form.chassis_number} onChange={(e) => setForm({ ...form, chassis_number: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">No. Mesin</label>
+          <input className="input" value={form.engine_number} onChange={(e) => setForm({ ...form, engine_number: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">No. BPKB</label>
+          <input className="input" value={form.bpkb_number} onChange={(e) => setForm({ ...form, bpkb_number: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">STNK Berlaku Sampai</label>
+          <input className="input" type="date" value={form.registration_expiry} onChange={(e) => setForm({ ...form, registration_expiry: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">KM Saat Ini</label>
+          <input className="input" type="number" value={form.current_odometer_km} onChange={(e) => setForm({ ...form, current_odometer_km: Number(e.target.value) })} />
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="btn-rust" type="submit" disabled={saving}>
+          {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Simpan"}
+        </button>
+        <button type="button" className="btn-ghost" disabled={saving} onClick={() => setEditing(false)}>
+          Batal
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function formatChangedAt(iso: string): string {
+  return new Date(iso).toLocaleString("id-ID", {
+    day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function VehicleHistorySection({ vehicleId }: { vehicleId: string }) {
+  const [changes, setChanges] = useState<VehicleFieldChange[] | null>(null);
+
+  useEffect(() => {
+    vehiclesApi.history(vehicleId).then(setChanges);
+  }, [vehicleId]);
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>Riwayat Perubahan</h2>
+      {changes === null ? (
+        <div style={{ color: "var(--steel)", fontSize: 13.5, display: "flex", alignItems: "center", gap: 8 }}>
+          <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> Memuat riwayat…
+        </div>
+      ) : changes.length === 0 ? (
+        <div className="card" style={{ color: "var(--steel)", fontSize: 13.5 }}>
+          Belum ada perubahan tercatat untuk kendaraan ini.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {changes.map((change) => (
+            <div key={change.id} className="card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{change.field_label}</span>
+                <span style={{ fontSize: 12, color: "var(--steel)" }}>{formatChangedAt(change.changed_at)}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13.5, marginBottom: 8, flexWrap: "wrap" }}>
+                <span style={{ color: "var(--danger)", textDecoration: "line-through" }}>
+                  {change.old_value || "(kosong)"}
+                </span>
+                <span style={{ color: "var(--steel)" }}>→</span>
+                <span style={{ color: "var(--workshop)", fontWeight: 600 }}>
+                  {change.new_value || "(kosong)"}
+                </span>
+              </div>
+              <div style={{ fontSize: 12, color: "var(--steel)" }}>
+                Diubah oleh {change.changed_by_name ?? "Sistem"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 const WO_STATUS_LABEL: Record<WorkOrderStatus, string> = {
   OPEN: "Terbuka", IN_PROGRESS: "Dikerjakan", QC: "Pemeriksaan Kualitas", DONE: "Selesai", CANCELLED: "Dibatalkan",
@@ -701,19 +897,9 @@ function VehicleDetailContent() {
         </div>
       </div>
 
-      {stnkFields.length > 0 && (
-        <div className="card" style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 10 }}>Detail STNK</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
-            {stnkFields.map((f) => (
-              <div key={f.label}>
-                <div style={{ fontSize: 11.5, color: "var(--steel)" }}>{f.label}</div>
-                <div className="mono" style={{ fontSize: 13.5 }}>{f.value}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <VehicleEditCard vehicle={vehicle} onSaved={load} />
+
+      <VehicleHistorySection vehicleId={vehicle.id} />
 
       <EstimatesSection
         vehicleId={vehicle.id}
