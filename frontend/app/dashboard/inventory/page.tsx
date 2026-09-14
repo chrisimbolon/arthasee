@@ -14,11 +14,13 @@ import {
   suppliersApi,
 } from "@/lib/api/purchasing";
 import {
-  FluidBrand, ItemType, Part, partsApi, ReorderCadence, StockAdjustment,
-  stockAdjustmentsApi, StockMovement, StockSummary, VehicleBrand, ViscosityGrade,
+  FluidBrand, ItemType, Part,
+  PartFieldChange,
+  partsApi, ReorderCadence, StockAdjustment,
+  stockAdjustmentsApi, StockMovement, StockSummary, VehicleBrand, ViscosityGrade
 } from "@/lib/api/service";
 import {
-  AlertTriangle, ClipboardList, Clock, Loader2, Package, Pencil, Plus, X,
+  AlertTriangle, ClipboardList, Clock, History, Loader2, Package, Pencil, Plus, X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
@@ -503,6 +505,61 @@ function MovementHistoryModal({ part, onClose }: { part: Part; onClose: () => vo
   );
 }
 
+function formatFieldChangeAt(iso: string): string {
+  return new Date(iso).toLocaleString("id-ID", {
+    day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function FieldChangeHistoryModal({ part, onClose }: { part: Part; onClose: () => void }) {
+  const [changes, setChanges] = useState<PartFieldChange[] | null>(null);
+
+  useEffect(() => {
+    partsApi.history(part.id).then(setChanges);
+  }, [part.id]);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,24,26,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+      <div className="card" style={{ width: 460, maxHeight: "78vh", overflowY: "auto", background: "var(--paper-3)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Riwayat Perubahan</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", display: "flex" }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 13, color: "var(--steel)", marginBottom: 18 }}>{part.name}</p>
+
+        {changes === null ? (
+          <div style={{ textAlign: "center", padding: 24 }}><Loader2 size={18} style={{ animation: "spin 1s linear infinite" }} /></div>
+        ) : changes.length === 0 ? (
+          <div style={{ textAlign: "center", padding: 24, color: "var(--steel)", fontSize: 13 }}>Belum ada perubahan tercatat.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {changes.map((change) => (
+              <div key={change.id} style={{ borderBottom: "1px solid var(--line)", paddingBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{change.field_label}</span>
+                  <span style={{ fontSize: 11, color: "var(--steel)" }}>{formatFieldChangeAt(change.changed_at)}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 6, flexWrap: "wrap" }}>
+                  <span style={{ color: "var(--danger)", textDecoration: "line-through" }}>
+                    {change.old_value || "(kosong)"}
+                  </span>
+                  <span style={{ color: "var(--steel)" }}>→</span>
+                  <span style={{ color: "var(--workshop)", fontWeight: 600 }}>
+                    {change.new_value || "(kosong)"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--steel)" }}>
+                  Diubah oleh {change.changed_by_name ?? "Sistem"}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Stock summary row — unchanged from Task 7.2 ────────────────────
 
 function StockSummaryRow({ data }: { data: StockSummary | null }) {
@@ -564,6 +621,7 @@ export default function InventoryPage() {
   const [editingPart, setEditingPart] = useState<Part | null>(null);
   const [adjustingPart, setAdjustingPart] = useState<Part | null>(null);
   const [historyPart, setHistoryPart] = useState<Part | null>(null);
+  const [fieldHistoryPart, setFieldHistoryPart] = useState<Part | null>(null);
 
   const CADENCE_TABS: { key: typeof activeTab; label: string }[] = [
     { key: "ALL", label: "Semua" },
@@ -690,6 +748,9 @@ export default function InventoryPage() {
                         <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 8px" }} onClick={() => setHistoryPart(p)} title="Riwayat Pergerakan">
                           <Clock size={13} />
                         </button>
+                        <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 8px" }} onClick={() => setFieldHistoryPart(p)} title="Riwayat Perubahan">
+                          <History size={13} />
+                        </button>
                         <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px" }} onClick={() => setAdjustingPart(p)}>
                           Sesuaikan Stok
                         </button>
@@ -736,6 +797,9 @@ export default function InventoryPage() {
       )}
       {historyPart && (
         <MovementHistoryModal part={historyPart} onClose={() => setHistoryPart(null)} />
+      )}
+      {fieldHistoryPart && (
+        <FieldChangeHistoryModal part={fieldHistoryPart} onClose={() => setFieldHistoryPart(null)} />
       )}
     </div>
   );
