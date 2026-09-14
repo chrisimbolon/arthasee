@@ -317,6 +317,119 @@ class Vehicle(TenantScopedModel):
         from datetime import date
         return date.today() >= _add_months(self.last_service_date, SERVICE_REMINDER_THRESHOLD_MONTHS)
 
+    # 14 Sep 2026 — real, dedicated field-change history, same shape
+    # as Customer.apply_edit()/CustomerFieldChange already established.
+    #
+    # Real, deliberate scope, confirmed directly before writing this:
+    #   - `customer` is EXCLUDED — reassigning a vehicle's owner is a
+    #     structural transfer, not a simple field correction; that
+    #     gets its own dedicated flow in a future phase, not folded
+    #     into a plain text-diff log. VehicleDetailView.put() (views.py)
+    #     enforces this at the API layer too — a payload containing
+    #     `customer` is rejected outright with a real, explicit
+    #     message, not a confusing generic "unknown field" error from
+    #     this method's own guard below.
+    #   - `last_service_date`/`last_service_odometer_km` are EXCLUDED
+    #     — both are strictly system-derived from a real, completed
+    #     ServiceRecord (see ServiceRecord.save() below, which writes
+    #     them directly, never through this method) and must never be
+    #     hand-editable at all.
+    #   - `current_odometer_km` IS included — a real, legitimate
+    #     "staff mis-typed the KM" correction case, distinct from the
+    #     two fields above which are meant to be purely automatic.
+    FIELD_LABELS = {
+        "plate_number":         "Nomor Plat",
+        "vehicle_type":         "Jenis Kendaraan",
+        "model":                "Type/Model",
+        "manufacture_year":     "Tahun Pembuatan",
+        "body_style":           "Jenis Bodi",
+        "color":                "Warna",
+        "chassis_number":       "No. Rangka",
+        "engine_number":        "No. Mesin",
+        "bpkb_number":          "No. BPKB",
+        "registration_expiry":  "STNK Berlaku Sampai",
+        "current_odometer_km":  "KM Saat Ini",
+    }
+
+    def apply_edit(self, *, changed_by=None, **fields):
+        """
+        The one real edit path for Vehicle — VehicleDetailView.put()
+        is the only real caller. Same real diff logic as Customer.
+        apply_edit(): every field in `fields` is compared against the
+        CURRENT real value before anything is written, only a genuine
+        difference produces a VehicleFieldChange row, and a field
+        never mentioned at all is left completely untouched.
+
+        Unlike Customer, several tracked fields here are non-string
+        (manufacture_year/current_odometer_km are int,
+        registration_expiry is a real date or None) — old_value/
+        new_value are stored as plain text either way, via a uniform
+        str()-or-empty conversion, not a per-field type branch.
+
+        Raises ValueError for any field name outside FIELD_LABELS —
+        same fail-loud discipline as Customer.apply_edit(). `customer`
+        specifically is blocked one layer up, in VehicleDetailView.
+        put() itself, with a real, explicit message — this method
+        would otherwise only ever produce a generic "Field tidak
+        dikenal" for it, which is correct but not the clearest thing
+        to show a real caller.
+        """
+        changes = []
+        for field_name, new_value in fields.items():
+            if field_name not in self.FIELD_LABELS:
+                raise ValueError(f"Field tidak dikenal: {field_name!r}.")
+            old_value = getattr(self, field_name)
+            if old_value != new_value:
+                changes.append(VehicleFieldChange(
+                    organization=self.organization, vehicle=self,
+                    field_name=field_name, field_label=self.FIELD_LABELS[field_name],
+                    old_value=str(old_value) if old_value not in (None, "") else "",
+                    new_value=str(new_value) if new_value not in (None, "") else "",
+                    changed_by=changed_by,
+                ))
+                setattr(self, field_name, new_value)
+
+        if changes:
+            self.save()
+            VehicleFieldChange.objects.bulk_create(changes)
+        return self
+
+
+class VehicleFieldChange(TenantScopedModel):
+    """
+    14 Sep 2026 — real, per-field audit trail for Vehicle edits, same
+    shape and same real reasoning as CustomerFieldChange. Never
+    itself editable after creation — see the Admin lockdown
+    (admin.py), same "an editable audit trail is not a trustworthy
+    audit trail" discipline as every other real audit-adjacent model
+    in this codebase.
+    """
+    id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vehicle = models.ForeignKey(
+        Vehicle, on_delete=models.CASCADE, related_name="field_changes",
+        verbose_name="Kendaraan",
+    )
+    field_name  = models.CharField(max_length=50, verbose_name="Nama Field")
+    field_label = models.CharField(max_length=100, verbose_name="Label Field")
+    old_value   = models.TextField(blank=True, verbose_name="Nilai Lama")
+    new_value   = models.TextField(blank=True, verbose_name="Nilai Baru")
+    changed_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="Diubah Oleh",
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Vehicle Field Change"
+        verbose_name_plural  = "Vehicle Field Changes"
+        ordering             = ["-changed_at"]
+
+    def __str__(self):
+        return f"{self.vehicle.plate_number} — {self.field_label}: {self.old_value!r} -> {self.new_value!r}"
+
+    def _resolve_organization(self):
+        return self.vehicle.organization
+
 
 class ServiceRecord(TenantScopedModel):
     """
