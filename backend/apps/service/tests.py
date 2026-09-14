@@ -17,7 +17,8 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import (Customer, CustomerFieldChange, ServiceRecord,
-                     ServiceReminderLog, Vehicle, _add_months)
+                     ServiceReminderLog, Vehicle, VehicleFieldChange,
+                     _add_months)
 
 
 class ServiceAPITestBase(APITestCase):
@@ -885,3 +886,164 @@ class CustomerHistoryAPITests(APITestCase):
         self.client.force_authenticate(user=other_owner)
         resp = self.client.get(f"/api/customers/{self.customer.id}/history/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+class VehicleApplyEditTests(TestCase):
+    """
+    14 Sep 2026 — real coverage for Vehicle.apply_edit() — same real
+    diff logic as Customer.apply_edit(), now proven against Vehicle's
+    own mixed field types (strings, an int, a date).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.vehiclehistory@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        self.customer = Customer.objects.create(organization=self.org, name="Yono")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2020, vehicle_type="Mobil", model="Honda Brio",
+            current_odometer_km=15000,
+        )
+
+    def test_real_change_creates_a_history_row(self):
+        self.vehicle.apply_edit(changed_by=self.owner, plate_number="BP 2 BB")
+        self.vehicle.refresh_from_db()
+        self.assertEqual(self.vehicle.plate_number, "BP 2 BB")
+        change = VehicleFieldChange.objects.get(vehicle=self.vehicle)
+        self.assertEqual(change.field_name, "plate_number")
+        self.assertEqual(change.old_value, "BP 1 AA")
+        self.assertEqual(change.new_value, "BP 2 BB")
+
+    def test_unchanged_value_creates_no_history_row(self):
+        self.vehicle.apply_edit(changed_by=self.owner, plate_number="BP 1 AA")
+        self.assertFalse(VehicleFieldChange.objects.filter(vehicle=self.vehicle).exists())
+
+    def test_integer_field_diffs_correctly(self):
+        """THE real proof for a non-string field — manufacture_year
+        is a real int, correctly compared and stringified."""
+        self.vehicle.apply_edit(changed_by=self.owner, manufacture_year=2021)
+        change = VehicleFieldChange.objects.get(vehicle=self.vehicle, field_name="manufacture_year")
+        self.assertEqual(change.old_value, "2020")
+        self.assertEqual(change.new_value, "2021")
+
+    def test_date_field_diffs_correctly_including_from_none(self):
+        """THE real proof for registration_expiry — a real nullable
+        DateField, starting genuinely unset (None)."""
+        from datetime import date
+        self.assertIsNone(self.vehicle.registration_expiry)
+        self.vehicle.apply_edit(changed_by=self.owner, registration_expiry=date(2027, 3, 15))
+        change = VehicleFieldChange.objects.get(vehicle=self.vehicle, field_name="registration_expiry")
+        self.assertEqual(change.old_value, "")
+        self.assertEqual(change.new_value, "2027-03-15")
+
+    def test_current_odometer_km_is_a_real_trackable_field(self):
+        """Real proof of the explicit design call — current_odometer_km
+        IS trackable (a legitimate "fix a KM typo" correction), unlike
+        last_service_date/last_service_odometer_km below."""
+        self.vehicle.apply_edit(changed_by=self.owner, current_odometer_km=15500)
+        change = VehicleFieldChange.objects.get(vehicle=self.vehicle, field_name="current_odometer_km")
+        self.assertEqual(change.old_value, "15000")
+        self.assertEqual(change.new_value, "15500")
+
+    def test_last_service_fields_are_not_trackable(self):
+        """THE real proof of the explicit exclusion — these two must
+        remain strictly system-derived, never hand-editable through
+        this mechanism at all."""
+        with self.assertRaises(ValueError):
+            self.vehicle.apply_edit(changed_by=self.owner, last_service_date="2026-01-01")
+        with self.assertRaises(ValueError):
+            self.vehicle.apply_edit(changed_by=self.owner, last_service_odometer_km=10000)
+
+    def test_customer_field_is_not_trackable(self):
+        """THE real proof of the ownership-transfer exclusion at the
+        model layer — a real ValueError, same as any other unknown
+        field. The friendlier, explicit message lives one layer up,
+        in VehicleDetailView.put() itself."""
+        other_customer = Customer.objects.create(organization=self.org, name="Budi")
+        with self.assertRaises(ValueError):
+            self.vehicle.apply_edit(changed_by=self.owner, customer=other_customer)
+
+    def test_multiple_fields_in_one_call_each_get_their_own_row(self):
+        self.vehicle.apply_edit(changed_by=self.owner, plate_number="BP 2 BB", color="Merah")
+        self.assertEqual(VehicleFieldChange.objects.filter(vehicle=self.vehicle).count(), 2)
+
+    def test_unknown_field_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.vehicle.apply_edit(changed_by=self.owner, not_a_real_field="x")
+
+
+class VehicleHistoryAPITests(APITestCase):
+    """
+    14 Sep 2026 — HTTP-level coverage: PUT creates history through
+    the real endpoint (including the real customer-reassignment
+    block), and GET .../history/ returns it correctly.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.vehiclehistoryapi@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Yono")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2020, vehicle_type="Mobil", model="Honda Brio",
+        )
+
+    def test_put_creates_a_real_history_row(self):
+        resp = self.client.put(f"/api/vehicles/{self.vehicle.id}/", {"color": "Merah"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(VehicleFieldChange.objects.filter(vehicle=self.vehicle, field_name="color").exists())
+
+    def test_put_with_customer_reassignment_rejected_with_real_message(self):
+        """THE real proof of the API-layer guard — a payload
+        containing `customer` is rejected outright, with the real,
+        explicit message, not silently applied and not a confusing
+        generic error."""
+        other_customer = Customer.objects.create(organization=self.org, name="Budi")
+        resp = self.client.put(
+            f"/api/vehicles/{self.vehicle.id}/", {"customer": str(other_customer.id)}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("transfer kendaraan", resp.data["message"])
+        self.vehicle.refresh_from_db()
+        self.assertEqual(self.vehicle.customer_id, self.customer.id)  # genuinely untouched
+
+    def test_history_endpoint_returns_real_changes_newest_first(self):
+        self.client.put(f"/api/vehicles/{self.vehicle.id}/", {"color": "Merah"}, format="json")
+        self.client.put(f"/api/vehicles/{self.vehicle.id}/", {"plate_number": "BP 2 BB"}, format="json")
+
+        resp = self.client.get(f"/api/vehicles/{self.vehicle.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        changes = resp.data["changes"]
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(changes[0]["field_name"], "plate_number")  # most recent first
+        self.assertEqual(changes[1]["field_name"], "color")
+
+    def test_history_returns_empty_list_for_a_never_edited_vehicle(self):
+        resp = self.client.get(f"/api/vehicles/{self.vehicle.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["changes"], [])
+
+    def test_history_returns_404_for_nonexistent_vehicle(self):
+        resp = self.client.get(f"/api/vehicles/{uuid.uuid4()}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_history_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Vehicle History")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.vehiclehistory@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+
+        self.client.put(f"/api/vehicles/{self.vehicle.id}/", {"color": "Merah"}, format="json")
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.get(f"/api/vehicles/{self.vehicle.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)        
