@@ -406,7 +406,24 @@ export const partsApi = {
     const { data } = await api.get(`/api/parts/${partId}/movements/`);
     return data.movements;
   },
+  // 14 Sep 2026 — real, read-only field-change history. Mirrors the
+  // backend's own PartFieldChangeSerializer shape exactly
+  // (apps/inventory/serializers.py).
+  async history(id: string): Promise<PartFieldChange[]> {
+    const { data } = await api.get(`/api/parts/${id}/history/`);
+    return data.changes;
+  },
 };
+
+export interface PartFieldChange {
+  id:               string;
+  field_name:       string;
+  field_label:      string;
+  old_value:        string;
+  new_value:        string;
+  changed_by_name:  string | null;
+  changed_at:       string;
+}
 
 export const partUsagesApi = {
   async list(serviceRecordId: string): Promise<PartUsage[]> {
