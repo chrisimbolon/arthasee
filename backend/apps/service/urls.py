@@ -4,7 +4,8 @@
 from django.urls import path
 
 from .views import (CustomerDetailView, CustomerHistoryView, CustomerListView,
-                    ServiceRecordListView, VehicleDetailView, VehicleListView)
+                    ServiceRecordListView, VehicleDetailView,
+                    VehicleHistoryView, VehicleListView)
 
 urlpatterns = [
     path("customers/",            CustomerListView.as_view(),   name="customer-list"),
@@ -13,6 +14,7 @@ urlpatterns = [
     path("customers/<uuid:pk>/history/", CustomerHistoryView.as_view(), name="customer-history"),
     path("vehicles/",             VehicleListView.as_view(),    name="vehicle-list"),
     path("vehicles/<uuid:pk>/",   VehicleDetailView.as_view(),  name="vehicle-detail"),
+    path("vehicles/<uuid:pk>/history/", VehicleHistoryView.as_view(), name="vehicle-history"),
 
     path("vehicles/<uuid:vehicle_id>/service-records/",
          ServiceRecordListView.as_view(), name="service-record-list"),
