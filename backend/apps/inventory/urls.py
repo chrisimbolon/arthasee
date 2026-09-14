@@ -1,9 +1,10 @@
 from apps.purchasing.views import SupplierPartCodeListCreateView
 from django.urls import path
 
-from .views import (PartDetailView, PartListView, PartMovementHistoryView,
-                    PartStockSummaryView, PartUsageListView,
-                    StockAdjustmentListView, StockOpnameSessionCompleteView,
+from .views import (PartDetailView, PartHistoryView, PartListView,
+                    PartMovementHistoryView, PartStockSummaryView,
+                    PartUsageListView, StockAdjustmentListView,
+                    StockOpnameSessionCompleteView,
                     StockOpnameSessionDetailView, StockOpnameSessionListView)
 
 urlpatterns = [
@@ -17,6 +18,7 @@ urlpatterns = [
 
     path("parts/",              PartListView.as_view(),   name="part-list"),
     path("parts/<uuid:pk>/",    PartDetailView.as_view(), name="part-detail"),
+    path("parts/<uuid:pk>/history/", PartHistoryView.as_view(), name="part-history"),
 
     path("parts/<uuid:part_id>/adjustments/",
          StockAdjustmentListView.as_view(), name="stock-adjustment-list"),
