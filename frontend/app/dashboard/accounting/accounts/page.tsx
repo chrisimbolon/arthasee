@@ -65,6 +65,8 @@ import {
   AccountRow,
   accountsApi,
   AccountSubtype,
+  controlAccountReconciliationApi,
+  ControlAccountReconciliationResult,
   TrialBalanceAccount,
 } from "@/lib/api/accounting";
 import { ChevronDown, ChevronRight, Loader2, Plus } from "lucide-react";
@@ -128,6 +130,59 @@ function formValuesFromAccount(a: AccountRow): AccountFormValues {
     account_subtype: a.account_subtype, is_contra: a.is_contra,
     is_control_account: a.is_control_account, parent: a.parent ?? "",
   };
+}
+
+function ReconciliationCheck({ accountCode }: { accountCode: string }) {
+  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [result, setResult] = useState<ControlAccountReconciliationResult | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function handleCheck() {
+    setChecking(true);
+    const data = await controlAccountReconciliationApi.check(accountCode, asOf);
+    setResult(data);
+    setChecking(false);
+  }
+
+  return (
+    <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
+      <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 10 }}>
+        Cek Rekonsiliasi
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: result ? 14 : 0 }}>
+        <div>
+          <label className="label">Per Tanggal</label>
+          <input type="date" className="input" value={asOf} onChange={(e) => setAsOf(e.target.value)} />
+        </div>
+        <button onClick={handleCheck} disabled={checking} className="btn-ghost">
+          {checking ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Cek Rekonsiliasi"}
+        </button>
+      </div>
+
+      {result && !result.success && (
+        <div style={{ fontSize: 13, color: "var(--danger)" }}>{result.message}</div>
+      )}
+
+      {result && result.success && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Saldo Buku Besar</div>
+            <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{formatRupiah(result.gl_balance ?? null)}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Total Sub-Ledger</div>
+            <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{formatRupiah(result.subledger_total ?? null)}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Status</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: result.is_reconciled ? "var(--workshop)" : "var(--danger)" }}>
+              {result.is_reconciled ? "Seimbang" : `Selisih ${formatRupiah(result.difference ?? null)}`}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function ChartOfAccountsPage() {
@@ -365,6 +420,7 @@ function EditPanelRow({
           onCancel={onCancel}
           onSaved={onSaved}
         />
+        {account.is_control_account && <ReconciliationCheck accountCode={account.code} />}
       </td>
     </tr>
   );
