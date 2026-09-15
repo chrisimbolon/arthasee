@@ -14,7 +14,7 @@ export interface InvoiceLineItem {
   subtotal:    string;
 }
 
-export type InvoiceStatus = "DRAFT" | "ISSUED" | "PAID" | "CANCELLED";
+export type InvoiceStatus = "DRAFT" | "ISSUED" | "PARTIALLY_PAID" | "PAID" | "CANCELLED";
 
 export interface Invoice {
   id:                     string;
@@ -39,7 +39,19 @@ export interface Invoice {
   mechanic_name_snapshot: string;
   status:                 InvoiceStatus;
   deposit_amount:         string;
-  line_items:             InvoiceLineItem[];
+  // 15 Sep 2026 -- real, deliberately nullable: no due date has been
+  // set for this invoice. Never appears alongside a "make this
+  // required" flow -- invoices created before this field existed,
+  // and any new invoice where a due date genuinely wasn't discussed
+  // at intake, both have this as null, honestly.
+  due_date:                string | null;
+  // A real, derived field from the backend (Invoice.is_overdue,
+  // models.py) -- never settable, never stored independently of
+  // due_date/status. True only when due_date is set, has passed, AND
+  // status is ISSUED or PARTIALLY_PAID -- a PAID or CANCELLED invoice
+  // is never "overdue" regardless of how late its due date was.
+  is_overdue:              boolean;
+  line_items:              InvoiceLineItem[];
   subtotal:               string;
   total:                  string;
   balance_due:            string;
