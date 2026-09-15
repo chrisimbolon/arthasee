@@ -176,7 +176,7 @@ export interface DashboardFinancialSummaryResponse {
 
 // Task 5.2 — new types for the journal viewer.
 
-export type JournalSource = "DOMAIN_EVENT" | "MANUAL";
+export type JournalSource = "DOMAIN_EVENT" | "MANUAL" | "CORRECTION";
 
 export interface JournalLineRow {
   id: string;
