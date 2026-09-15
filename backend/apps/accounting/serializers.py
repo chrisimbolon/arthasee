@@ -97,14 +97,30 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     """
     lines           = JournalLineSerializer(many=True, read_only=True)
     created_by_name = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+    # 15 Sep 2026 — real, previously-missing signal the Task 18.7
+    # correction UI needs to block a second correction attempt
+    # UPFRONT, rather than letting a real caller hit JournalEntry.
+    # correct()'s own double-reversal guard as a raw 400 error.
+    #
+    # `reverses` (models.py) is a plain ForeignKey, NOT OneToOne —
+    # its own reverse accessor `reversed_by` (related_name) is
+    # therefore a RelatedManager, never a single object. A naive
+    # `hasattr(obj, "reversed_by")` would be True unconditionally
+    # (the manager itself always exists) — the real check has to be
+    # `.exists()` against that manager's own queryset.
+    has_been_reversed = serializers.SerializerMethodField()
 
     class Meta:
         model  = JournalEntry
         fields = [
             "id", "entry_number", "posting_date", "source", "event_type",
-            "memo", "status", "created_by", "created_by_name", "created_at", "lines",
+            "memo", "status", "has_been_reversed",
+            "created_by", "created_by_name", "created_at", "lines",
         ]
         read_only_fields = fields
+
+    def get_has_been_reversed(self, obj):
+        return obj.reversed_by.exists()
 
 
 class FailedPostingSerializer(serializers.ModelSerializer):
