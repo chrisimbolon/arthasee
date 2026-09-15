@@ -942,7 +942,14 @@ class JournalEntryListView(TenantScopedAPIView):
         entries = self.get_queryset().prefetch_related("lines__account").select_related("created_by")
 
         source = request.query_params.get("source")
-        if source in (JournalEntry.Source.MANUAL, JournalEntry.Source.DOMAIN_EVENT):
+        # 15 Sep 2026 — real bug found live: CORRECTION (Task 18.7)
+        # was never added to this membership check when it was
+        # introduced, so ?source=CORRECTION silently fell through
+        # this `if` entirely and returned every entry, unfiltered —
+        # not a 400, not an empty result, just the wrong answer with
+        # no visible error. Found via the real Jurnal page's own new
+        # "Koreksi" filter tab returning the same list as "Semua".
+        if source in (JournalEntry.Source.MANUAL, JournalEntry.Source.DOMAIN_EVENT, JournalEntry.Source.CORRECTION):
             entries = entries.filter(source=source)
 
         since = request.query_params.get("since")
