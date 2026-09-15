@@ -4,7 +4,7 @@
 // =============================================================================
 import { useAuth } from "@/context/AuthContext";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Activity, Briefcase, Calculator, Calendar, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, ShoppingCart, TrendingUp, Users, Wrench } from "lucide-react";
+import { Activity, Briefcase, Calculator, Calendar, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Receipt, Settings, ShoppingCart, TrendingUp, Users, Wrench } from "lucide-react";
 // import { Activity, Briefcase, Car, LayoutDashboard, LogOut, Mail, Package, Phone, Settings, Users, Wrench } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -18,7 +18,14 @@ const NAV = [
   { href: "/dashboard/customers", icon: Users,            label: "Pelanggan" },
   { href: "/dashboard/vehicles",  icon: Car,              label: "Kendaraan" },
   { href: "/dashboard/inventory", icon: Package,          label: "Spare Parts & Fluids" },
-  { href: "/dashboard/purchasing/suppliers", icon: ShoppingCart, label: "Pembelian" },  
+  { href: "/dashboard/purchasing/suppliers", icon: ShoppingCart, label: "Pembelian" },
+  // 15 Sep 2026 -- real, previously-missing global invoice list.
+  // Top-level, not nested under Akuntansi -- Made's own confirmed
+  // reasoning: sales/invoicing is a primary daily front-desk
+  // operation in a real workshop, same operational-screen treatment
+  // Akuntansi's own comment above already establishes for financial
+  // reporting, not an occasional admin task.
+  { href: "/dashboard/invoices",  icon: Receipt,          label: "Penjualan" },    
   { href: "/dashboard/leads",     icon: Phone,            label: "Leads" },
   { href: "/dashboard/contracts", icon: Briefcase,        label: "Kontrak" },
   { href: "/dashboard/mechanics", icon: Wrench,           label: "Mekanik" },
