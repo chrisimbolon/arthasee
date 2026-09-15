@@ -5570,6 +5570,51 @@ class JournalEntryCorrectAPITests(APITestCase):
         resp = self._correct()
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+class JournalEntryHasBeenReversedSerializerTests(TestCase):
+    """
+    15 Sep 2026 — real coverage for JournalEntrySerializer's new
+    has_been_reversed field, added for the Task 18.7 correction UI's
+    own real need to block a second correction attempt upfront.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.cash = Account.objects.get(organization=self.org, code="1001")
+        self.revenue = Account.objects.get(organization=self.org, code="4001")
+        self.entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            memo="Test", lines=[
+                {"account": self.cash, "debit": Decimal("100000")},
+                {"account": self.revenue, "credit": Decimal("100000")},
+            ],
+        )
+
+    def test_never_reversed_entry_is_false(self):
+        from .serializers import JournalEntrySerializer
+        data = JournalEntrySerializer(self.entry).data
+        self.assertFalse(data["has_been_reversed"])
+
+    def test_reversed_entry_is_true(self):
+        """THE real proof of the fix — a plain hasattr() check would
+        have returned True unconditionally here regardless of this
+        reversal even existing, since `reversed_by` is a
+        RelatedManager, not a nullable single object."""
+        self.entry.reverse(posting_date=date.today(), memo="Pembalikan")
+        self.entry.refresh_from_db()
+        from .serializers import JournalEntrySerializer
+        data = JournalEntrySerializer(self.entry).data
+        self.assertTrue(data["has_been_reversed"])
+
+    def test_the_reversal_entry_itself_is_false(self):
+        """Real proof this isn't accidentally flipped for both sides
+        — the NEW reversal entry hasn't itself been reversed by
+        anything."""
+        reversal = self.entry.reverse(posting_date=date.today(), memo="Pembalikan")
+        from .serializers import JournalEntrySerializer
+        data = JournalEntrySerializer(reversal).data
+        self.assertFalse(data["has_been_reversed"])
+
 class ControlAccountDerivationTests(TestCase):
     """
     9 Sep 2026 — Phase 18, Task 18.1. Real coverage for the new
