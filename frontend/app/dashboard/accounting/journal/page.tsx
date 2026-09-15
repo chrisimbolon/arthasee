@@ -6,7 +6,7 @@ import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   accountingApi, FailedPosting, JournalEntryRow, JournalSource,
 } from "@/lib/api/accounting";
-import { ChevronDown, ChevronRight, Loader2, Plus, TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
 
@@ -92,11 +92,33 @@ function JournalEntriesTable({
                       ))}
                     </tbody>
                   </table>
-                  {e.created_by_name && (
-                    <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 8 }}>
-                      Dibuat oleh {e.created_by_name}
-                    </div>
-                  )}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+                    {e.created_by_name && (
+                      <div style={{ fontSize: 12, color: "var(--steel)" }}>
+                        Dibuat oleh {e.created_by_name}
+                      </div>
+                    )}
+                    {/* 15 Sep 2026 — Phase 18, Task 18.7. Shown for
+                        every entry regardless of role — same real
+                        convention this page's own "+ Jurnal Manual"
+                        button already follows (unconditional here,
+                        gated on the destination page instead). A
+                        DOMAIN_EVENT entry can be corrected the same
+                        real way a MANUAL one can — JournalEntry.
+                        correct() itself has no source restriction,
+                        only the immutability/period/double-reversal
+                        guardrails. */}
+                    {e.has_been_reversed ? (
+                      <span style={{ fontSize: 12, color: "var(--steel)" }}>Sudah dikoreksi</span>
+                    ) : (
+                      <Link
+                        href={`/dashboard/accounting/journal-correct?id=${e.id}`}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--rust)", textDecoration: "none" }}
+                      >
+                        <Pencil size={11} /> Koreksi Entri
+                      </Link>
+                    )}
+                  </div>
                 </td>
               </tr>
             )}
