@@ -27,7 +27,26 @@ const SOURCE_TABS: { id: SourceFilter; label: string }[] = [
   { id: "ALL", label: "Semua" },
   { id: "DOMAIN_EVENT", label: "Otomatis" },
   { id: "MANUAL", label: "Manual" },
+  { id: "CORRECTION", label: "Koreksi" },  
 ];
+
+// 15 Sep 2026 -- real gap found live: this page's own Sumber column
+// used to be a plain binary `e.source === "MANUAL" ? "Manual" :
+// "Otomatis"` -- CORRECTION (Task 18.7) silently fell into the
+// "Otomatis" bucket, misleadingly implying the SYSTEM created a
+// correction an owner deliberately triggered. A shared function here
+// so the table cell and any future caller can't drift apart on what
+// each real source value is called.
+function sourceLabel(source: JournalSource): string {
+  switch (source) {
+    case "MANUAL":
+      return "Manual";
+    case "CORRECTION":
+      return "Koreksi";
+    default:
+      return "Otomatis";
+  }
+}
 
 function JournalEntriesTable({
   entries, expanded, onToggle,
@@ -59,7 +78,7 @@ function JournalEntriesTable({
               <td>{expanded.has(e.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</td>
               <td className="mono">{e.entry_number}</td>
               <td>{e.posting_date}</td>
-              <td style={{ fontSize: 13 }}>{e.source === "MANUAL" ? "Manual" : "Otomatis"}</td>
+              <td style={{ fontSize: 13 }}>{sourceLabel(e.source)}</td>
               <td style={{ fontSize: 13, color: "var(--steel)" }}>{e.event_type || "—"}</td>
               <td style={{ fontSize: 13, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {e.memo}
