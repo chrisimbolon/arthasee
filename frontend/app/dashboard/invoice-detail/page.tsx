@@ -24,10 +24,10 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
 const STATUS_LABEL: Record<InvoiceStatus, string> = {
-  DRAFT: "Draf", ISSUED: "Diterbitkan", PAID: "Lunas", CANCELLED: "Dibatalkan",
+  DRAFT: "Draf", ISSUED: "Diterbitkan", PARTIALLY_PAID: "Dibayar Sebagian", PAID: "Lunas", CANCELLED: "Dibatalkan",
 };
 const STATUS_COLOR: Record<InvoiceStatus, string> = {
-  DRAFT: "var(--steel)", ISSUED: "var(--rust)", PAID: "#2e7d4f", CANCELLED: "var(--danger)",
+  DRAFT: "var(--steel)", ISSUED: "var(--rust)", PARTIALLY_PAID: "var(--hazard-dark)", PAID: "#2e7d4f", CANCELLED: "var(--danger)",
 };
 // Mirrors backend/apps/payments/models.py's own METHOD_CHOICES
 // exactly — keep in sync if that list ever changes.
@@ -261,6 +261,24 @@ function InvoiceDetailContent() {
             <span style={{ display: "inline-block", marginTop: 8, fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: STATUS_COLOR[invoice.status] }}>
               {STATUS_LABEL[invoice.status]}
             </span>
+            {/* 15 Sep 2026 -- is_overdue is a real, derived backend
+                field (Invoice.is_overdue) -- only ever true when
+                due_date is set, has passed, AND status is ISSUED or
+                PARTIALLY_PAID. Rendered as its own, separate badge
+                rather than folded into STATUS_COLOR/STATUS_LABEL --
+                an invoice being overdue is a real, independent fact
+                about it, not a competing status value; the two can
+                and do co-occur (partially paid AND overdue at once). */}
+            {invoice.is_overdue && (
+              <span style={{ display: "inline-block", marginTop: 6, marginLeft: 6, fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: "var(--danger)" }}>
+                Telat Bayar
+              </span>
+            )}
+            {invoice.due_date && (
+              <div style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 6 }}>
+                Jatuh Tempo: {new Date(invoice.due_date).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" })}
+              </div>
+            )}
           </div>
         </div>
 
@@ -428,7 +446,7 @@ function InvoiceDetailContent() {
           defaults to the full remaining balance (see openPaymentForm)
           so the common "pay it all off" case is still a two-click
           action (open, then Simpan), not a burdensome form fill. */}
-      {showPaymentForm && invoice.status === "ISSUED" && (
+      {showPaymentForm && (invoice.status === "ISSUED" || invoice.status === "PARTIALLY_PAID") && (
         <div className="no-print card" style={{ maxWidth: 720, margin: "18px auto 0", padding: 20 }}>
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Catat Pembayaran</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
@@ -480,17 +498,30 @@ function InvoiceDetailContent() {
         {invoice.status === "DRAFT" && (
           <button className="btn-rust" disabled={updating} onClick={() => changeStatus("ISSUED")}>Terbitkan Invoice</button>
         )}
-        {invoice.status === "ISSUED" && !showPaymentForm && (
+        {(invoice.status === "ISSUED" || invoice.status === "PARTIALLY_PAID") && !showPaymentForm && (
           <button className="btn-rust" disabled={updating} onClick={openPaymentForm}>Catat Pembayaran</button>
         )}
-        {(invoice.status === "DRAFT" || invoice.status === "ISSUED") && (
+        {/* 15 Sep 2026 -- PARTIALLY_PAID joins this gate too, but a
+            partially-paid invoice always has payments.length > 0 by
+            definition (that's how it got there), so this button will
+            always render disabled for it -- surfacing the real,
+            known gap flagged during the backend design: a
+            PARTIALLY_PAID invoice with payments can currently be
+            cancelled through no real path (Refund.record() requires
+            status=="PAID" exactly; this endpoint's own backend guard
+            blocks CANCELLED whenever payments exist). Showing the
+            disabled button with its own real, accurate title is more
+            honest than hiding the whole capability -- it tells Made
+            why, rather than making it look like cancellation was
+            never a consideration for this status at all. */}
+        {(invoice.status === "DRAFT" || invoice.status === "ISSUED" || invoice.status === "PARTIALLY_PAID") && (
           <button
             className="btn-ghost" disabled={updating || payments.length > 0}
             onClick={() => changeStatus("CANCELLED")}
             // Proactive disable, mirroring the same "backend is the
             // real enforcement, frontend just disables proactively"
             // split already established elsewhere in this app (see
-            // WorkOrderJobTicketPdfView's own docstring) — the
+            // WorkOrderJobTicketPdfView's own docstring) -- the
             // backend's own 409 guard on InvoiceStatusUpdateView is
             // what actually stops this, this is just the UI signal.
             title={payments.length > 0 ? "Invoice ini sudah memiliki pembayaran tercatat — tidak bisa dibatalkan langsung." : undefined}
