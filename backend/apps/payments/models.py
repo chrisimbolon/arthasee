@@ -150,11 +150,19 @@ class Payment(TenantScopedModel):
             from apps.invoicing.models import Invoice
             locked_invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
 
-            if locked_invoice.status != "ISSUED":
+            # 15 Sep 2026 — real fix: a second (or third...) partial
+            # payment must still be accepted once the invoice has
+            # already moved to PARTIALLY_PAID from an earlier one —
+            # the exact real "deposit now, balance later" case this
+            # whole method already existed to support. Before this
+            # fix, introducing PARTIALLY_PAID at all would have
+            # accidentally BLOCKED every payment after the first
+            # partial one, since this check only ever accepted ISSUED.
+            if locked_invoice.status not in ("ISSUED", "PARTIALLY_PAID"):
                 raise ValueError(
                     f"Tidak bisa mencatat pembayaran untuk invoice berstatus "
                     f"'{locked_invoice.get_status_display()}' — invoice harus "
-                    f"berstatus 'Diterbitkan' terlebih dahulu."
+                    f"berstatus 'Diterbitkan' atau 'Dibayar Sebagian' terlebih dahulu."
                 )
             if amount > locked_invoice.balance_due:
                 raise ValueError(
@@ -217,8 +225,22 @@ class Payment(TenantScopedModel):
             # fresh — the just-created row above is already visible
             # within this same transaction (read-your-own-writes),
             # so this correctly reflects the real, post-payment state.
+            #
+            # 15 Sep 2026 — real, single derivation replacing the old
+            # PAID-only branch: every payment now recomputes the
+            # CORRECT target status from the real, current
+            # balance_due, rather than only ever handling the
+            # fully-settled case and silently leaving a genuine
+            # partial payment's status untouched. A no-op when the
+            # invoice is already at its correct target status (e.g. a
+            # second partial payment that still doesn't clear the
+            # balance) — never a redundant write.
             if locked_invoice.balance_due <= Decimal("0"):
-                locked_invoice.status = "PAID"
+                new_invoice_status = "PAID"
+            else:
+                new_invoice_status = "PARTIALLY_PAID"
+            if locked_invoice.status != new_invoice_status:
+                locked_invoice.status = new_invoice_status
                 locked_invoice.save(update_fields=["status"])
 
         return payment
