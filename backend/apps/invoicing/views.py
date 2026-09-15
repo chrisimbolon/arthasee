@@ -6,6 +6,7 @@ from decimal import Decimal
 from apps.core.views import TenantScopedAPIView
 from apps.service.models import ServiceRecord
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.response import Response
@@ -14,6 +15,75 @@ from .models import Invoice, InvoiceLineItem
 from .pdf import build_invoice_pdf
 from .serializers import InvoiceSerializer
 
+
+class InvoiceListView(TenantScopedAPIView):
+    """
+    GET /api/invoices/?status=&overdue=true&search=
+
+    15 Sep 2026 — real, previously-missing global invoice list. Every
+    other real invoice-facing surface in this app (Riwayat Servis on
+    vehicle-detail, a Work Order's own linked invoice) only ever
+    shows ONE invoice at a time, tied to its own real ServiceRecord —
+    this is the first real "every invoice for this shop" view, the
+    real backend this whole feature needed before any frontend list
+    page could exist.
+
+    Deliberately NO pagination in v1 — matches the established
+    convention every other list view in this codebase already
+    follows (JournalEntryListView, PartListView, CustomerListView,
+    etc., none of which paginate) — a deliberate future addition if
+    invoice volume ever makes it a real problem, not guessed at now.
+
+    `overdue=true` is a real, independent filter, never folded into
+    `status` — mirrors Invoice.is_overdue's own real design (models.py):
+    an invoice can be BOTH PARTIALLY_PAID and overdue at once, a
+    combination a single status filter can't express. Applied in
+    Python, not as a queryset filter — is_overdue is a computed
+    property, not a real DB column, same "small per-shop list,
+    simpler than a queryset annotation" reasoning
+    PartListView.get()'s own low_stock filter already uses for its
+    own computed properties.
+
+    `search` matches customer name, plate number, or invoice number
+    — the three real things a front-desk staffer would actually
+    search by, mirroring the exact fields already frozen as
+    snapshots on Invoice itself (customer_name_snapshot,
+    license_plate_snapshot) plus the invoice's own real number.
+    """
+    model = Invoice
+
+    def get(self, request):
+        invoices = (
+            self.get_queryset()
+            .select_related("created_by")
+            .prefetch_related("line_items", "payments")
+        )
+
+        status_filter = request.query_params.get("status")
+        if status_filter in dict(Invoice.STATUS_CHOICES):
+            invoices = invoices.filter(status=status_filter)
+
+        search = request.query_params.get("search")
+        if search:
+            invoices = invoices.filter(
+                Q(customer_name_snapshot__icontains=search)
+                | Q(license_plate_snapshot__icontains=search)
+                | Q(number__icontains=search)
+            )
+
+        invoices = invoices.order_by("-created_at")
+
+        # is_overdue is a real Python property, not filterable at the
+        # DB layer — evaluated here, after every real DB-level filter
+        # above has already narrowed the queryset down.
+        if request.query_params.get("overdue") == "true":
+            invoices = [inv for inv in invoices if inv.is_overdue]
+
+        return Response({
+            "success": True,
+            "count": len(invoices),
+            "invoices": InvoiceSerializer(invoices, many=True).data,
+        })
 
 class InvoiceCreateView(TenantScopedAPIView):
     """
