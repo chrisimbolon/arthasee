@@ -187,11 +187,19 @@ class PaymentRecordingTests(PaymentsAPITestBase):
         self.assertEqual(invoice.status, "PAID")
         self.assertEqual(invoice.balance_due, Decimal("0.00"))
 
-    def test_partial_payment_keeps_invoice_issued(self):
+    def test_partial_payment_sets_invoice_partially_paid(self):
+        """
+        15 Sep 2026 — renamed and re-asserted: a partial payment now
+        correctly moves the invoice to PARTIALLY_PAID (a real status
+        that didn't exist when this test was first written, when
+        "stays ISSUED" was the only honest thing to assert). This is
+        THE real proof of the new status-derivation logic in Payment.
+        record() itself.
+        """
         resp = self._pay(100000)
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         invoice = Invoice.objects.get(id=self.invoice_id)
-        self.assertEqual(invoice.status, "ISSUED")
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")
         self.assertEqual(invoice.balance_due, Decimal("150000.00"))
 
     def test_two_partial_payments_together_complete_the_balance(self):
@@ -204,7 +212,7 @@ class PaymentRecordingTests(PaymentsAPITestBase):
         first = self._pay(100000)
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
         invoice = Invoice.objects.get(id=self.invoice_id)
-        self.assertEqual(invoice.status, "ISSUED")
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")
 
         second = self._pay(150000)
         self.assertEqual(second.status_code, status.HTTP_201_CREATED)
@@ -286,6 +294,66 @@ class PaymentRecordingTests(PaymentsAPITestBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+class PartiallyPaidStatusTests(PaymentsAPITestBase):
+    """
+    15 Sep 2026 — real, dedicated coverage for the PARTIALLY_PAID
+    status itself: the payment-guard fix that lets a SECOND payment
+    land on an already-partially-paid invoice (the actual bug that
+    would have existed if PARTIALLY_PAID were introduced without
+    also widening Payment.record()'s own status check), and the
+    manual-PATCH rejection mirroring PAID's own existing treatment.
+    """
+
+    def test_second_payment_on_partially_paid_invoice_succeeds(self):
+        """
+        THE real proof of the guard fix — without it, this second
+        call would incorrectly raise ValueError, since the OLD guard
+        only ever accepted status=="ISSUED", and the first payment
+        above already moved the invoice to PARTIALLY_PAID.
+        """
+        first = self._pay(100000)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self._pay(150000)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PAID")
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 2)
+
+    def test_third_payment_that_still_does_not_clear_balance_stays_partially_paid(self):
+        """Real proof the status re-derivation is a genuine no-op
+        when the invoice is already at the correct target status —
+        not just correct on the FIRST transition into PARTIALLY_PAID."""
+        self._pay(50000)
+        resp = self._pay(50000)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")
+        self.assertEqual(invoice.balance_due, Decimal("150000.00"))
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 2)
+
+    def test_manual_status_partially_paid_rejected(self):
+        """Same real treatment PAID already gets — PARTIALLY_PAID
+        must never be settable via a human's PATCH, only ever derived
+        by Payment.record() itself."""
+        resp = self.client.patch(
+            f"/api/invoices/{self.invoice_id}/status/", {"status": "PARTIALLY_PAID"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "ISSUED")  # unchanged by the rejected attempt
+
+    def test_overpayment_still_rejected_against_a_partially_paid_invoice(self):
+        """Regression proof — the widened status guard must not
+        accidentally loosen the existing overpayment check."""
+        self._pay(100000)
+        resp = self._pay(999999)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")  # unchanged by the rejected attempt
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 1)
 
 class PaymentPeriodLockTests(PaymentsAPITestBase):
     """

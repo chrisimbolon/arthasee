@@ -2,6 +2,7 @@
 # === backend/apps/invoicing/tests.py ===
 # =============================================================================
 import uuid
+from datetime import date, timedelta
 from decimal import Decimal
 
 from apps.accounting import cancellations
@@ -952,3 +953,82 @@ class InvoiceLineItemNegativeAmountTests(InvoicingAPITestBase):
             format="json",
         )
         self.assertLess(resp.status_code, 500)
+
+class InvoiceDueDateCreationTests(InvoicingAPITestBase):
+    """
+    15 Sep 2026 — real coverage for the new, optional due_date passed
+    at invoice-creation time.
+    """
+
+    def test_due_date_can_be_set_at_creation(self):
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"due_date": "2026-10-01"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        invoice = Invoice.objects.get(id=resp.data["invoice"]["id"])
+        self.assertEqual(invoice.due_date, date(2026, 10, 1))
+
+    def test_due_date_defaults_to_none_when_omitted(self):
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=resp.data["invoice"]["id"])
+        self.assertIsNone(invoice.due_date)
+
+
+class InvoiceIsOverdueTests(InvoicingAPITestBase):
+    """
+    15 Sep 2026 — real, direct model-layer coverage for Invoice.
+    is_overdue — a derived property, not a status value, so tested
+    directly against real Invoice rows in every real status
+    combination it has to distinguish.
+    """
+
+    def _invoice(self, *, due_date=None, status_value="ISSUED"):
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json",
+        )
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        invoice.due_date = due_date
+        invoice.status = status_value
+        invoice.save(update_fields=["due_date", "status"])
+        return invoice
+
+    def test_no_due_date_is_never_overdue(self):
+        invoice = self._invoice(due_date=None, status_value="ISSUED")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_future_due_date_is_not_overdue(self):
+        invoice = self._invoice(due_date=date.today() + timedelta(days=7), status_value="ISSUED")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_past_due_date_on_issued_invoice_is_overdue(self):
+        invoice = self._invoice(due_date=date.today() - timedelta(days=1), status_value="ISSUED")
+        self.assertTrue(invoice.is_overdue)
+
+    def test_past_due_date_on_partially_paid_invoice_is_overdue(self):
+        """THE real proof an invoice can be both partially paid AND
+        overdue at once — the actual reason this is a derived
+        property, not a competing status value."""
+        invoice = self._invoice(due_date=date.today() - timedelta(days=1), status_value="PARTIALLY_PAID")
+        self.assertTrue(invoice.is_overdue)
+
+    def test_past_due_date_on_paid_invoice_is_not_overdue(self):
+        """A fully-settled invoice is never 'late,' no matter how
+        overdue the original due date was — it's already paid."""
+        invoice = self._invoice(due_date=date.today() - timedelta(days=30), status_value="PAID")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_past_due_date_on_cancelled_invoice_is_not_overdue(self):
+        invoice = self._invoice(due_date=date.today() - timedelta(days=30), status_value="CANCELLED")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_past_due_date_on_draft_invoice_is_not_overdue(self):
+        """Never issued yet — 'late' doesn't honestly apply."""
+        invoice = self._invoice(due_date=date.today() - timedelta(days=30), status_value="DRAFT")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_due_date_exactly_today_is_not_yet_overdue(self):
+        """A real boundary check — due TODAY is not yet late; it
+        becomes overdue starting tomorrow, not the day it's due."""
+        invoice = self._invoice(due_date=date.today(), status_value="ISSUED")
+        self.assertFalse(invoice.is_overdue)
