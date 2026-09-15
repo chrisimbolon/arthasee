@@ -195,10 +195,28 @@ export interface JournalEntryRow {
   event_type: string;
   memo: string;
   status: string;
+  // 15 Sep 2026 — Task 18.7 correction UI's own real need: lets the
+  // frontend block a second correction attempt UPFRONT, rather than
+  // letting a real caller hit JournalEntry.correct()'s own
+  // double-reversal guard as a raw 400.
+  has_been_reversed: boolean;
   created_by: string | null;
   created_by_name: string | null;
   created_at: string;
   lines: JournalLineRow[];
+}
+
+export interface JournalLineInput {
+  account_code: string;
+  debit?:  string;
+  credit?: string;
+}
+
+export interface JournalEntryCorrectResult {
+  success:     boolean;
+  message?:    string;
+  reversal?:   JournalEntryRow;
+  correction?: JournalEntryRow;
 }
 
 export interface FailedPosting {
@@ -389,6 +407,22 @@ export const accountingApi = {
       return data.journal_entry;
     } catch {
       return null;
+    }
+  },
+
+  // 15 Sep 2026 — Phase 18, Task 18.7's own real frontend. Real,
+  // deliberate result-with-message-on-failure shape, not null-on-
+  // failure — a real 400 here (double-reversal, an unbalanced
+  // correction, a closed-period edge case) is a real, explainable
+  // problem the UI must surface, not silently swallow.
+  async correctJournalEntry(
+    id: string, payload: { posting_date: string; reason: string; lines: JournalLineInput[] },
+  ): Promise<JournalEntryCorrectResult> {
+    try {
+      const { data } = await api.post(`/api/accounting/journal-entries/${id}/correct/`, payload);
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal membuat koreksi.") };
     }
   },
 
