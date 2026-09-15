@@ -73,6 +73,21 @@ export const invoicesApi = {
     });
     return data.invoice;
   },
+  // 15 Sep 2026 -- real, previously-missing global invoice list.
+  // Server-side filtering (status/overdue/search) -- no client-side
+  // filtering fallback, since this is a real, potentially large,
+  // shop-wide list, unlike a small per-org list like customersApi's
+  // own client-side name filter.
+  async list(opts?: { status?: InvoiceStatus; overdue?: boolean; search?: string }): Promise<Invoice[]> {
+    const { data } = await api.get("/api/invoices/", {
+      params: {
+        status: opts?.status,
+        overdue: opts?.overdue ? "true" : undefined,
+        search: opts?.search || undefined,
+      },
+    });
+    return data.invoices;
+  },
   async get(id: string): Promise<Invoice> {
     const { data } = await api.get(`/api/invoices/${id}/`);
     return data.invoice;
