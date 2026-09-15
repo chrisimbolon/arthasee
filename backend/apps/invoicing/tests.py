@@ -1032,3 +1032,136 @@ class InvoiceIsOverdueTests(InvoicingAPITestBase):
         becomes overdue starting tomorrow, not the day it's due."""
         invoice = self._invoice(due_date=date.today(), status_value="ISSUED")
         self.assertFalse(invoice.is_overdue)
+
+class InvoiceListTests(InvoicingAPITestBase):
+    """
+    15 Sep 2026 — real coverage for the new, previously-missing
+    global invoice list endpoint (GET /api/invoices/).
+    """
+
+    def _create_invoice(self, plate, *, labor_total=100000):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number=plate, manufacture_year=2022,
+            vehicle_type="Mobil", model="Honda Brio",
+        )
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=vehicle, assigned_to=self.mechanic,
+        )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order,
+            description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        record = work_order.close(closed_by=self.owner)
+        create = self.client.post(
+            f"/api/service-records/{record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa", "quantity": 1, "unit_price": labor_total}]},
+            format="json",
+        )
+        return create.data["invoice"]["id"]
+
+    def test_lists_every_invoice_for_the_org(self):
+        self._create_invoice("BP 5001 AA")
+        self._create_invoice("BP 5002 AA")
+        resp = self.client.get("/api/invoices/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 2)
+
+    def test_filters_by_status(self):
+        draft_id = self._create_invoice("BP 5003 AA")
+        issued_id = self._create_invoice("BP 5004 AA")
+        self.client.patch(f"/api/invoices/{issued_id}/status/", {"status": "ISSUED"}, format="json")
+
+        resp = self.client.get("/api/invoices/?status=ISSUED")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        returned_ids = {inv["id"] for inv in resp.data["invoices"]}
+        self.assertEqual(returned_ids, {issued_id})
+
+    def test_invalid_status_filter_is_ignored_not_rejected(self):
+        """A real, deliberate choice — an unrecognized status value
+        just yields the unfiltered list, same harmless behavior as
+        every other plain-equality filter already in this codebase
+        (e.g. CustomerListView's own ?customer_type= filter)."""
+        self._create_invoice("BP 5005 AA")
+        resp = self.client.get("/api/invoices/?status=NOT_A_REAL_STATUS")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_customer_name(self):
+        self._create_invoice("BP 5006 AA")  # self.customer is "Brian Sira"
+        resp = self.client.get("/api/invoices/?search=Brian")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_plate_number(self):
+        self._create_invoice("BP 5007 ZZ")
+        resp = self.client.get("/api/invoices/?search=5007")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_invoice_number(self):
+        invoice_id = self._create_invoice("BP 5008 AA")
+        invoice = Invoice.objects.get(id=invoice_id)
+        resp = self.client.get(f"/api/invoices/?search={invoice.number}")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_with_no_match_returns_empty_not_error(self):
+        self._create_invoice("BP 5009 AA")
+        resp = self.client.get("/api/invoices/?search=SomethingThatDoesNotExist")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_overdue_filter_excludes_non_overdue_invoices(self):
+        overdue_id = self._create_invoice("BP 5010 AA")
+        not_overdue_id = self._create_invoice("BP 5011 AA")
+
+        overdue_invoice = Invoice.objects.get(id=overdue_id)
+        overdue_invoice.status = "ISSUED"
+        overdue_invoice.due_date = date.today() - timedelta(days=5)
+        overdue_invoice.save(update_fields=["status", "due_date"])
+
+        not_overdue_invoice = Invoice.objects.get(id=not_overdue_id)
+        not_overdue_invoice.status = "ISSUED"
+        not_overdue_invoice.due_date = date.today() + timedelta(days=5)
+        not_overdue_invoice.save(update_fields=["status", "due_date"])
+
+        resp = self.client.get("/api/invoices/?overdue=true")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        returned_ids = {inv["id"] for inv in resp.data["invoices"]}
+        self.assertEqual(returned_ids, {overdue_id})
+
+    def test_overdue_filter_combines_with_status_filter(self):
+        """Real proof the two real filters compose correctly — a
+        PARTIALLY_PAID+overdue invoice found by BOTH filters at once,
+        not just each independently."""
+        invoice_id = self._create_invoice("BP 5012 AA")
+        invoice = Invoice.objects.get(id=invoice_id)
+        invoice.status = "PARTIALLY_PAID"
+        invoice.due_date = date.today() - timedelta(days=1)
+        invoice.save(update_fields=["status", "due_date"])
+
+        resp = self.client.get("/api/invoices/?status=PARTIALLY_PAID&overdue=true")
+        self.assertEqual(resp.data["count"], 1)
+
+        resp_wrong_status = self.client.get("/api/invoices/?status=PAID&overdue=true")
+        self.assertEqual(resp_wrong_status.data["count"], 0)
+
+    def test_org_b_cannot_see_org_a_invoices_in_the_list(self):
+        self._create_invoice("BP 5013 AA")
+        # InvoicingAPITestBase itself has no other_owner — build one
+        # locally, same self-contained pattern already established
+        # elsewhere in this file (e.g. InvoiceNumberingTests.
+        # test_sequence_is_scoped_per_organization).
+        other_org = Organization.objects.create(name="Bengkel Lain Invoice List")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherinvoicelist@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/invoices/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 0)
