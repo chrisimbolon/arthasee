@@ -5615,6 +5615,61 @@ class JournalEntryHasBeenReversedSerializerTests(TestCase):
         data = JournalEntrySerializer(reversal).data
         self.assertFalse(data["has_been_reversed"])
 
+class JournalEntryListSourceFilterTests(APITestCase):
+    """
+    15 Sep 2026 — real regression test for a real bug found live:
+    JournalEntryListView's own ?source= filter never included
+    CORRECTION in its membership check, so a request for
+    ?source=CORRECTION silently returned every entry, unfiltered,
+    with no error at all.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.sourcefilter@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+        cash = Account.objects.get(organization=self.org, code="1001")
+        revenue = Account.objects.get(organization=self.org, code="4001")
+        manual_entry = JournalEntry.post(
+            organization=self.org, posting_date=date.today(), source=JournalEntry.Source.MANUAL,
+            memo="Manual test", lines=[
+                {"account": cash, "debit": Decimal("50000")},
+                {"account": revenue, "credit": Decimal("50000")},
+            ],
+        )
+        JournalEntry.correct(
+            original=manual_entry,
+            corrected_lines=[
+                {"account": cash, "debit": Decimal("60000")},
+                {"account": revenue, "credit": Decimal("60000")},
+            ],
+            posting_date=date.today(), reason="Fix test amount", created_by=self.owner,
+        )
+
+    def test_correction_filter_returns_only_correction_entries(self):
+        """THE real proof of the fix — before it, this returned
+        every entry (manual + both correction-source ones), same as
+        no filter at all."""
+        resp = self.client.get("/api/accounting/journal-entries/?source=CORRECTION")
+        self.assertEqual(resp.status_code, 200)
+        sources = {e["source"] for e in resp.data["journal_entries"]}
+        self.assertEqual(sources, {"CORRECTION"})
+        self.assertEqual(len(resp.data["journal_entries"]), 2)  # reversal + correction
+
+    def test_manual_filter_still_excludes_correction_entries(self):
+        """Regression proof — MANUAL's own filter must not have been
+        accidentally widened by this fix."""
+        resp = self.client.get("/api/accounting/journal-entries/?source=MANUAL")
+        self.assertEqual(resp.status_code, 200)
+        sources = {e["source"] for e in resp.data["journal_entries"]}
+        self.assertEqual(sources, {"MANUAL"})
+
 class ControlAccountDerivationTests(TestCase):
     """
     9 Sep 2026 — Phase 18, Task 18.1. Real coverage for the new
