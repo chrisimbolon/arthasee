@@ -99,6 +99,7 @@ class Invoice(TenantScopedModel):
     STATUS_CHOICES = [
         ("DRAFT",     "Draf"),
         ("ISSUED",    "Diterbitkan"),
+        ("PARTIALLY_PAID",  "Dibayar Sebagian"),        
         ("PAID",      "Lunas"),
         ("CANCELLED", "Dibatalkan"),
     ]
@@ -135,6 +136,12 @@ class Invoice(TenantScopedModel):
 
     status          = models.CharField(max_length=20, choices=STATUS_CHOICES, default="DRAFT", verbose_name="Status")
     deposit_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name="Deposit")
+    # 15 Sep 2026 — real, deliberately nullable due date. None (the
+    # default, and the real state of every invoice created before
+    # this field existed) means "no due date set" — such an invoice
+    # can never be overdue, an honest default rather than a forced
+    # requirement on every invoice.
+    due_date        = models.DateField(null=True, blank=True, verbose_name="Jatuh Tempo")
     issued_event_id = models.UUIDField(null=True, blank=True, editable=False, verbose_name="ID Event Penerbitan")
 
     created_by = models.ForeignKey(
@@ -180,6 +187,24 @@ class Invoice(TenantScopedModel):
     @property
     def balance_due(self):
         return self.total - self.deposit_amount - self.total_paid
+
+    @property
+    def is_overdue(self):
+        """
+        Real, deliberate DERIVED flag, not a 5th status value — an
+        invoice can genuinely be BOTH partially paid AND overdue at
+        once, a real combination a single status field can't
+        represent. Only ISSUED/PARTIALLY_PAID invoices can ever be
+        overdue: a PAID invoice is fully settled regardless of how
+        late that settlement was, a CANCELLED one was never really
+        owed, and a DRAFT one was never even issued yet — "late"
+        doesn't honestly apply to any of those three.
+        """
+        if self.due_date is None:
+            return False
+        if self.status not in ("ISSUED", "PARTIALLY_PAID"):
+            return False
+        return self.due_date < date.today()
 
     def save(self, *args, **kwargs):
         creating = self._state.adding
