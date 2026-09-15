@@ -53,7 +53,15 @@ class InvoiceCreateView(TenantScopedAPIView):
 
         try:
             with transaction.atomic():
-                invoice = Invoice.objects.create(service_record=service_record, created_by=request.user)
+                # 15 Sep 2026 — real, optional due_date at creation
+                # time. request.data.get("due_date") is None when the
+                # key is absent — the real, honest "no due date set"
+                # default the model field itself already establishes
+                # (null=True), not a special case handled here.
+                invoice = Invoice.objects.create(
+                    service_record=service_record, created_by=request.user,
+                    due_date=request.data.get("due_date"),
+                )
 
                 for pu in service_record.part_usages.select_related("part").all():
                     InvoiceLineItem.objects.create(
@@ -145,15 +153,20 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
         new_status = request.data.get("status")
         old_status = invoice.status
 
-        if new_status == "PAID":
+        # 15 Sep 2026 -- PARTIALLY_PAID joins PAID here: both are
+        # exclusively system-derived by Payment.record() itself
+        # (apps.payments.models), same "never a human's typed claim
+        # with no relationship to real money received" reasoning that
+        # already applied to PAID alone.
+        if new_status in ("PAID", "PARTIALLY_PAID"):
             return Response(
                 {
                     "success": False,
                     "message": (
-                        "Status 'Lunas' tidak bisa diatur secara manual — "
-                        "catat pembayaran melalui endpoint pembayaran "
+                        "Status 'Lunas'/'Dibayar Sebagian' tidak bisa diatur secara "
+                        "manual — catat pembayaran melalui endpoint pembayaran "
                         "(/api/invoices/<id>/payments/), status akan berubah "
-                        "otomatis saat sisa tagihan mencapai nol."
+                        "otomatis sesuai sisa tagihan."
                     ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
