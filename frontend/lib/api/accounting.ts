@@ -1161,6 +1161,54 @@ export const accountImportApi = {
 };
 
 // =============================================================================
+// Control-Account Reconciliation — Phase 18, Task 18.2 (backend
+// shipped earlier this phase; this is the real, deliberately-deferred
+// frontend, built once inline placement on Daftar Akun was confirmed
+// as the right shape — see that task's own note in the Phase 18
+// close-out doc: "a genuine diagnostic tool, not a workflow an owner
+// needs surfaced day-to-day" — hence living inline on an existing
+// page, not as its own dedicated route.
+// =============================================================================
+
+// Mirrors reports.reconcile_control_account()'s own real return
+// shape exactly (backend apps/accounting/reports.py). gl_balance/
+// subledger_total/difference come back as real Decimal-as-string
+// from DRF's default JSON rendering — same treatment AccountRow.
+// balance already gets in this file.
+export interface ControlAccountReconciliationResult {
+  success:          boolean;
+  message?:         string;
+  account_code?:    string;
+  account_name?:    string;
+  as_of?:           string;
+  gl_balance?:      string;
+  subledger_total?: string;
+  difference?:      string;
+  is_reconciled?:   boolean;
+}
+
+export const controlAccountReconciliationApi = {
+  // Real, on-demand diagnostic — matches the backend's own real
+  // on-demand-only design (#26: no scheduled job, no background
+  // check). A genuine result-with-message-on-failure shape, not
+  // null-on-failure — a real 400 here (an account_code this
+  // function doesn't recognize, or a real non-control account) is a
+  // real, explainable problem the UI should surface, not silently
+  // swallow.
+  async check(accountCode: string, asOf?: string): Promise<ControlAccountReconciliationResult> {
+    try {
+      const { data } = await api.get(
+        `/api/accounting/control-account-reconciliation/${accountCode}/`,
+        { params: asOf ? { as_of: asOf } : {} },
+      );
+      return data;
+    } catch (err) {
+      return { success: false, message: extractErrorMessage(err, "Gagal memeriksa rekonsiliasi.") };
+    }
+  },
+};
+
+// =============================================================================
 // Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
 // =============================================================================
 // Mirrors BankStatementLineSerializer / ReconciliationJournalLineSerializer /
