@@ -1,7 +1,7 @@
 # =============================================================================
 # === backend/apps/workorders/tests.py ===
 # =============================================================================
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest.mock import PropertyMock, patch
@@ -10,8 +10,9 @@ from apps.authentication.models import CustomUser
 from apps.core.models import Outbox
 from apps.estimates.models import Estimate
 from apps.inventory.models import Part, PartUsage, StockAdjustment
+from apps.invoicing.models import Invoice
 from apps.organizations.models import Organization, OrganizationMembership
-from apps.service.models import Customer, Vehicle
+from apps.service.models import Customer, ServiceRecord, Vehicle
 from django.core.management import call_command
 from django.utils import timezone
 from rest_framework import status
@@ -2372,3 +2373,125 @@ class WorkOrderMechanicAssignmentTests(WorkOrderAPITestBase):
         resp = self.client.put(f"/api/work-orders/{self.wo.id}/", {"assigned_to": None}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIsNone(resp.data["work_order"]["assigned_to"])
+
+class WorkOrderMasterListAPITests(APITestCase):
+    """
+    16 Sep 2026 — real coverage for the new, previously-missing
+    global work order master list endpoint (GET /api/work-orders/).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        self.customer = Customer.objects.create(
+            organization=self.org, name="Brian Sira", phone="081234567890",
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Budi")
+        self.member = CustomUser.objects.create_user(
+            email="member.womasterlist@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.member, role="member", is_active=True)
+        self.client.force_authenticate(user=self.member)
+
+    def _vehicle(self, plate):
+        return Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number=plate,
+            manufacture_year=2022, vehicle_type="Mobil", model="Honda Brio",
+        )
+
+    def _work_order(self, plate, *, status="OPEN"):
+        vehicle = self._vehicle(plate)
+        return WorkOrder.objects.create(
+            organization=self.org, vehicle=vehicle, assigned_to=self.mechanic, status=status,
+        )
+
+    def _invoiced_work_order(self, plate):
+        """
+        Real, full, self-contained chain to a genuine Invoice — every
+        prerequisite Invoice.save() actually enforces (org.invoice_code,
+        service_record.work_order resolving back, work_order.assigned_to
+        set), confirmed directly against the real model source rather
+        than assumed.
+        """
+        wo = self._work_order(plate, status="DONE")
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=wo.vehicle, service_date=date.today(),
+            odometer_km=15000, issue_description="Servis rutin",
+        )
+        wo.service_record = record
+        wo.save(update_fields=["service_record"])
+        invoice = Invoice.objects.create(service_record=record)
+        return wo, invoice
+
+    def test_lists_every_work_order_regardless_of_status(self):
+        self._work_order("BP 6001 AA", status="OPEN")
+        self._work_order("BP 6002 AA", status="DONE")
+        self._work_order("BP 6003 AA", status="CANCELLED")
+        resp = self.client.get("/api/work-orders/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 3)
+
+    def test_filters_by_status(self):
+        self._work_order("BP 6004 AA", status="OPEN")
+        done_wo = self._work_order("BP 6005 AA", status="DONE")
+        resp = self.client.get("/api/work-orders/?status=DONE")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        returned_ids = {row["id"] for row in resp.data["results"]}
+        self.assertEqual(returned_ids, {str(done_wo.id)})
+
+    def test_invalid_status_filter_is_ignored_not_rejected(self):
+        self._work_order("BP 6006 AA")
+        resp = self.client.get("/api/work-orders/?status=NOT_A_REAL_STATUS")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_plate_number(self):
+        self._work_order("BP 6007 ZZ")
+        resp = self.client.get("/api/work-orders/?search=6007")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_customer_name(self):
+        self._work_order("BP 6008 AA")  # self.customer is "Brian Sira"
+        resp = self.client.get("/api/work-orders/?search=Brian")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_wo_number(self):
+        wo = self._work_order("BP 6009 AA")
+        resp = self.client.get(f"/api/work-orders/?search={wo.number}")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_with_no_match_returns_empty_not_error(self):
+        self._work_order("BP 6010 AA")
+        resp = self.client.get("/api/work-orders/?search=TidakAdaYangCocok")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_work_order_with_no_invoice_shows_materials_only_non_final_total(self):
+        wo = self._work_order("BP 6011 AA", status="IN_PROGRESS")
+        resp = self.client.get("/api/work-orders/")
+        row = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertFalse(row["total_is_final"])
+        self.assertIsNone(row["payment_status"])
+        self.assertEqual(Decimal(row["total"]), Decimal("0"))
+
+    def test_work_order_with_invoice_shows_final_total_and_real_payment_status(self):
+        wo, invoice = self._invoiced_work_order("BP 6012 AA")
+        resp = self.client.get("/api/work-orders/")
+        row = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
+        self.assertTrue(row["total_is_final"])
+        # DRAFT is the real, correct status immediately after
+        # Invoice.objects.create() — never issued/paid yet at this
+        # point, matching Invoice's own real default.
+        self.assertEqual(row["payment_status"], "DRAFT")
+
+    def test_scoped_to_organization(self):
+        self._work_order("BP 6013 AA")
+        other_org = Organization.objects.create(name="Bengkel Lain WO List", invoice_code="BL")
+        other_member = CustomUser.objects.create_user(
+            email="member.otherorg.womasterlist@test.id", password="pass12345!", full_name="Other Member",
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_member, role="member", is_active=True)
+
+        self.client.force_authenticate(user=other_member)
+        resp = self.client.get("/api/work-orders/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 0)
