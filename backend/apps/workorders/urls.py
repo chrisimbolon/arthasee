@@ -9,13 +9,20 @@ from .views import (ActiveJobsView, DashboardSummaryView, MechanicDetailView,
                     WorkOrderDetailView, WorkOrderJobLineAssignStageView,
                     WorkOrderJobLineDetailView, WorkOrderJobLineListView,
                     WorkOrderJobLineToggleView, WorkOrderJobTicketPdfView,
-                    WorkOrderListView, WorkOrderMaterialLineDetailView,
+                    WorkOrderListView, WorkOrderMasterListView,
+                    WorkOrderMaterialLineDetailView,
                     WorkOrderMaterialLineListView, WorkOrderStageCompleteView,
                     WorkOrderStageDetailView, WorkOrderStageListView,
                     WorkOrderStageStartView, WorkOrderStatusUpdateView)
 
 urlpatterns = [
     path("vehicles/<uuid:vehicle_id>/work-orders/", WorkOrderListView.as_view(), name="work-order-list"),
+
+    # 16 Sep 2026 — real, previously-missing global work order master
+    # list ("Pekerjaan Aktif" broadened into a full historical+active
+    # roster). Deliberately separate from work-orders/active/ below —
+    # that endpoint and its own view stay completely untouched.
+    path("work-orders/", WorkOrderMasterListView.as_view(), name="work-order-master-list"),
 
     # B2 in the sprint review — a full roster of everything currently
     # in motion, not just overdue. Listed before the <uuid:pk> route
