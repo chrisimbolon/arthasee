@@ -14,6 +14,7 @@ comments in Stage 1 are now real, wired to apps.purchasing.events and
 the accounting posting engine.
 """
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from apps.accounting.periods import safe_local_date
@@ -644,6 +645,29 @@ class SupplierInvoice(TenantScopedModel):
 
     def __str__(self):
         return self.number
+
+    @property
+    def is_overdue(self):
+        """
+        16 Sep 2026 — real, deliberate parity with Invoice.is_overdue
+        (apps.invoicing.models) — a genuine derived flag, not a 3rd
+        status value: SupplierInvoice.STATUS_CHOICES stays exactly
+        UNPAID/PAID, this never adds an OVERDUE status. due_date
+        already existed on this model before this property did (see
+        its own field docstring — Made's own confirmed request, 25
+        Aug meeting), just unused for exactly this purpose until now.
+
+        A PAID invoice is never overdue, no matter how late that
+        settlement was — it's already fully settled. An invoice with
+        no due_date set (a real, honest majority of legacy/informal
+        supplier billing where a due date was never discussed) can
+        never be overdue at all.
+        """
+        if self.due_date is None:
+            return False
+        if self.status != "UNPAID":
+            return False
+        return self.due_date < date.today()
 
     def save(self, *args, **kwargs):
         creating = self._state.adding
