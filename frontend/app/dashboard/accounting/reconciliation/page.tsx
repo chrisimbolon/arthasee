@@ -21,12 +21,17 @@
 // ever creates/deletes a ReconciliationMatch row (pure metadata);
 // nothing here ever touches a JournalEntry/JournalLine directly.
 // =============================================================================
+import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
-  accountsApi, AccountRow, reconciliationApi, BankStatementLineRow,
+  AccountRow,
+  accountsApi,
+  BankStatementImportPreviewResult,
+  BankStatementImportRow, BankStatementLineRow,
+  reconciliationApi,
   ReconciliationJournalLineRow, ReconciliationMatchRow, ReconciliationSummary,
 } from "@/lib/api/accounting";
-import AccountingSubNav from "@/components/accounting/AccountingSubNav";
-import { Loader2, Plus } from "lucide-react";
+import { parseSpreadsheetFile, SPREADSHEET_IMPORT_ACCEPT } from "@/lib/fileImport";
+import { Loader2, Plus, Upload } from "lucide-react";
 import { ChangeEvent, useEffect, useState } from "react";
 
 function toNumber(value: string | number): number {
@@ -37,6 +42,166 @@ function formatRupiah(value: string | number): string {
   return new Intl.NumberFormat("id-ID", {
     style: "currency", currency: "IDR", maximumFractionDigits: 0,
   }).format(toNumber(value));
+}
+
+// 16 Sep 2026 — real, deliberate design: this page never needs the
+// uploaded file's own account_code column at all (if the file even
+// has one) — the page already knows which account is selected via
+// its own accountCode state, and every real bank statement export
+// is scoped to one real account anyway. Repeating the same code on
+// every row of a real Excel/CSV export would be pure friction with
+// zero real benefit, so it's injected here, once, per parsed row.
+function rowsFromParsedObjects(
+  objects: Record<string, string>[], accountCode: string,
+): { rows: BankStatementImportRow[]; error: string | null } {
+  if (objects.length === 0) {
+    return { rows: [], error: "File tidak memiliki baris data." };
+  }
+  const header = Object.keys(objects[0]);
+  const required = ["statement_date", "description", "amount"];
+  const missing = required.filter((c) => !header.includes(c));
+  if (missing.length > 0) {
+    return {
+      rows: [],
+      error: `Kolom wajib tidak ditemukan: ${missing.join(", ")}. Gunakan template yang disediakan.`,
+    };
+  }
+  const rows: BankStatementImportRow[] = objects.map((obj) => ({
+    account_code: accountCode,
+    statement_date: obj["statement_date"] ?? "",
+    description: obj["description"] ?? "",
+    amount: obj["amount"] ?? "",
+  }));
+  return { rows, error: null };
+}
+
+function ImportStatementLinesWizard({
+  accountCode, onImported,
+}: {
+  accountCode: string; onImported: () => void;
+}) {
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [parsedRows, setParsedRows] = useState<BankStatementImportRow[]>([]);
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  const [preview, setPreview] = useState<BankStatementImportPreviewResult | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  const [committing, setCommitting] = useState(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
+
+  async function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name);
+    setPreview(null);
+    setCommitError(null);
+
+    const { rows: parsedObjects, error: parseErr } = await parseSpreadsheetFile(file);
+    if (parseErr) {
+      setParsedRows([]);
+      setParseError(parseErr);
+      return;
+    }
+    const { rows, error: mappingError } = rowsFromParsedObjects(parsedObjects, accountCode);
+    setParsedRows(rows);
+    setParseError(mappingError);
+  }
+
+  async function handlePreview() {
+    setPreviewing(true);
+    setCommitError(null);
+    const result = await reconciliationApi.statementLines.previewImport(parsedRows);
+    setPreview(result);
+    setPreviewing(false);
+  }
+
+  async function handleCommit() {
+    setCommitting(true);
+    setCommitError(null);
+    const result = await reconciliationApi.statementLines.commitImport(parsedRows);
+    setCommitting(false);
+    if (!result.success) {
+      setCommitError(result.message ?? "Gagal mengimpor baris rekening koran.");
+      return;
+    }
+    onImported();
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+        <div className="label" style={{ marginBottom: 0 }}>Impor Rekening Koran (CSV / Excel)</div>
+        <a
+          href="/templates/bank-statement-import-template.xlsx" download
+          className="btn-ghost" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 }}
+        >
+          Unduh Template
+        </a>
+      </div>
+
+      <input type="file" accept={SPREADSHEET_IMPORT_ACCEPT} onChange={handleFileChange} style={{ marginBottom: 8 }} />
+      {fileName && !parseError && (
+        <div style={{ fontSize: 13, color: "var(--steel)", marginBottom: 8 }}>
+          {fileName} — {parsedRows.length} baris terbaca
+        </div>
+      )}
+      {parseError && (
+        <div style={{ fontSize: 13, color: "var(--danger)", marginBottom: 8 }}>{parseError}</div>
+      )}
+
+      {parsedRows.length > 0 && !parseError && !preview && (
+        <button onClick={handlePreview} disabled={previewing} className="btn-rust" style={{ marginTop: 8 }}>
+          {previewing ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Tinjau Data"}
+        </button>
+      )}
+
+      {preview && !preview.success && (
+        <div style={{ fontSize: 13, color: "var(--danger)", marginTop: 12 }}>{preview.message}</div>
+      )}
+
+      {preview && preview.success && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", gap: 16, marginBottom: 14, fontSize: 13 }}>
+            <div>Total: <span className="mono">{preview.total_rows}</span></div>
+            <div style={{ color: "var(--workshop)" }}>Valid: <span className="mono">{preview.valid_count}</span></div>
+            <div style={{ color: (preview.error_count ?? 0) > 0 ? "var(--danger)" : undefined }}>
+              Error: <span className="mono">{preview.error_count}</span>
+            </div>
+          </div>
+
+          {(preview.errors?.length ?? 0) > 0 && (
+            <table className="data-table" style={{ marginBottom: 14 }}>
+              <thead><tr><th>Baris</th><th>Keterangan</th><th>Masalah</th></tr></thead>
+              <tbody>
+                {preview.errors!.map((e) => (
+                  <tr key={e.row}>
+                    <td className="mono">{e.row}</td>
+                    <td>{e.description || "—"}</td>
+                    <td style={{ color: "var(--danger)" }}>{e.message}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {commitError && (
+            <div style={{ fontSize: 13, color: "var(--danger)", marginBottom: 12 }}>{commitError}</div>
+          )}
+
+          {preview.can_commit ? (
+            <button onClick={handleCommit} disabled={committing} className="btn-rust">
+              {committing ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : `Impor ${preview.valid_count} Baris`}
+            </button>
+          ) : (
+            <div style={{ fontSize: 13, color: "var(--steel)" }}>
+              Perbaiki baris bermasalah, lalu unggah dan tinjau ulang sebelum bisa mengimpor.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function ReconciliationPage() {
@@ -50,6 +215,7 @@ export default function ReconciliationPage() {
   const [loadFailed, setLoadFailed] = useState(false);
 
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [selectedStatementId, setSelectedStatementId] = useState<string | null>(null);
   const [selectedJournalId, setSelectedJournalId] = useState<string | null>(null);
   const [matching, setMatching] = useState(false);
@@ -156,10 +322,16 @@ export default function ReconciliationPage() {
             />
           </div>
           <button
-            onClick={() => setCreating(!creating)}
+            onClick={() => { setCreating(!creating); setImporting(false); }}
             className={creating ? "btn-ghost" : "btn-rust"}
           >
             <Plus size={16} /> Baris Rekening Koran
+          </button>
+          <button
+            onClick={() => { setImporting(!importing); setCreating(false); }}
+            className={importing ? "btn-ghost" : "btn-rust"}
+          >
+            <Upload size={16} /> Impor CSV/Excel
           </button>
         </div>
       </div>
@@ -173,6 +345,15 @@ export default function ReconciliationPage() {
             accountCode={accountCode}
             onCancel={() => setCreating(false)}
             onSaved={() => { setCreating(false); loadReconciliation(); }}
+          />
+        </div>
+      )}
+
+      {importing && summary && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <ImportStatementLinesWizard
+            accountCode={accountCode}
+            onImported={() => { setImporting(false); loadReconciliation(); }}
           />
         </div>
       )}
