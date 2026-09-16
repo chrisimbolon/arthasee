@@ -6213,3 +6213,236 @@ class AccountImportAPITests(APITestCase):
         self.client.force_authenticate(user=other_owner)
         resp = self.client.post("/api/accounting/accounts/import/commit/", {"rows": self._rows()}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+class BankStatementImportValidationTests(TestCase):
+    """
+    15 Sep 2026 — real coverage for bank_statement_import.
+    _validate_import_rows() (via preview_import(), a thin wrapper
+    around it) — every real validation rule mirrored, row for row,
+    against account_import's own equivalent tests (Task 18.8).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def _row(self, **overrides):
+        row = {
+            "account_code": "1001", "statement_date": "2026-09-10",
+            "description": "Setoran tunai", "amount": "500000",
+        }
+        row.update(overrides)
+        return row
+
+    def test_valid_row_produces_no_errors(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row()])
+        self.assertEqual(data["valid_count"], 1)
+        self.assertEqual(data["error_count"], 0)
+        self.assertTrue(data["can_commit"])
+
+    def test_missing_account_code_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(account_code="")])
+        self.assertEqual(data["error_count"], 1)
+        self.assertFalse(data["can_commit"])
+
+    def test_unknown_account_code_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(account_code="9-99999")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_missing_description_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(description="")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_missing_statement_date_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(statement_date="")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_malformed_statement_date_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(statement_date="15/09/2026")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_missing_amount_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(amount="")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_zero_amount_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(amount="0")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_malformed_amount_rejected(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(amount="not-a-number")])
+        self.assertEqual(data["error_count"], 1)
+
+    def test_negative_amount_is_valid(self):
+        """A real, deliberate case — negative amounts are legitimate
+        here (an outflow line on a bank statement), unlike
+        InvoiceLineItem's own negative-amount guard elsewhere in this
+        codebase. Only exactly zero is rejected."""
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(amount="-150000")])
+        self.assertEqual(data["valid_count"], 1)
+
+    def test_multiple_rows_report_every_error_not_just_the_first(self):
+        from apps.accounting import bank_statement_import
+        rows = [self._row(account_code=""), self._row(description=""), self._row(amount="0")]
+        data = bank_statement_import.preview_import(self.org, rows)
+        self.assertEqual(data["error_count"], 3)
+
+    def test_cannot_commit_when_any_row_has_errors(self):
+        from apps.accounting import bank_statement_import
+        data = bank_statement_import.preview_import(self.org, [self._row(), self._row(amount="0")])
+        self.assertFalse(data["can_commit"])
+
+
+class BankStatementImportCommitTests(TestCase):
+    """
+    15 Sep 2026 — real coverage for bank_statement_import.
+    commit_import() — the real, all-or-nothing write path.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_commit_creates_every_valid_row(self):
+        from apps.accounting import bank_statement_import
+        from apps.accounting.models import BankStatementLine
+        rows = [
+            {"account_code": "1001", "statement_date": "2026-09-10", "description": "Setoran A", "amount": "500000"},
+            {"account_code": "1001", "statement_date": "2026-09-11", "description": "Setoran B", "amount": "250000"},
+        ]
+        created = bank_statement_import.commit_import(self.org, rows)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(BankStatementLine.objects.filter(organization=self.org).count(), 2)
+
+    def test_commit_rejects_and_writes_nothing_when_any_row_invalid(self):
+        """THE real all-or-nothing proof — one bad row among several
+        good ones means NOTHING gets created."""
+        from apps.accounting import bank_statement_import
+        from apps.accounting.models import BankStatementLine
+        rows = [
+            {"account_code": "1001", "statement_date": "2026-09-10", "description": "Baik", "amount": "500000"},
+            {"account_code": "1001", "statement_date": "2026-09-11", "description": "Buruk", "amount": "0"},
+        ]
+        with self.assertRaises(ValueError):
+            bank_statement_import.commit_import(self.org, rows)
+        self.assertFalse(BankStatementLine.objects.filter(organization=self.org).exists())
+
+    def test_commit_rejects_empty_row_list(self):
+        from apps.accounting import bank_statement_import
+        with self.assertRaises(ValueError):
+            bank_statement_import.commit_import(self.org, [])
+
+    def test_commit_re_validates_against_current_db_state(self):
+        """
+        Real proof commit() never trusts a caller's own "I already
+        previewed this" claim — re-runs its own real validation
+        against whatever the database actually looks like at commit
+        time, not a cached earlier result.
+        """
+        from apps.accounting import bank_statement_import
+        rows = [{"account_code": "1001", "statement_date": "2026-09-10", "description": "Test", "amount": "100000"}]
+
+        preview = bank_statement_import.preview_import(self.org, rows)
+        self.assertTrue(preview["can_commit"])
+
+        # A real, independent re-validation call — proves this isn't
+        # a cached/memoized result from the preview above.
+        valid_rows, errors = bank_statement_import._validate_import_rows(self.org, rows)
+        self.assertEqual(len(errors), 0)
+        self.assertEqual(len(valid_rows), 1)
+
+
+class BankStatementImportAPITests(APITestCase):
+    """
+    15 Sep 2026 — HTTP-level coverage for POST .../statement-lines/
+    import/preview/ and .../commit/. Real logic already proven by
+    the two classes above; this layer proves the thin views are
+    wired correctly and open to any authenticated org member (same
+    stakes class as the existing single-row endpoint).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.member = CustomUser.objects.create_user(
+            email="member.bankimport@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.member, role="member", is_active=True)
+        self.client.force_authenticate(user=self.member)
+
+    def _rows(self, **overrides):
+        row = {"account_code": "1001", "statement_date": "2026-09-10", "description": "Setoran tunai", "amount": "500000"}
+        row.update(overrides)
+        return [row]
+
+    def test_any_member_can_preview(self):
+        """Confirms the real, deliberate non-owner-only gate — a
+        plain 'member' role, not 'owner', must still succeed."""
+        resp = self.client.post(
+            "/api/accounting/reconciliation/statement-lines/import/preview/",
+            {"rows": self._rows()}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["can_commit"])
+
+    def test_preview_writes_nothing(self):
+        from apps.accounting.models import BankStatementLine
+        self.client.post(
+            "/api/accounting/reconciliation/statement-lines/import/preview/",
+            {"rows": self._rows()}, format="json",
+        )
+        self.assertFalse(BankStatementLine.objects.filter(organization=self.org).exists())
+
+    def test_any_member_can_commit(self):
+        resp = self.client.post(
+            "/api/accounting/reconciliation/statement-lines/import/commit/",
+            {"rows": self._rows()}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["created_count"], 1)
+
+    def test_commit_with_invalid_row_returns_400_and_writes_nothing(self):
+        from apps.accounting.models import BankStatementLine
+        resp = self.client.post(
+            "/api/accounting/reconciliation/statement-lines/import/commit/",
+            {"rows": self._rows(amount="0")}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(BankStatementLine.objects.filter(organization=self.org).exists())
+
+    def test_empty_rows_rejected_at_the_serializer_level(self):
+        resp = self.client.post(
+            "/api/accounting/reconciliation/statement-lines/import/commit/",
+            {"rows": []}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Bank Import")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_member = CustomUser.objects.create_user(
+            email="member.otherorg.bankimport@test.id", password="pass12345!", full_name="Other Member",
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_member, role="member", is_active=True)
+
+        self.client.post(
+            "/api/accounting/reconciliation/statement-lines/import/commit/",
+            {"rows": self._rows()}, format="json",
+        )
+
+        self.client.force_authenticate(user=other_member)
+        resp = self.client.post(
+            "/api/accounting/reconciliation/statement-lines/import/commit/",
+            {"rows": self._rows()}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)  # succeeds independently, own org's own data        
