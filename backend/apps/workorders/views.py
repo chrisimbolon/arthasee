@@ -2,10 +2,12 @@
 # === backend/apps/workorders/views.py ===
 # =============================================================================
 from datetime import date, timedelta
+from decimal import Decimal
 
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import StockAdjustment
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -84,6 +86,111 @@ class WorkOrderListView(TenantScopedAPIView):
             )
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
+class WorkOrderMasterListView(TenantScopedAPIView):
+    """
+    GET /api/work-orders/?status=&search=
+
+    16 Sep 2026 — real, previously-missing global work order master
+    list ("Pekerjaan Aktif" broadened into a full historical+active
+    roster, Chris's own confirmed design, 16 Sep). Deliberately a
+    NEW, separate view — NOT a modification of ActiveJobsView (GET
+    /api/work-orders/active/), which stays hard-scoped to
+    OPEN_STATUSES with its own narrow, elapsed-time-focused response
+    shape for whatever else may depend on it. This view covers every
+    real status (DONE/CANCELLED included), with its own real
+    payment-status logic layered in — a genuinely different job, not
+    an extension of that one.
+
+    Deliberately NO pagination in v1 — matches the established
+    convention every other list view in this codebase already
+    follows.
+
+    `search` matches plate number, customer name, or WO number — the
+    three real things front-desk staff would search by (Made's own
+    "is my car ready?" framing from the original sprint review).
+
+    Real, deliberate Total logic, confirmed with Chris 16 Sep: a
+    WorkOrder's own job_lines (labor) carry NO price at all until a
+    real Invoice exists — labor pricing only enters the system at
+    invoice-creation time (see apps.invoicing views), never before.
+    So total_is_final is only ever True once a real Invoice object
+    exists for this WO's own ServiceRecord, regardless of that
+    Invoice's own status — even a DRAFT invoice has a real, frozen
+    total the moment it's created, well before it's ever issued to
+    the customer. Before any Invoice exists at all, total is a real,
+    honest materials-only running subtotal — never presented as if
+    it were the eventual final bill.
+
+    payment_status mirrors the linked Invoice's own raw status value
+    exactly (or None when no Invoice exists yet) — the frontend owns
+    the actual label/color mapping, same division of responsibility
+    already established for every other status field in this app.
+    DRAFT is deliberately treated the same as "no invoice at all" on
+    the frontend's own mapping — nothing has genuinely been billed to
+    the customer yet at that point, even though the number itself is
+    already locked in.
+    """
+    model = WorkOrder
+
+    def get(self, request):
+        orders = (
+            self.get_queryset()
+            .select_related(
+                "vehicle", "vehicle__customer", "assigned_to",
+                "service_record", "service_record__invoice",
+            )
+            .prefetch_related("material_lines")
+        )
+
+        status_filter = request.query_params.get("status")
+        if status_filter in dict(WorkOrder.STATUS_CHOICES):
+            orders = orders.filter(status=status_filter)
+
+        search = request.query_params.get("search")
+        if search:
+            orders = orders.filter(
+                Q(vehicle__plate_number__icontains=search)
+                | Q(vehicle__customer__name__icontains=search)
+                | Q(number__icontains=search)
+            )
+
+        orders = orders.order_by("-created_at")
+
+        results = [self._serialize(wo) for wo in orders]
+        return Response({"success": True, "count": len(results), "results": results})
+
+    def _serialize(self, wo):
+        # Safe even when no Invoice exists — Django's reverse
+        # OneToOne descriptor raises an exception that is ALSO a
+        # subclass of AttributeError specifically so getattr()'s own
+        # default kicks in cleanly. Same real pattern already used
+        # elsewhere in this exact codebase (Invoice's own
+        # `getattr(self.service_record, "work_order", None)`).
+        invoice = getattr(wo.service_record, "invoice", None) if wo.service_record_id else None
+
+        if invoice is not None:
+            total = invoice.total
+            total_is_final = True
+        else:
+            total = sum(
+                (line.quantity * line.unit_price_at_time for line in wo.material_lines.all()),
+                Decimal("0"),
+            )
+            total_is_final = False
+
+        return {
+            "id": str(wo.id),
+            "number": wo.number,
+            "created_at": wo.created_at,
+            "customer_name": wo.vehicle.customer.name,
+            "vehicle_plate": wo.vehicle.plate_number,
+            "vehicle_model": wo.vehicle.model,
+            "assigned_to_name": wo.assigned_to.name if wo.assigned_to else None,
+            "status": wo.status,
+            "payment_status": invoice.status if invoice else None,
+            "total": total,
+            "total_is_final": total_is_final,
+        }
 
 class WorkOrderDetailView(TenantScopedAPIView):
     """
