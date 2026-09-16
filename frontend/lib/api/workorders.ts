@@ -3,6 +3,8 @@
 // =============================================================================
 import api from "@/lib/api";
 
+import { InvoiceStatus } from "@/lib/api/invoicing";
+
 export type WorkOrderStatus = "OPEN" | "IN_PROGRESS" | "QC" | "DONE" | "CANCELLED";
 
 export interface WorkOrderJobLine {
@@ -347,6 +349,43 @@ export interface ActiveJob {
 export const activeJobsApi = {
   async list(): Promise<ActiveJob[]> {
     const { data } = await api.get("/api/work-orders/active/");
+    return data.results;
+  },
+};
+
+// 16 Sep 2026 -- real, previously-missing global work order master
+// list ("Pekerjaan Aktif" broadened into a full historical+active
+// roster). Deliberately separate from ActiveJob/activeJobsApi above
+// -- that one stays exactly as it is, hard-scoped to open statuses
+// with its own elapsed-time-focused shape; this covers every real
+// status with its own real payment-status logic.
+export interface WorkOrderMasterListRow {
+  id:                string;
+  number:            string;
+  created_at:        string;
+  customer_name:     string;
+  vehicle_plate:     string;
+  vehicle_model:     string;
+  assigned_to_name:  string | null;
+  status:            WorkOrderStatus;
+  // Raw Invoice.status, or null when no Invoice exists for this WO
+  // yet -- DRAFT/ISSUED/PARTIALLY_PAID/PAID/CANCELLED, the same real
+  // values InvoiceStatus already covers elsewhere in this app.
+  payment_status:    InvoiceStatus | null;
+  // A real, honest materials-only running subtotal whenever
+  // total_is_final is false (no Invoice exists yet -- labor pricing
+  // genuinely doesn't exist before that point) -- never the eventual
+  // final bill. Becomes the real, frozen Invoice.total the moment
+  // ANY Invoice object exists, even a DRAFT one not yet issued.
+  total:             string;
+  total_is_final:    boolean;
+}
+
+export const workOrderMasterListApi = {
+  async list(opts?: { status?: WorkOrderStatus; search?: string }): Promise<WorkOrderMasterListRow[]> {
+    const { data } = await api.get("/api/work-orders/", {
+      params: { status: opts?.status, search: opts?.search || undefined },
+    });
     return data.results;
   },
 };
