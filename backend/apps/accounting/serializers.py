@@ -426,6 +426,22 @@ class BankStatementLineRecordSerializer(serializers.Serializer):
             raise serializers.ValidationError("Jumlah tidak boleh nol.")
         return value
 
+class BankStatementImportRequestSerializer(serializers.Serializer):
+    """
+    15 Sep 2026 -- shared input shape for BOTH POST .../statement-
+    lines/import/preview/ and POST .../statement-lines/import/
+    commit/. Mirrors AccountImportRequestSerializer's own exact
+    shape (Phase 18, Task 18.8) -- deliberately NOT reused directly,
+    same "genuinely separate features, only a coincidentally
+    identical shape" reasoning PartFieldChangeSerializer already
+    established over reusing CustomerFieldChangeSerializer.
+
+    Deliberately a bare ListField of DictFields, not a nested
+    per-field row serializer -- the real, row-indexed validation
+    lives in bank_statement_import._validate_import_rows(), which
+    produces its own friendly, Indonesian-language error shape.
+    """
+    rows = serializers.ListField(child=serializers.DictField(), min_length=1)
 
 class ReconciliationJournalLineSerializer(serializers.ModelSerializer):
     """
