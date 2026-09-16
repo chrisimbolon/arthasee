@@ -1307,6 +1307,45 @@ export interface ReconciliationSummary {
   unmatched_journal_lines: ReconciliationJournalLineRow[];
 }
 
+export interface BankStatementImportRow {
+  account_code:   string;
+  statement_date: string;
+  description:    string;
+  amount:         string;
+}
+
+export interface BankStatementImportValidRow {
+  row:            number;
+  account_code:   string;
+  statement_date: string;
+  description:    string;
+  amount:         string;
+}
+
+export interface BankStatementImportRowError {
+  row:         number;
+  description: string;
+  message:     string;
+}
+
+export interface BankStatementImportPreviewResult {
+  success:      boolean;
+  message?:     string;
+  total_rows?:  number;
+  valid_count?: number;
+  error_count?: number;
+  valid_rows?:  BankStatementImportValidRow[];
+  errors?:      BankStatementImportRowError[];
+  can_commit?:  boolean;
+}
+
+export interface BankStatementImportCommitResult {
+  success:          boolean;
+  message?:         string;
+  created_count?:   number;
+  statement_lines?: BankStatementLineRow[];
+}
+
 export const reconciliationApi = {
   statementLines: {
     list: (accountCode?: string) =>
@@ -1322,6 +1361,30 @@ export const reconciliationApi = {
         return data;
       } catch (err) {
         return { success: false, message: extractErrorMessage(err, "Gagal menyimpan baris rekening koran.") };
+      }
+    },
+
+    // 15 Sep 2026 -- real, previously-missing bulk import. Real,
+    // deliberate result-with-message-on-failure shape, not null-on-
+    // failure -- a real 400 here (any row invalid) is a real,
+    // explainable problem the UI must surface, not silently swallow.
+    // Mirrors accountImportApi's own exact preview/commit shape
+    // (Phase 18, Task 18.8).
+    async previewImport(rows: BankStatementImportRow[]): Promise<BankStatementImportPreviewResult> {
+      try {
+        const { data } = await api.post("/api/accounting/reconciliation/statement-lines/import/preview/", { rows });
+        return data;
+      } catch (err) {
+        return { success: false, message: extractErrorMessage(err, "Gagal memvalidasi data impor.") };
+      }
+    },
+
+    async commitImport(rows: BankStatementImportRow[]): Promise<BankStatementImportCommitResult> {
+      try {
+        const { data } = await api.post("/api/accounting/reconciliation/statement-lines/import/commit/", { rows });
+        return data;
+      } catch (err) {
+        return { success: false, message: extractErrorMessage(err, "Gagal mengimpor baris rekening koran.") };
       }
     },
 
