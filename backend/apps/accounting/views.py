@@ -54,7 +54,7 @@ implementation:
 from datetime import date
 from decimal import Decimal
 
-from apps.accounting import account_import
+from apps.accounting import account_import, bank_statement_import
 from apps.core.models import Outbox
 from apps.core.views import TenantScopedAPIView
 from django.db.models import ProtectedError, Sum
@@ -72,7 +72,9 @@ from .serializers import (AccountEditSerializer,
                           AccountImportRequestSerializer,
                           AccountingPeriodSerializer, AccountRecordSerializer,
                           AccountSerializer, AssetRecordSerializer,
-                          AssetSerializer, BankStatementLineRecordSerializer,
+                          AssetSerializer,
+                          BankStatementImportRequestSerializer,
+                          BankStatementLineRecordSerializer,
                           BankStatementLineSerializer,
                           DepreciationRunSerializer, FailedPostingSerializer,
                           JournalEntryCorrectRecordSerializer,
@@ -410,6 +412,72 @@ class BankStatementLineDetailView(TenantScopedAPIView):
             )
         return Response({"success": True})
 
+class BankStatementImportPreviewView(TenantScopedAPIView):
+    """
+    POST /api/accounting/reconciliation/statement-lines/import/preview/
+
+    15 Sep 2026 — real, read-only pre-commit review for a bulk bank
+    statement import. Open to any authenticated org member, NOT
+    owner-only — matches BankStatementLineListCreateView.post()'s own
+    real stakes class exactly (ordinary, reversible data entry that
+    never touches the real ledger — see that view's own module-level
+    docstring above): bulk-importing the same kind of row is the same
+    real action performed many times, not a different, higher-stakes
+    one.
+    """
+    model = BankStatementLine
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = BankStatementImportRequestSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        rows = input_serializer.validated_data["rows"]
+
+        data = bank_statement_import.preview_import(organization, rows)
+        return Response({"success": True, **data})
+
+class BankStatementImportCommitView(TenantScopedAPIView):
+    """
+    POST /api/accounting/reconciliation/statement-lines/import/commit/
+
+    15 Sep 2026 — real, final, all-or-nothing commit. Re-validates
+    from scratch against the current real database state — see
+    bank_statement_import.commit_import()'s own docstring for why
+    this never trusts a client-side "preview already passed" claim.
+    """
+    model = BankStatementLine
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = BankStatementImportRequestSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        rows = input_serializer.validated_data["rows"]
+
+        try:
+            created = bank_statement_import.commit_import(organization, rows, created_by=request.user)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "success": True,
+                "created_count": len(created),
+                "statement_lines": BankStatementLineSerializer(created, many=True).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 class ReconciliationSummaryView(TenantScopedAPIView):
     """
