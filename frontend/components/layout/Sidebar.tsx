@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
 
 const NAV = [
   { href: "/dashboard",           icon: LayoutDashboard, label: "Ringkasan" },
-  { href: "/dashboard/active-jobs", icon: Activity,       label: "Pekerjaan Aktif" },
+  { href: "/dashboard/active-jobs", icon: Activity,       label: "Daftar Work Order" },
   { href: "/dashboard/appointments", icon: Calendar,      label: "Janji Temu" },  
   { href: "/dashboard/customers", icon: Users,            label: "Pelanggan" },
   { href: "/dashboard/vehicles",  icon: Car,              label: "Kendaraan" },
