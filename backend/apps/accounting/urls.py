@@ -8,6 +8,8 @@ from .views import (AccountDetailView, AccountImportCommitView,
                     AccountingPeriodListView, AccountingPeriodReopenView,
                     AccountListCreateView, AgingAPView, AgingARView,
                     AssetListCreateView, BalanceSheetView,
+                    BankStatementImportCommitView,
+                    BankStatementImportPreviewView,
                     BankStatementLineDetailView,
                     BankStatementLineListCreateView, CashConversionCycleView,
                     ControlAccountReconciliationView, DailyCashActivityView,
@@ -64,6 +66,8 @@ urlpatterns = [
     # BEFORE the <str:account_code> catch-all — see this file's own
     # header note for why the order matters here.
     path("reconciliation/statement-lines/", BankStatementLineListCreateView.as_view(), name="reconciliation-statement-line-list-create"),
+    path("reconciliation/statement-lines/import/preview/", BankStatementImportPreviewView.as_view(), name="reconciliation-statement-line-import-preview"),
+    path("reconciliation/statement-lines/import/commit/", BankStatementImportCommitView.as_view(), name="reconciliation-statement-line-import-commit"),
     path("reconciliation/statement-lines/<uuid:pk>/", BankStatementLineDetailView.as_view(), name="reconciliation-statement-line-detail"),
     path("reconciliation/matches/", ReconciliationMatchListCreateView.as_view(), name="reconciliation-match-list-create"),
     path("reconciliation/matches/<uuid:pk>/", ReconciliationMatchDetailView.as_view(), name="reconciliation-match-detail"),
