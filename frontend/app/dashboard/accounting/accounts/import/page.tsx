@@ -20,47 +20,17 @@
 // fixed, six-column template, not arbitrary user spreadsheets.
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
+  ACCOUNT_SUBTYPE_LABELS,
   accountImportApi, AccountImportPreviewResult, AccountImportRow,
-  ACCOUNT_SUBTYPE_LABELS, AccountSubtype,
+  AccountSubtype,
 } from "@/lib/api/accounting";
+import { parseSpreadsheetFile, SPREADSHEET_IMPORT_ACCEPT } from "@/lib/fileImport";
 import { AlertTriangle, Check, Download, FileUp, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 
-// -----------------------------------------------------------------------
-// Real, minimal, dependency-free CSV parser -- handles quoted fields
-// (embedded commas, escaped "" quotes), \r\n or \n line endings, and
-// skips fully-blank lines. Deliberately not a general-purpose CSV
-// library -- this only ever needs to read this app's own fixed
-// six-column template, not arbitrary spreadsheet exports.
-// -----------------------------------------------------------------------
-function parseCsvText(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let inQuotes = false;
-  let i = 0;
-  while (i < text.length) {
-    const char = text[i];
-    if (inQuotes) {
-      if (char === '"') {
-        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
-        inQuotes = false; i++; continue;
-      }
-      field += char; i++; continue;
-    }
-    if (char === '"') { inQuotes = true; i++; continue; }
-    if (char === ",") { row.push(field); field = ""; i++; continue; }
-    if (char === "\r") { i++; continue; }
-    if (char === "\n") { row.push(field); rows.push(row); row = []; field = ""; i++; continue; }
-    field += char; i++;
-  }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
-  return rows.filter((r) => r.some((c) => c.trim() !== ""));
-}
-
 // Recognized cells normalize into a real boolean; anything else
-// passes through UNCHANGED as the raw string -- deliberately not
+// passes through UNCHANGED as the raw string — deliberately not
 // guessed at here. The backend's own strict is-boolean check
 // (account_import._validate_import_rows()) reports an unrecognized
 // value as a real, visible row error instead.
@@ -72,13 +42,18 @@ function normalizeBoolCell(raw: string): boolean | string {
   return raw.trim();
 }
 
-function csvToImportRows(text: string): { rows: AccountImportRow[]; error: string | null } {
-  const table = parseCsvText(text);
-  if (table.length < 1) {
-    return { rows: [], error: "File kosong atau tidak bisa dibaca." };
+// 16 Sep 2026 — real, deliberate refactor: file PARSING (CSV or real
+// Excel) is now the shared frontend/lib/fileImport.ts utility's own
+// job (originally built for Bank Statement Import) — this function's
+// only real remaining job is the ACCOUNT-import-specific part: which
+// columns matter, and the is_contra boolean coercion.
+function rowsFromParsedObjects(
+  objects: Record<string, string>[],
+): { rows: AccountImportRow[]; error: string | null } {
+  if (objects.length === 0) {
+    return { rows: [], error: "File tidak memiliki baris data." };
   }
-
-  const header = table[0].map((h) => h.trim().toLowerCase());
+  const header = Object.keys(objects[0]);
   const required = ["code", "name", "account_subtype"];
   const missing = required.filter((c) => !header.includes(c));
   if (missing.length > 0) {
@@ -87,22 +62,14 @@ function csvToImportRows(text: string): { rows: AccountImportRow[]; error: strin
       error: `Kolom wajib tidak ditemukan: ${missing.join(", ")}. Gunakan template yang disediakan.`,
     };
   }
-  if (table.length < 2) {
-    return { rows: [], error: "File tidak memiliki baris data — hanya baris judul kolom." };
-  }
-
-  const idx = (name: string) => header.indexOf(name);
-  const rows: AccountImportRow[] = table.slice(1).map((cells) => {
-    const get = (name: string) => (idx(name) >= 0 ? (cells[idx(name)] ?? "").trim() : "");
-    return {
-      code: get("code"),
-      name: get("name"),
-      account_subtype: get("account_subtype").toUpperCase(),
-      is_contra: normalizeBoolCell(get("is_contra")),
-      parent_code: get("parent_code") || undefined,
-      description: get("description") || undefined,
-    };
-  });
+  const rows: AccountImportRow[] = objects.map((obj) => ({
+    code: obj["code"] ?? "",
+    name: obj["name"] ?? "",
+    account_subtype: (obj["account_subtype"] ?? "").toUpperCase(),
+    is_contra: normalizeBoolCell(obj["is_contra"] ?? ""),
+    parent_code: obj["parent_code"] || undefined,
+    description: obj["description"] || undefined,
+  }));
   return { rows, error: null };
 }
 
@@ -124,24 +91,21 @@ export default function AccountImportPage() {
     setCommittedCount(null);
   }
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
     resetAfterNewFile();
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = typeof reader.result === "string" ? reader.result : "";
-      const { rows, error } = csvToImportRows(text);
-      setParsedRows(rows);
-      setParseError(error);
-    };
-    reader.onerror = () => {
+    const { rows: parsedObjects, error: parseErr } = await parseSpreadsheetFile(file);
+    if (parseErr) {
       setParsedRows([]);
-      setParseError("Gagal membaca file.");
-    };
-    reader.readAsText(file);
+      setParseError(parseErr);
+      return;
+    }
+    const { rows, error: mappingError } = rowsFromParsedObjects(parsedObjects);
+    setParsedRows(rows);
+    setParseError(mappingError);
   }
 
   async function handlePreview() {
@@ -177,7 +141,7 @@ export default function AccountImportPage() {
           </div>
         </div>
         <a
-          href="/templates/account-import-template.csv" download
+          href="/templates/account-import-template.xlsx" download
           className="btn-ghost" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
         >
           <Download size={16} /> Unduh Template
@@ -204,7 +168,7 @@ export default function AccountImportPage() {
           <div className="card" style={{ marginBottom: 20 }}>
             <div className="label" style={{ marginBottom: 12 }}>1. Pilih File CSV</div>
             <input
-              type="file" accept=".csv,text/csv" onChange={handleFileChange}
+              type="file" accept={SPREADSHEET_IMPORT_ACCEPT} onChange={handleFileChange}
               style={{ marginBottom: 8 }}
             />
             {fileName && (
