@@ -203,6 +203,13 @@ class GoodsReceivedNoteRecordSerializer(serializers.Serializer):
 class SupplierInvoiceSerializer(serializers.ModelSerializer):
     supplier_name         = serializers.CharField(source="supplier.name", read_only=True)
     goods_received_notes  = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    # 16 Sep 2026 — a real Python property on the model (models.py),
+    # not a DB field — same treatment InvoiceSerializer's own
+    # is_overdue already establishes for Invoice: a plain declared
+    # field naming the property directly, not a
+    # SerializerMethodField (reserved for cases needing real custom
+    # traversal logic, which this doesn't).
+    is_overdue = serializers.BooleanField(read_only=True)
 
     class Meta:
         model  = SupplierInvoice
@@ -219,7 +226,7 @@ class SupplierInvoiceSerializer(serializers.ModelSerializer):
             # rest of a SupplierInvoiceRecordSerializer's fields in
             # one request.
             "attachment",
-            "invoice_date", "due_date", "status", "notes", "created_by", "created_at",
+            "invoice_date", "due_date", "status", "is_overdue", "notes", "created_by", "created_at",
         ]
         read_only_fields = fields
 
