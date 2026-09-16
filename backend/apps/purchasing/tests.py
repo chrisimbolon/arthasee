@@ -1617,3 +1617,50 @@ class SupplierInvoiceAttachmentAPITests(PurchasingAPITestBase):
             {"attachment": fake_file}, format="multipart",
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+class SupplierInvoiceIsOverdueTests(TestCase):
+    """
+    16 Sep 2026 — real, direct model-layer coverage for SupplierInvoice.
+    is_overdue — mirrors apps.invoicing.tests' own equivalent
+    Invoice.is_overdue coverage, same real combinations checked.
+    Constructed directly via the ORM (not SupplierInvoice.record())
+    deliberately — this is a pure computed-property test with no real
+    need for record()'s own full business-rule path (open accounting
+    period, event publishing, etc.).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+
+    def _invoice(self, *, due_date=None, status="UNPAID"):
+        return SupplierInvoice.objects.create(
+            organization=self.org, supplier=self.supplier,
+            amount=Decimal("450000.00"), invoice_date=date(2026, 9, 1),
+            due_date=due_date, status=status,
+        )
+
+    def test_no_due_date_is_never_overdue(self):
+        invoice = self._invoice(due_date=None, status="UNPAID")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_future_due_date_is_not_overdue(self):
+        invoice = self._invoice(due_date=date.today() + timedelta(days=7), status="UNPAID")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_past_due_date_on_unpaid_invoice_is_overdue(self):
+        invoice = self._invoice(due_date=date.today() - timedelta(days=1), status="UNPAID")
+        self.assertTrue(invoice.is_overdue)
+
+    def test_past_due_date_on_paid_invoice_is_not_overdue(self):
+        """A fully-settled invoice is never 'late,' no matter how
+        overdue the original due date was — it's already paid."""
+        invoice = self._invoice(due_date=date.today() - timedelta(days=30), status="PAID")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_due_date_exactly_today_is_not_yet_overdue(self):
+        """Real boundary check — due TODAY is not yet late; it
+        becomes overdue starting tomorrow, same convention already
+        established for Invoice.is_overdue."""
+        invoice = self._invoice(due_date=date.today(), status="UNPAID")
+        self.assertFalse(invoice.is_overdue)        
