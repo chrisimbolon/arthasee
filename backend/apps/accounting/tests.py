@@ -46,6 +46,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from apps.accounting import journal_generator, reports, trace_forward
+from apps.accounting.services.readiness import check_organization_readiness
 from apps.authentication.models import CustomUser
 from apps.core.events.bus import default_bus
 from apps.core.models import Outbox
@@ -6446,3 +6447,223 @@ class BankStatementImportAPITests(APITestCase):
             {"rows": self._rows()}, format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)  # succeeds independently, own org's own data        
+
+class OpeningBalanceConfirmZeroTests(TestCase):
+    """
+    17 Sep 2026 — real coverage for OpeningBalanceSession.confirm_zero()
+    — Brand-New Workshop Readiness, Pillar 2.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.confirmzero@test.id", password="pass12345!", full_name="Owner",
+        )
+        self.session = OpeningBalanceSession.objects.create(
+            organization=self.org, start_date="2026-09-01", created_by=self.owner,
+        )
+
+    def test_confirm_zero_on_empty_draft_session_succeeds(self):
+        self.session.confirm_zero(confirmed_by=self.owner)
+        self.session.refresh_from_db()
+        self.assertIsNotNone(self.session.confirmed_zero_at)
+        self.assertEqual(self.session.confirmed_zero_by, self.owner)
+        self.assertTrue(self.session.is_opening_position_resolved)
+
+    def test_confirm_zero_rejected_when_already_posted(self):
+        self.session.status = OpeningBalanceSession.Status.POSTED
+        self.session.save(update_fields=["status"])
+        with self.assertRaises(ValueError):
+            self.session.confirm_zero(confirmed_by=self.owner)
+
+    def test_confirm_zero_rejected_when_already_confirmed(self):
+        self.session.confirm_zero(confirmed_by=self.owner)
+        with self.assertRaises(ValueError):
+            self.session.confirm_zero(confirmed_by=self.owner)
+
+    def test_confirm_zero_rejected_when_real_lines_exist(self):
+        """The real, core proof this method won't confirm a FALSE
+        zero — a session with real data entered must not be wiped
+        into "nihil" by this shortcut."""
+        OpeningBalanceCashLine.objects.create(session=self.session, account_code="1001", amount="500000")
+        with self.assertRaises(ValueError):
+            self.session.confirm_zero(confirmed_by=self.owner)
+        self.session.refresh_from_db()
+        self.assertIsNone(self.session.confirmed_zero_at)
+
+    def test_unresolved_session_is_not_resolved(self):
+        """A plain, untouched DRAFT session — neither posted nor
+        confirmed zero — is the real, previously-indistinguishable
+        gap this whole feature exists to close."""
+        self.assertFalse(self.session.is_opening_position_resolved)
+
+
+class OrganizationReadinessTests(TestCase):
+    """
+    17 Sep 2026 — real coverage for
+    apps.accounting.services.readiness.check_organization_readiness().
+    Every hard block proven to fire independently, every warning
+    proven non-blocking, and the fully-ready happy path proven clean.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.readiness@test.id", password="pass12345!", full_name="Owner",
+        )
+
+    def test_brand_new_org_is_not_ready(self):
+        """The real, original bug this whole feature exists to fix —
+        confirmed live, 17 Sep 2026 ('CV. Melchem Jaya')."""
+        result = check_organization_readiness(self.org)
+        self.assertFalse(result["ready"])
+        self.assertGreater(len(result["blocks"]), 0)
+
+    def test_coa_not_seeded_blocks(self):
+        result = check_organization_readiness(self.org)
+        codes = {b["code"] for b in result["blocks"]}
+        self.assertIn("COA_NOT_SEEDED", codes)
+
+    def test_required_accounts_missing_blocks_when_coa_partially_seeded(self):
+        """A COA that has SOME accounts but is missing one Arthasee's
+        own posting rules depend on — a real, different failure mode
+        from an entirely unseeded org, and must be reported as such,
+        not silently folded into COA_NOT_SEEDED."""
+        Account.objects.create(
+            organization=self.org, code="9-99999", name="Akun Acak",
+            account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+        )
+        result = check_organization_readiness(self.org)
+        codes = {b["code"] for b in result["blocks"]}
+        self.assertIn("REQUIRED_ACCOUNTS_MISSING", codes)
+        self.assertNotIn("COA_NOT_SEEDED", codes)
+
+    def test_no_accounting_period_blocks(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        result = check_organization_readiness(self.org)
+        codes = {b["code"] for b in result["blocks"]}
+        self.assertIn("NO_ACCOUNTING_PERIOD", codes)
+
+    def test_opening_balance_not_resolved_blocks(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        AccountingPeriod.objects.create(
+            organization=self.org, year=2026, month=9,
+            start_date="2026-09-01", end_date="2026-09-30",
+        )
+        result = check_organization_readiness(self.org)
+        codes = {b["code"] for b in result["blocks"]}
+        self.assertIn("OPENING_BALANCE_NOT_RESOLVED", codes)
+
+    def test_fully_ready_org_via_confirmed_zero(self):
+        """The real, complete happy path for a genuinely brand-new
+        shop — COA seeded, a period exists, opening position
+        explicitly confirmed zero (never just left empty)."""
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        AccountingPeriod.objects.create(
+            organization=self.org, year=2026, month=9,
+            start_date="2026-09-01", end_date="2026-09-30",
+        )
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+        session.confirm_zero(confirmed_by=self.owner)
+
+        result = check_organization_readiness(self.org)
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["blocks"], [])
+
+    def test_fully_ready_org_via_posted_session(self):
+        """Same real happy path, the other real valid way to resolve
+        opening position — a genuine, posted opening balance rather
+        than a zero confirmation."""
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        AccountingPeriod.objects.create(
+            organization=self.org, year=2026, month=9,
+            start_date="2026-09-01", end_date="2026-09-30",
+        )
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+        OpeningBalanceCashLine.objects.create(session=session, account_code="1001", amount="1000000")
+        session.post(posted_by=self.owner)
+
+        result = check_organization_readiness(self.org)
+        self.assertTrue(result["ready"])
+
+    def test_empty_draft_session_alone_is_not_enough(self):
+        """The real, central proof of the whole Pillar 2 fix — a
+        session that exists but was never posted AND never
+        explicitly confirmed zero must still block, not silently
+        pass as if empty meant resolved."""
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        AccountingPeriod.objects.create(
+            organization=self.org, year=2026, month=9,
+            start_date="2026-09-01", end_date="2026-09-30",
+        )
+        OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+
+        result = check_organization_readiness(self.org)
+        self.assertFalse(result["ready"])
+        codes = {b["code"] for b in result["blocks"]}
+        self.assertIn("OPENING_BALANCE_NOT_RESOLVED", codes)
+
+    def _make_ready_org(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        AccountingPeriod.objects.create(
+            organization=self.org, year=2026, month=9,
+            start_date="2026-09-01", end_date="2026-09-30",
+        )
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def test_zero_inventory_warns_but_does_not_block(self):
+        self._make_ready_org()
+        result = check_organization_readiness(self.org)
+        self.assertTrue(result["ready"])
+        codes = {w["code"] for w in result["warnings"]}
+        self.assertIn("ZERO_INVENTORY", codes)
+
+    def test_no_mechanics_warns_but_does_not_block(self):
+        self._make_ready_org()
+        result = check_organization_readiness(self.org)
+        self.assertTrue(result["ready"])
+        codes = {w["code"] for w in result["warnings"]}
+        self.assertIn("NO_MECHANICS", codes)
+
+    def test_no_customers_or_suppliers_warn_but_never_block(self):
+        """Chris's own explicit confirmation — zero customers/
+        suppliers is operational data, never an accounting-
+        foundation blocker."""
+        self._make_ready_org()
+        result = check_organization_readiness(self.org)
+        self.assertTrue(result["ready"])
+        codes = {w["code"] for w in result["warnings"]}
+        self.assertIn("NO_CUSTOMERS", codes)
+        self.assertIn("NO_SUPPLIERS", codes)
+
+    def test_warnings_disappear_once_real_data_exists(self):
+        self._make_ready_org()
+        customer = Customer.objects.create(organization=self.org, name="Budi", phone_number="0811")
+        Vehicle.objects.create(
+            organization=self.org, customer=customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+        Supplier.objects.create(organization=self.org, name="PT Sparepart")
+        Mechanic.objects.create(organization=self.org, name="Wowo")
+        Part.objects.create(
+            organization=self.org, name="Oli", unit="liter",
+            current_stock=10, unit_price="50000", cost_price="40000",
+        )
+
+        result = check_organization_readiness(self.org)
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["warnings"], [])
+
+    def test_scoped_to_organization(self):
+        """Readiness for one org must never leak into another's real
+        result — a second, genuinely unready org must independently
+        report BLOCKED even if the first org is fully ready."""
+        self._make_ready_org()
+        other_org = Organization.objects.create(name="Bengkel Lain Readiness")
+
+        result_ready = check_organization_readiness(self.org)
+        result_other = check_organization_readiness(other_org)
+
+        self.assertTrue(result_ready["ready"])
+        self.assertFalse(result_other["ready"])    
