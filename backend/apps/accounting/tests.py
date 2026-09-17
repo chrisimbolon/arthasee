@@ -61,7 +61,7 @@ from apps.payments.models import Payment, SupplierPayment
 from apps.purchasing.models import Supplier, SupplierInvoice
 from apps.service.models import Customer, Vehicle
 from apps.workorders.events import WorkOrderCompleted
-from apps.workorders.models import WorkOrder, WorkOrderJobLine
+from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
 from django.contrib import admin
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
@@ -6460,7 +6460,7 @@ class OpeningBalanceConfirmZeroTests(TestCase):
             email="owner.confirmzero@test.id", password="pass12345!", full_name="Owner",
         )
         self.session = OpeningBalanceSession.objects.create(
-            organization=self.org, start_date="2026-09-01", created_by=self.owner,
+            organization=self.org, start_date=date(2026, 9, 1), created_by=self.owner,
         )
 
     def test_confirm_zero_on_empty_draft_session_succeeds(self):
@@ -6496,7 +6496,6 @@ class OpeningBalanceConfirmZeroTests(TestCase):
         confirmed zero — is the real, previously-indistinguishable
         gap this whole feature exists to close."""
         self.assertFalse(self.session.is_opening_position_resolved)
-
 
 class OrganizationReadinessTests(TestCase):
     """
@@ -6539,31 +6538,42 @@ class OrganizationReadinessTests(TestCase):
         self.assertNotIn("COA_NOT_SEEDED", codes)
 
     def test_no_accounting_period_blocks(self):
-        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        """
+        Real, deliberate setup: seeds every account the readiness
+        check's own REQUIRED_POSTING_ACCOUNT_CODES registry depends
+        on DIRECTLY via Account.objects.create() — NOT via
+        seed_coa(), which would also create a real AccountingPeriod
+        as a genuine side effect (ensure_current_month_period()) and
+        make this specific block unreachable to test in isolation.
+        The exact account_subtype used below doesn't matter for this
+        test — the readiness check only verifies code existence, not
+        classification correctness.
+        """
+        from apps.accounting.services.required_accounts import \
+            REQUIRED_POSTING_ACCOUNT_CODES
+        for code in REQUIRED_POSTING_ACCOUNT_CODES:
+            Account.objects.create(
+                organization=self.org, code=code, name=f"Akun {code}",
+                account_subtype=Account.AccountSubtype.KAS_SETARA_KAS,
+            )
+
         result = check_organization_readiness(self.org)
         codes = {b["code"] for b in result["blocks"]}
         self.assertIn("NO_ACCOUNTING_PERIOD", codes)
 
     def test_opening_balance_not_resolved_blocks(self):
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        AccountingPeriod.objects.create(
-            organization=self.org, year=2026, month=9,
-            start_date="2026-09-01", end_date="2026-09-30",
-        )
         result = check_organization_readiness(self.org)
         codes = {b["code"] for b in result["blocks"]}
         self.assertIn("OPENING_BALANCE_NOT_RESOLVED", codes)
 
     def test_fully_ready_org_via_confirmed_zero(self):
         """The real, complete happy path for a genuinely brand-new
-        shop — COA seeded, a period exists, opening position
-        explicitly confirmed zero (never just left empty)."""
+        shop — COA seeded (which also provisions the current
+        period), opening position explicitly confirmed zero (never
+        just left empty)."""
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        AccountingPeriod.objects.create(
-            organization=self.org, year=2026, month=9,
-            start_date="2026-09-01", end_date="2026-09-30",
-        )
-        session = OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
         session.confirm_zero(confirmed_by=self.owner)
 
         result = check_organization_readiness(self.org)
@@ -6575,13 +6585,9 @@ class OrganizationReadinessTests(TestCase):
         opening position — a genuine, posted opening balance rather
         than a zero confirmation."""
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        AccountingPeriod.objects.create(
-            organization=self.org, year=2026, month=9,
-            start_date="2026-09-01", end_date="2026-09-30",
-        )
-        session = OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
         OpeningBalanceCashLine.objects.create(session=session, account_code="1001", amount="1000000")
-        session.post(posted_by=self.owner)
+        session.post(posted_by=self.owner, confirm_variance=True)
 
         result = check_organization_readiness(self.org)
         self.assertTrue(result["ready"])
@@ -6592,11 +6598,7 @@ class OrganizationReadinessTests(TestCase):
         explicitly confirmed zero must still block, not silently
         pass as if empty meant resolved."""
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        AccountingPeriod.objects.create(
-            organization=self.org, year=2026, month=9,
-            start_date="2026-09-01", end_date="2026-09-30",
-        )
-        OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+        OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
 
         result = check_organization_readiness(self.org)
         self.assertFalse(result["ready"])
@@ -6605,11 +6607,12 @@ class OrganizationReadinessTests(TestCase):
 
     def _make_ready_org(self):
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        AccountingPeriod.objects.create(
-            organization=self.org, year=2026, month=9,
-            start_date="2026-09-01", end_date="2026-09-30",
-        )
-        session = OpeningBalanceSession.objects.create(organization=self.org, start_date="2026-09-01")
+        # seed_coa() already creates a real AccountingPeriod for the
+        # current month as a genuine side effect
+        # (ensure_current_month_period()) — no separate period
+        # creation needed here, and creating one manually for the
+        # same (org, year, month) would collide with it.
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
         session.confirm_zero(confirmed_by=self.owner)
 
     def test_zero_inventory_warns_but_does_not_block(self):
@@ -6639,7 +6642,7 @@ class OrganizationReadinessTests(TestCase):
 
     def test_warnings_disappear_once_real_data_exists(self):
         self._make_ready_org()
-        customer = Customer.objects.create(organization=self.org, name="Budi", phone_number="0811")
+        customer = Customer.objects.create(organization=self.org, name="Budi")
         Vehicle.objects.create(
             organization=self.org, customer=customer, plate_number="BP 1 AA",
             manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
@@ -6666,4 +6669,6 @@ class OrganizationReadinessTests(TestCase):
         result_other = check_organization_readiness(other_org)
 
         self.assertTrue(result_ready["ready"])
-        self.assertFalse(result_other["ready"])    
+        self.assertFalse(result_other["ready"])
+
+ 
