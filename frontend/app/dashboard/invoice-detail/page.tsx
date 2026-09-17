@@ -20,7 +20,7 @@ import { organizationsApi } from "@/lib/api/organizations";
 import { Payment, PaymentMethod, paymentsApi } from "@/lib/api/payments";
 import { ArrowLeft, Download, Loader2, Printer } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
 const STATUS_LABEL: Record<InvoiceStatus, string> = {
@@ -101,6 +101,12 @@ function InvoiceDetailContent() {
   const [updating, setUpdating] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [error, setError] = useState<string | null>(null);
+// 17 Sep 2026 -- real, deliberate split from `error` above: this is
+  // never a failure state, and clearing on any new action (payment
+  // resubmit, status change) keeps a stale success message from
+  // lingering once the person has moved on to something else.
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const router = useRouter();
 
   // Payment-form state — kept separate from `updating` (used for
   // plain status transitions) since the two actions have genuinely
@@ -116,9 +122,12 @@ function InvoiceDetailContent() {
       .then((inv) => {
         setInvoice(inv);
         // Payment history is harmless to fetch regardless of status
-        // (empty for DRAFT/a never-paid CANCELLED invoice) — no
+        // (empty for DRAFT/a never-paid CANCELLED invoice) -- no
         // status check needed before calling this.
-        return paymentsApi.list(inv.id).then(setPayments).catch(() => setPayments([]));
+        return paymentsApi.list(inv.id)
+          .then(setPayments)
+          .catch(() => setPayments([]))
+          .then(() => inv);
       })
       .finally(() => setLoading(false));
   useEffect(() => {
@@ -159,18 +168,42 @@ function InvoiceDetailContent() {
 
   const submitPayment = async () => {
     if (!invoice) return;
-    setSubmittingPayment(true); setError(null);
+    setSubmittingPayment(true); setError(null); setSuccessMessage(null);
     try {
+      // Captured before load() below overwrites paymentAmount's own
+      // meaning-in-context -- this is "what was just paid," not
+      // "what's currently typed in the form" (the form resets right
+      // after).
+      const amountJustPaid = paymentAmount;
       await paymentsApi.record(invoice.id, {
         amount: paymentAmount,
         method: paymentMethod,
         reference: paymentReference || undefined,
       });
       setShowPaymentForm(false);
-      await load(); // re-fetch — status may now be PAID, and the new payment belongs in the history list
+      const updated = await load(); // re-fetch -- status may now be PAID, and the new payment belongs in the history list
+
+      // 17 Sep 2026 -- real, deliberate split, Chris's own confirmed
+      // design: a partial payment keeps the person right here (still
+      // real work to track on this same invoice -- Sisa Tagihan, more
+      // installments to come), so it's just a message, inline. A
+      // payment that brings the balance to zero is a genuinely
+      // different, "this task is done" moment -- shown briefly, then
+      // routed back to the invoice list, matching the list page's own
+      // now-empty-of-this-task standing view. The short delay is
+      // deliberate -- long enough to actually read the message before
+      // the page moves out from under them, not a silent jump cut.
+      if (Number(updated.balance_due) <= 0) {
+        setSuccessMessage("Pembayaran lunas! Invoice telah diselesaikan.");
+        setTimeout(() => router.push("/dashboard/invoices"), 1800);
+      } else {
+        setSuccessMessage(
+          `Pembayaran sebesar ${money(amountJustPaid)} berhasil dicatat. Sisa tagihan: ${money(updated.balance_due)}.`
+        );
+      }
     } catch (err: any) {
       // Deliberate deviation from changeStatus()'s own generic
-      // catch above — Payment.record() returns real, specific,
+      // catch above -- Payment.record() returns real, specific,
       // actionable messages (overpayment amount, wrong invoice
       // status) that are genuinely more useful to show than a flat
       // "gagal" string here, unlike a plain status PATCH which never
@@ -242,6 +275,7 @@ function InvoiceDetailContent() {
         </div>
       </div>
 
+      {successMessage && <div className="no-print" style={{ background: "#e8f5ee", color: "#2e7d4f", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14, fontWeight: 600 }}>{successMessage}</div>}
       {error && <div className="no-print" style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
 
       <div className="card" style={{ maxWidth: 720, margin: "0 auto", padding: 40 }}>
