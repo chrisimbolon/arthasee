@@ -29,8 +29,9 @@ from .views import (AccountDetailView, AccountImportCommitView,
                     OpeningBalancePostView, OpeningBalancePreviewView,
                     OpeningBalanceReceivableDetailView,
                     OpeningBalanceReceivableListCreateView,
-                    OpeningBalanceSessionView, ProfitLossTrendView,
-                    ProfitLossView, ReconciliationMatchDetailView,
+                    OpeningBalanceSessionView, OrganizationReadinessView,
+                    ProfitLossTrendView, ProfitLossView,
+                    ReconciliationMatchDetailView,
                     ReconciliationMatchListCreateView,
                     ReconciliationSummaryView, TrialBalanceView)
 
@@ -48,6 +49,13 @@ urlpatterns = [
             name="control-account-reconciliation",
         ),
     path("dashboard-financial-summary/", DashboardFinancialSummaryView.as_view(), name="dashboard-financial-summary"),
+    # 17 Sep 2026 — Brand-New Workshop Readiness (locked spec), Step
+    # 4. The one real, shared readiness check every workflow gate
+    # (Estimate approval, WorkOrder close, Invoice issue, Payment
+    # record) will consume directly at the model layer — this
+    # endpoint exists for the frontend (Ringkasan banner, contextual
+    # blocked-action checks), not for other backend code.
+    path("organization-readiness/", OrganizationReadinessView.as_view(), name="organization-readiness"),    
     # 1 Sep 2026 — Kas Harian, Made's own confirmed real request.
     path("daily-cash-activity/", DailyCashActivityView.as_view(), name="daily-cash-activity"),
     # 4 Sep 2026 — General Ledger (Buku Besar), account-centric view.
