@@ -1456,6 +1456,20 @@ class OpeningBalanceSession(TenantScopedModel):
         "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="+", verbose_name="Diposting Oleh",
     )
+    # 17 Sep 2026 — Brand-New Workshop Readiness, Pillar 2 (Opening
+    # Position). Real, deliberate gap this closes: an empty DRAFT
+    # session (nothing entered yet) was previously indistinguishable
+    # from a genuinely new business with a real, honest zero opening
+    # position — the readiness check couldn't tell "hasn't finished
+    # data entry" from "has nothing to enter" without this explicit,
+    # separate confirmation. See confirm_zero() below for the one
+    # real entry point — never set by simply leaving the session
+    # empty.
+    confirmed_zero_at = models.DateTimeField(null=True, blank=True, verbose_name="Waktu Dikonfirmasi Nihil")
+    confirmed_zero_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name="Dikonfirmasi Nihil Oleh",
+    )
     created_by = models.ForeignKey(
         "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="+", verbose_name="Dibuat Oleh",
@@ -1730,6 +1744,64 @@ class OpeningBalanceSession(TenantScopedModel):
 
         return entry
 
+    @property
+    def is_opening_position_resolved(self) -> bool:
+        """
+        17 Sep 2026 — Brand-New Workshop Readiness, Pillar 2. The one
+        real, shared answer to "has this org's opening position been
+        dealt with at all" — POSTED (a real opening balance exists),
+        OR explicitly confirmed zero (a genuinely new business with
+        nothing to enter). An empty DRAFT session with neither is
+        NOT resolved — that's the real, previously-indistinguishable
+        "hasn't finished yet" state this whole feature exists to
+        catch. Used directly by
+        apps.accounting.services.readiness — kept here, on the model
+        itself, so the one real definition of "resolved" can never
+        drift between the model and the readiness service that reads
+        it.
+        """
+        return self.status == self.Status.POSTED or self.confirmed_zero_at is not None
+
+    def confirm_zero(self, *, confirmed_by=None):
+        """
+        17 Sep 2026 — Brand-New Workshop Readiness, Pillar 2. The one
+        real, explicit action for a genuinely new business with no
+        real opening position at all — Chris's own confirmed
+        distinction from simply leaving this session empty, which
+        looks identical to a migrating shop who hasn't finished data
+        entry yet.
+
+        Only valid while DRAFT (same "already posted, nothing left
+        to confirm" reasoning post() itself already enforces) and
+        genuinely empty across every real line category — a session
+        with real lines already entered has a real, non-zero opening
+        position by definition; confirming "zero" over that would be
+        confirming something false, not a harmless formality. The
+        person must clear those lines first, or post the real
+        opening balance instead — this method deliberately does not
+        silently discard real data entered in good faith.
+        """
+        from django.utils import timezone
+
+        if self.status != self.Status.DRAFT:
+            raise ValueError("Sesi saldo awal ini sudah pernah diposting — konfirmasi nihil tidak relevan lagi.")
+        if self.confirmed_zero_at is not None:
+            raise ValueError("Saldo awal sudah pernah dikonfirmasi nihil sebelumnya.")
+
+        has_any_line = (
+            self.cash_lines.exists() or self.part_lines.exists() or self.asset_lines.exists()
+            or self.receivable_lines.exists() or self.payable_lines.exists() or self.other_lines.exists()
+        )
+        if has_any_line:
+            raise ValueError(
+                "Sesi saldo awal ini memiliki data yang sudah dimasukkan — tidak bisa "
+                "dikonfirmasi sebagai nihil. Hapus semua baris terlebih dahulu, atau "
+                "lengkapi dan posting saldo awal yang sebenarnya."
+            )
+
+        self.confirmed_zero_at = timezone.now()
+        self.confirmed_zero_by = confirmed_by
+        self.save(update_fields=["confirmed_zero_at", "confirmed_zero_by"])
 
 class OpeningBalanceCashLine(TenantScopedModel):
     ACCOUNT_CHOICES = [("1001", "Kas"), ("1101", "Bank")]
