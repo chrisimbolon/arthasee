@@ -55,6 +55,7 @@ from datetime import date
 from decimal import Decimal
 
 from apps.accounting import account_import, bank_statement_import
+from apps.accounting.services.readiness import check_organization_readiness
 from apps.core.models import Outbox
 from apps.core.views import TenantScopedAPIView
 from django.db.models import ProtectedError, Sum
@@ -835,6 +836,38 @@ class DashboardFinancialSummaryView(TenantScopedAPIView):
         data = reports.dashboard_financial_summary(organization, as_of=as_of)
         return Response({"success": True, **data})
 
+class OrganizationReadinessView(TenantScopedAPIView):
+    """
+    GET /api/accounting/organization-readiness/
+
+    17 Sep 2026 — Brand-New Workshop Readiness (locked spec), Step 4.
+    Deliberately a thin wrapper — every real check lives in
+    apps.accounting.services.readiness.check_organization_readiness();
+    this view's only job is resolving the real organization and
+    calling it. No `model` attribute needed — same precedent already
+    established by BankStatementImportPreviewView/CommitView, which
+    also have no single natural model to scope against (this is an
+    aggregate check across Account/AccountingPeriod/OpeningBalance
+    Session and several other apps' own models).
+
+    Open to any authenticated org member, NOT owner-only — reading
+    readiness status is itself harmless, informational data; nothing
+    here mutates anything. Every real workflow gate that CONSUMES
+    this (Estimate approval, WorkOrder close, Invoice issue, Payment
+    record — steps 6/7) calls check_organization_readiness()
+    directly rather than re-fetching through this endpoint — this
+    view exists for the frontend (the Ringkasan banner, and any
+    direct "check readiness" UI action), not for other backend code.
+    """
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        result = check_organization_readiness(organization)
+        return Response({"success": True, **result})
 
 class GeneralLedgerView(TenantScopedAPIView):
     """
