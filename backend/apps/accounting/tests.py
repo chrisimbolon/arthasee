@@ -6671,4 +6671,72 @@ class OrganizationReadinessTests(TestCase):
         self.assertTrue(result_ready["ready"])
         self.assertFalse(result_other["ready"])
 
- 
+class OrganizationReadinessAPITests(APITestCase):
+    """
+    17 Sep 2026 — HTTP-level coverage for GET /api/accounting/
+    organization-readiness/. Real logic already proven exhaustively
+    by OrganizationReadinessTests (model-layer, above) — this class
+    only proves the thin view is wired correctly: right shape, right
+    org-scoping, open to any authenticated member.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.member = CustomUser.objects.create_user(
+            email="member.readinessapi@test.id", password="pass12345!", full_name="Staff Member",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.member, role="member", is_active=True)
+        self.client.force_authenticate(user=self.member)
+
+    def test_any_member_can_read_readiness(self):
+        """Confirms the real, deliberate non-owner-only gate — a
+        plain 'member' role must still succeed; reading readiness is
+        harmless, informational data."""
+        resp = self.client.get("/api/accounting/organization-readiness/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["success"])
+        self.assertIn("ready", resp.data)
+        self.assertIn("blocks", resp.data)
+        self.assertIn("warnings", resp.data)
+
+    def test_brand_new_org_reports_not_ready_via_api(self):
+        resp = self.client.get("/api/accounting/organization-readiness/")
+        self.assertFalse(resp.data["ready"])
+        self.assertGreater(len(resp.data["blocks"]), 0)
+
+    def test_response_shape_matches_locked_schema(self):
+        """Real, machine-readable schema check, per Chris's own
+        confirmed requirement — every block/warning must carry a
+        stable code, never just a message string to parse."""
+        resp = self.client.get("/api/accounting/organization-readiness/")
+        for block in resp.data["blocks"]:
+            self.assertIn("code", block)
+            self.assertIn("message", block)
+            self.assertIn("action", block)
+        for warning in resp.data["warnings"]:
+            self.assertIn("code", warning)
+            self.assertIn("message", warning)
+
+    def test_scoped_to_organization(self):
+        from datetime import date
+
+        from apps.accounting.models import OpeningBalanceSession
+
+        other_org = Organization.objects.create(name="Bengkel Lain Readiness API")
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.readinessapi@test.id", password="pass12345!", full_name="Other Owner",
+        )
+        session = OpeningBalanceSession.objects.create(organization=other_org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=other_owner)
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+
+        # This org (self.org) is still brand-new and unready.
+        resp_self = self.client.get("/api/accounting/organization-readiness/")
+        self.assertFalse(resp_self.data["ready"])
+
+        # The other org is genuinely ready — its own real result
+        # must never leak into or get confused with this one's.
+        self.client.force_authenticate(user=other_owner)
+        resp_other = self.client.get("/api/accounting/organization-readiness/")
+        self.assertTrue(resp_other.data["ready"]) 
