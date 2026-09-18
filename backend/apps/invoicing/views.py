@@ -3,6 +3,7 @@
 # =============================================================================
 from decimal import Decimal
 
+from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
 from apps.service.models import ServiceRecord
 from django.db import transaction
@@ -246,6 +247,15 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
                 {"success": False, "message": "Status tidak valid."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # 17 Sep 2026 -- Brand-New Workshop Readiness, Step 7. Checked
+        # here, scoped to ISSUED specifically -- see this file's own
+        # header note for why CANCELLED and the DRAFT no-op are
+        # deliberately never gated by this.
+        if new_status == "ISSUED":
+            blocked = readiness_block_response(invoice.organization)
+            if blocked is not None:
+                return blocked
         if new_status == "DRAFT" and old_status != "DRAFT":
             return Response(
                 {
