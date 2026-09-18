@@ -1,6 +1,11 @@
 # =============================================================================
 # === backend/apps/organizations/views.py ===
 # =============================================================================
+from datetime import date
+
+from apps.accounting.coa import seed_chart_of_accounts
+from apps.accounting.models import OpeningBalanceSession
+from apps.accounting.periods import ensure_current_month_period
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -132,6 +137,31 @@ class OrganizationOnboardingCompleteView(APIView):
                 {"success": False, "message": "Lengkapi profil bengkel (Langkah 1) terlebih dahulu."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # 18 Sep 2026 -- Brand-New Workshop Readiness fallout. Real
+        # fix -- see this file's own top-of-diff note for the full
+        # story. seed_chart_of_accounts()/ensure_current_month_period()
+        # are both real, already-idempotent functions (seed_coa's own
+        # management command already relies on that idempotency for
+        # its own safe re-run guarantee) -- calling them
+        # unconditionally here, every time onboarding completes, is
+        # safe even if a prior call already seeded them, and closes
+        # the COA_NOT_SEEDED / NO_ACCOUNTING_PERIOD blocks a genuinely
+        # fresh signup would otherwise still hit.
+        #
+        # The Opening Position pillar: if no OpeningBalanceSession
+        # exists at all yet, this genuinely IS the "brand-new shop,
+        # no prior history" case confirm_zero() exists for -- create
+        # one and confirm it right here, at the one real, shared
+        # point both of Step 2's exit paths already funnel through.
+        # A session that already exists (the real Opening Balance
+        # path, already POSTED via OpeningBalanceStep's own
+        # handlePost) is left completely untouched by this.
+        seed_chart_of_accounts(org)
+        ensure_current_month_period(org)
+        if not OpeningBalanceSession.objects.filter(organization=org).exists():
+            session = OpeningBalanceSession.objects.create(organization=org, start_date=date.today())
+            session.confirm_zero(confirmed_by=request.user)
 
         org.onboarding_completed = True
         org.save(update_fields=["onboarding_completed"])
