@@ -7,6 +7,16 @@ import { AlertTriangle, Calendar, Check, ChevronDown, Loader2, Plus, Search, X }
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
+// 18 Sep 2026 -- dd-mm-yyyy specifically for this list's own compact
+// "Servis Terakhir" column -- v.last_service_date arrives as a plain
+// "YYYY-MM-DD" string (a DateField, never a datetime), so this is a
+// direct, safe string split -- no real Date object/timezone
+// conversion involved at all.
+function formatDateShortID(isoDate: string): string {
+  const [year, month, day] = isoDate.split("-");
+  return `${day}-${month}-${year}`;
+}
+
 function CustomerCombobox({ customers, value, onChange }: {
   customers: Customer[]; value: string; onChange: (id: string) => void;
 }) {
@@ -333,7 +343,7 @@ export default function VehiclesPage() {
                   <td>{v.model} <span style={{ color: "var(--steel)", fontSize: 12.5 }}>({v.manufacture_year})</span></td>
                   <td>{v.customer_name}</td>
                   <td className="mono">{v.current_odometer_km.toLocaleString("id-ID")} km</td>
-                  <td className="mono" style={{ fontSize: 13 }}>{v.last_service_date || <span style={{ color: "var(--steel)" }}>Belum pernah</span>}</td>
+                  <td className="mono" style={{ fontSize: 13 }}>{v.last_service_date ? formatDateShortID(v.last_service_date) : <span style={{ color: "var(--steel)" }}>Belum pernah</span>}</td>
                   <td style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     <span className={`pill ${v.is_due_for_service ? "due" : "ok"}`}>
                       <span className="dot" />{v.is_due_for_service ? "Harus Servis" : "Aman"}
