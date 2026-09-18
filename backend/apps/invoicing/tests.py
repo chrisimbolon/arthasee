@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from apps.accounting import cancellations
-from apps.accounting.models import Account, JournalEntry
+from apps.accounting.models import Account, JournalEntry, OpeningBalanceSession
 from apps.authentication.models import CustomUser
 from apps.core.models import Outbox
 from apps.inventory.models import Part, PartUsage, StockAdjustment
@@ -43,6 +43,14 @@ class InvoicingAPITestBase(APITestCase):
         OrganizationMembership.objects.create(
             organization=self.org, user=self.owner, role="owner", is_active=True,
         )
+        # 17 Sep 2026 -- Brand-New Workshop Readiness fallout. seed_coa()
+        # alone resolves COA + periods, but InvoiceStatusUpdateView's
+        # ISSUED transition is now gated on FULL organization
+        # readiness, which also requires the Opening Position pillar
+        # resolved. Genuinely brand-new test fixture, not a migrating
+        # shop -- zero-confirmation is the correct, honest choice here.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
         self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
         self.vehicle = Vehicle.objects.create(
             organization=self.org, customer=self.customer,
@@ -1165,3 +1173,70 @@ class InvoiceListTests(InvoicingAPITestBase):
         resp = self.client.get("/api/invoices/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["count"], 0)
+
+class InvoiceIssueReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7. Real proof
+    the readiness gate is scoped SPECIFICALLY to the ISSUED
+    transition — and, just as importantly, that CANCELLING an
+    invoice is never blocked by it (a wind-down action, not a new
+    financial commitment).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.invissuereadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Budi")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Wowo")
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _draft_invoice(self):
+        wo = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic, status="QC",
+        )
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle, service_date=date(2026, 9, 17),
+            odometer_km=10000, issue_description="Servis",
+        )
+        wo.service_record = record
+        wo.status = "DONE"
+        wo.save(update_fields=["service_record", "status"])
+        return Invoice.objects.create(service_record=record)
+
+    def test_issue_blocked_when_org_not_ready(self):
+        invoice = self._draft_invoice()
+        resp = self.client.patch(f"/api/invoices/{invoice.id}/status/", {"status": "ISSUED"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "DRAFT")
+
+    def test_issue_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        invoice = self._draft_invoice()
+        resp = self.client.patch(f"/api/invoices/{invoice.id}/status/", {"status": "ISSUED"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "ISSUED")
+
+    def test_cancel_never_blocked_by_readiness(self):
+        """The real, central proof of the whole 'don't gate wind-down
+        actions' design call — cancelling a DRAFT invoice must work
+        even when the org is not ready."""
+        invoice = self._draft_invoice()
+        resp = self.client.patch(f"/api/invoices/{invoice.id}/status/", {"status": "CANCELLED"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "CANCELLED")        

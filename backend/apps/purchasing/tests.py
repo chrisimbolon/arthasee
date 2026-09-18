@@ -10,7 +10,7 @@ from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
 
-from apps.accounting.models import Account
+from apps.accounting.models import Account, OpeningBalanceSession
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
@@ -658,6 +658,14 @@ class PurchasingAPITestBase(APITestCase):
         OrganizationMembership.objects.create(
             organization=self.org, user=self.owner, role="owner", is_active=True,
         )
+        # 17 Sep 2026 -- Brand-New Workshop Readiness fallout. seed_coa()
+        # alone resolves COA + periods, but SupplierInvoicePayView's
+        # /pay/ endpoint is now gated on FULL organization readiness,
+        # which also requires the Opening Position pillar resolved.
+        # Genuinely brand-new test fixture, not a migrating shop --
+        # zero-confirmation is the correct, honest choice here.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
         self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
         self.part = Part.objects.create(
             organization=self.org, name="Oli Mesin", unit="liter",
@@ -1004,10 +1012,17 @@ class PurchaseReturnAPITests(PurchasingAPITestBase):
         supplier_invoice_id = invoice_resp.data["supplier_invoice"]["id"]
 
         with self.captureOnCommitCallbacks(execute=True):
-            self.client.post(
+            pay_resp = self.client.post(
                 f"/api/supplier-invoices/{supplier_invoice_id}/pay/",
                 {"method": "bank_transfer"}, format="json",
             )
+        # 17 Sep 2026 -- real, defensive addition: this test's own
+        # point (Case C) depends entirely on the invoice genuinely
+        # reaching PAID here. Asserting it explicitly means a future
+        # regression in the payment step fails loudly, right here,
+        # instead of silently producing a confusing, unrelated-looking
+        # failure two calls later.
+        self.assertEqual(pay_resp.status_code, status.HTTP_201_CREATED)
 
         resp = self.client.post("/api/purchase-returns/", {
             "goods_received_note": grn_data["id"],

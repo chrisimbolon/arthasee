@@ -31,11 +31,11 @@ from datetime import timedelta
 from decimal import Decimal
 
 from apps.accounting import cancellations
-from apps.accounting.models import Account, JournalEntry
+from apps.accounting.models import Account, JournalEntry, OpeningBalanceSession
 from apps.authentication.models import CustomUser
 from apps.core.models import Outbox
 from apps.invoicing.events import InvoiceRefunded
-from apps.invoicing.models import Invoice
+from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.payments.models import (InternalCashMutation, OperatingExpense,
                                   SupplierPayment)
@@ -63,6 +63,16 @@ class PaymentsAPITestBase(APITestCase):
         OrganizationMembership.objects.create(
             organization=self.org, user=self.owner, role="owner", is_active=True,
         )
+        # 17 Sep 2026 -- Brand-New Workshop Readiness fallout. seed_coa()
+        # alone resolves COA + periods, but this class's own setUp()
+        # issues the invoice over real HTTP, and _pay() posts to the
+        # real, now-gated payment endpoint -- both need FULL
+        # organization readiness, which also requires the Opening
+        # Position pillar resolved. Genuinely brand-new test fixture,
+        # not a migrating shop -- zero-confirmation is the correct,
+        # honest choice here.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
         self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
         self.vehicle = Vehicle.objects.create(
             organization=self.org, customer=self.customer,
@@ -914,3 +924,121 @@ class InternalCashMutationAPITests(APITestCase):
 
         resp = self.client.get("/api/internal-cash-mutations/")
         self.assertEqual(resp.data["internal_cash_mutations"], [])
+
+class PaymentRecordReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7 (AR side).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.paymentreadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Budi")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Wowo")
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _issued_invoice(self):
+        """Constructed directly via the ORM, bypassing the real
+        InvoiceIssued event/journal posting entirely — this test is
+        about the PAYMENT gate specifically, not re-proving invoice
+        issuance's own posting logic (covered separately, above)."""
+        wo = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic, status="QC",
+        )
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle, service_date=date(2026, 9, 17),
+            odometer_km=10000, issue_description="Servis",
+        )
+        wo.service_record = record
+        wo.status = "DONE"
+        wo.save(update_fields=["service_record", "status"])
+        invoice = Invoice.objects.create(service_record=record)
+        InvoiceLineItem.objects.create(
+            invoice=invoice, kind="labor", description="Jasa", quantity=1, unit_price=Decimal("100000"),
+        )
+        invoice.status = "ISSUED"
+        invoice.save(update_fields=["status"])
+        return invoice
+
+    def test_payment_blocked_when_org_not_ready(self):
+        invoice = self._issued_invoice()
+        resp = self.client.post(
+            f"/api/invoices/{invoice.id}/payments/", {"amount": "50000", "method": "cash"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        self.assertFalse(invoice.payments.exists())
+
+    def test_payment_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        invoice = self._issued_invoice()
+        resp = self.client.post(
+            f"/api/invoices/{invoice.id}/payments/", {"amount": "50000", "method": "cash"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(invoice.payments.exists())
+
+
+class SupplierPaymentReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7 (AP side) —
+    the deliberate extension beyond the literal "Payment record"
+    wording, flagged directly when delivered.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.suppayreadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart")
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _unpaid_supplier_invoice(self):
+        """Constructed directly via the ORM -- SupplierInvoice.record()
+        itself calls AccountingPeriod.assert_open_for_posting()
+        internally, which would raise for a genuinely not-ready org
+        before this test could even reach the payment gate it's
+        actually testing."""
+        return SupplierInvoice.objects.create(
+            organization=self.org, supplier=self.supplier,
+            amount=Decimal("500000"), invoice_date=date(2026, 9, 17), status="UNPAID",
+        )
+
+    def test_supplier_payment_blocked_when_org_not_ready(self):
+        invoice = self._unpaid_supplier_invoice()
+        resp = self.client.post(
+            f"/api/supplier-invoices/{invoice.id}/pay/", {"method": "bank_transfer"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "UNPAID")
+
+    def test_supplier_payment_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        invoice = self._unpaid_supplier_invoice()
+        resp = self.client.post(
+            f"/api/supplier-invoices/{invoice.id}/pay/", {"method": "bank_transfer"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "PAID")

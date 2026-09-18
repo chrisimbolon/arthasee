@@ -6,6 +6,7 @@ from decimal import Decimal
 from io import StringIO
 from unittest.mock import PropertyMock, patch
 
+from apps.accounting.models import OpeningBalanceSession
 from apps.authentication.models import CustomUser
 from apps.core.models import Outbox
 from apps.estimates.models import Estimate
@@ -34,6 +35,14 @@ class WorkOrderAPITestBase(APITestCase):
         OrganizationMembership.objects.create(
             organization=self.org, user=self.owner, role="owner", is_active=True,
         )
+        # 17 Sep 2026 -- Brand-New Workshop Readiness fallout. seed_coa()
+        # alone resolves COA + periods, but WorkOrderCloseView is now
+        # gated on FULL organization readiness, which also requires
+        # the Opening Position pillar resolved. Genuinely brand-new
+        # test fixture, not a migrating shop -- zero-confirmation is
+        # the correct, honest choice here.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
         self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
         self.vehicle = Vehicle.objects.create(
             organization=self.org, customer=self.customer,
@@ -2495,3 +2504,63 @@ class WorkOrderMasterListAPITests(APITestCase):
         resp = self.client.get("/api/work-orders/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["count"], 0)
+
+class WorkOrderCloseReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7. Real proof
+    the readiness gate is wired onto WorkOrder CLOSE, and is
+    genuinely ADDITIVE to close()'s own existing business-rule
+    checks (mechanic assigned), not a replacement for them.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.woclosereadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Budi")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Wowo")
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _wo_at_qc(self, assigned=True):
+        return WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            assigned_to=self.mechanic if assigned else None, status="QC",
+        )
+
+    def test_close_blocked_when_org_not_ready(self):
+        wo = self._wo_at_qc()
+        resp = self.client.post(f"/api/work-orders/{wo.id}/close/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        wo.refresh_from_db()
+        self.assertEqual(wo.status, "QC")  # nothing actually happened
+
+    def test_close_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        wo = self._wo_at_qc()
+        resp = self.client.post(f"/api/work-orders/{wo.id}/close/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        wo.refresh_from_db()
+        self.assertEqual(wo.status, "DONE")
+
+    def test_close_still_rejects_no_mechanic_even_when_org_ready(self):
+        """Real proof the readiness gate is genuinely ADDITIVE, not a
+        replacement for WorkOrder.close()'s own real business-rule
+        checks — this must fail for a DIFFERENT, real reason even
+        once readiness itself is satisfied."""
+        self._make_org_ready()
+        wo = self._wo_at_qc(assigned=False)
+        resp = self.client.post(f"/api/work-orders/{wo.id}/close/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertNotIn("blocks", resp.data)  # a real business-rule 409, not a readiness one        
