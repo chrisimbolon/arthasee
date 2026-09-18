@@ -1444,3 +1444,35 @@ export const reconciliationApi = {
     }
   },
 };
+
+// 17 Sep 2026 — Brand-New Workshop Readiness (locked spec). Real,
+// machine-readable schema, deliberately — Chris's own confirmed
+// requirement: every block/warning carries a stable `code` the
+// frontend switches on, never a message string to parse. `action`
+// is one of a small, real, fixed set of routing hints the backend
+// defines (apps.accounting.services.readiness's own ACTION_*
+// constants) — never a free-form string.
+export interface ReadinessBlock {
+  code:    string;
+  message: string;
+  action:  "OPEN_ACCOUNTING_SETUP" | "OPEN_OPENING_BALANCE";
+}
+
+export interface ReadinessWarning {
+  code:    string;
+  message: string;
+}
+
+export interface OrganizationReadiness {
+  success:  boolean;
+  ready:    boolean;
+  blocks:   ReadinessBlock[];
+  warnings: ReadinessWarning[];
+}
+
+export const organizationReadinessApi = {
+  async get(): Promise<OrganizationReadiness> {
+    const { data } = await api.get("/api/accounting/organization-readiness/");
+    return data;
+  },
+};
