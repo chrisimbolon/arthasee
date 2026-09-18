@@ -1,8 +1,10 @@
 # =============================================================================
 # === backend/apps/estimates/tests.py ===
 # =============================================================================
+from datetime import date
 from decimal import Decimal
 
+from apps.accounting.models import OpeningBalanceSession
 from apps.authentication.models import CustomUser
 from apps.inventory.models import Part, StockAdjustment
 from apps.organizations.models import Organization, OrganizationMembership
@@ -35,6 +37,16 @@ class EstimateAPITestBase(APITestCase):
         OrganizationMembership.objects.create(
             organization=self.org, user=self.owner, role="owner", is_active=True,
         )
+        # 17 Sep 2026 — Brand-New Workshop Readiness, Step 7. Real,
+        # needed addition: seed_coa() alone resolves COA + periods,
+        # but Estimate.approve() is now gated on FULL organization
+        # readiness, which also requires the Opening Position pillar
+        # resolved (POSTED, or explicitly confirmed zero). This is a
+        # genuinely brand-new test fixture, not a migrating shop, so
+        # zero-confirmation is the correct, honest choice here.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
+
         self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
         self.vehicle = Vehicle.objects.create(
             organization=self.org, customer=self.customer,
@@ -426,6 +438,13 @@ class EstimateRealTransactionTests(APITransactionTestCase):
         OrganizationMembership.objects.create(
             organization=self.org, user=self.owner, role="owner", is_active=True,
         )
+        # 17 Sep 2026 — same real addition as EstimateAPITestBase's
+        # own setUp() above — this class's own test_approve_via_
+        # real_http_request is exactly the "future one that approves
+        # an Estimate through this fixture" its original comment
+        # already anticipated.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
         self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
         self.vehicle = Vehicle.objects.create(
             organization=self.org, customer=self.customer,
@@ -548,3 +567,70 @@ class EstimateOdometerCarryForwardTests(EstimateAPITestBase):
         estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
         work_order = estimate.approve(approved_by=self.owner)
         self.assertIsNone(work_order.odometer_km_intake)
+
+class EstimateApproveReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 6. Real proof
+    the readiness gate is wired onto Estimate APPROVAL specifically —
+    and, just as importantly, that Estimate CREATION remains
+    completely unblocked regardless of org readiness. That second
+    half is the real, central proof of the locked spec's own "don't
+    block harmless planning activity" principle — not a footnote.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.estreadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Budi")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def test_draft_estimate_creation_never_blocked_by_readiness(self):
+        """The real, central proof — an org that is NOT ready must
+        still be able to create a real, pending Estimate. If this
+        test ever fails, the readiness gate has been wired onto the
+        wrong endpoint."""
+        resp = self.client.post(
+            f"/api/vehicles/{self.vehicle.id}/estimates/",
+            {"diagnosis_notes": "Ganti oli"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_approve_blocked_when_org_not_ready(self):
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        resp = self.client.post(f"/api/estimates/{estimate.id}/approve/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(resp.data["success"])
+        self.assertIn("blocks", resp.data)
+        self.assertGreater(len(resp.data["blocks"]), 0)
+        estimate.refresh_from_db()
+        self.assertEqual(estimate.status, "PENDING")  # nothing actually happened
+
+    def test_approve_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        resp = self.client.post(f"/api/estimates/{estimate.id}/approve/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        estimate.refresh_from_db()
+        self.assertEqual(estimate.status, "APPROVED")
+
+    def test_blocked_response_carries_real_structured_blocks(self):
+        """Real, machine-readable schema check at the workflow-gate
+        level too — not just the standalone readiness endpoint."""
+        estimate = Estimate.objects.create(organization=self.org, vehicle=self.vehicle)
+        resp = self.client.post(f"/api/estimates/{estimate.id}/approve/")
+        for block in resp.data["blocks"]:
+            self.assertIn("code", block)
+            self.assertIn("message", block)
+            self.assertIn("action", block)
