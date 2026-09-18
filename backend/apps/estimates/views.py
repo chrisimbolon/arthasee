@@ -1,6 +1,7 @@
 # =============================================================================
 # === backend/apps/estimates/views.py ===
 # =============================================================================
+from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
 from django.db import transaction
 from django.http import HttpResponse
@@ -110,17 +111,34 @@ class EstimateDetailView(TenantScopedAPIView):
 
 
 class EstimateApproveView(TenantScopedAPIView):
-    """POST /api/estimates/<id>/approve/ — promotes into a real WorkOrder."""
+    """
+    POST /api/estimates/<id>/approve/ -- promotes into a real
+    WorkOrder.
+
+    17 Sep 2026 -- Brand-New Workshop Readiness, Step 6. Real, hard
+    block: an Estimate can always be CREATED regardless of org
+    readiness (pure planning activity, zero accounting/operational
+    impact -- locked spec's own explicit principle), but APPROVING
+    one promotes it into a real WorkOrder and, downstream, real
+    material-line stock deduction -- the exact moment this stops
+    being harmless planning. Checked here, first, before
+    estimate.approve()'s own real business-rule validation
+    (PENDING-status check) runs -- a genuinely different, cross-
+    cutting concern from that model-level check, not a duplicate of
+    it.
+    """
     model = Estimate
 
     def post(self, request, pk):
         estimate = self.get_object(pk)
+        blocked = readiness_block_response(estimate.organization)
+        if blocked is not None:
+            return blocked
         try:
             estimate.approve(approved_by=request.user)
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_409_CONFLICT)
         return Response({"success": True, "estimate": EstimateSerializer(estimate).data})
-
 
 class EstimateRejectView(TenantScopedAPIView):
     """POST /api/estimates/<id>/reject/ — records why, creates nothing downstream."""
