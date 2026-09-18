@@ -4,6 +4,8 @@
 // =============================================================================
 import {
   accountingApi, DailyCashActivityResponse, DashboardFinancialSummaryResponse,
+  OrganizationReadiness,
+  organizationReadinessApi,
   ProfitLossComparisonResponse, ReportDelta,
 } from "@/lib/api/accounting";
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
@@ -48,6 +50,79 @@ function DeltaCaption({ delta }: { delta: ReportDelta }) {
       {pct === null ? formatRupiah(Math.abs(changeNum)) : `${Math.abs(pct).toFixed(1)}%`}
       <span style={{ color: "var(--steel)", fontWeight: 400 }}>vs 90 hari sebelumnya</span>
     </span>
+  );
+}
+
+// 17 Sep 2026 -- Brand-New Workshop Readiness (locked spec), Step 5.
+// A real, persistent banner -- renders nothing at all while still
+// loading or once the org IS ready, so a genuinely ready shop never
+// sees any trace of this. Real, deliberate design: shows every
+// block's own actual message (not just a bare count) so the person
+// sees AT A GLANCE what's actually missing, and one real CTA button
+// PER UNIQUE action among the current blocks (not one arbitrary
+// button) -- COA_NOT_SEEDED and OPENING_BALANCE_NOT_RESOLVED can
+// both fire at once, pointing to two genuinely different real
+// screens; picking just one would silently hide the other.
+const READINESS_ACTION_LABEL: Record<string, string> = {
+  OPEN_ACCOUNTING_SETUP: "Buka Pengaturan Akuntansi",
+  OPEN_OPENING_BALANCE: "Lengkapi Saldo Awal",
+};
+  // 17 Sep 2026 -- confirmed: no frontend page exists yet for Opening
+  // Balance (backend is fully built -- OpeningBalanceSession, its
+  // line-type CRUD endpoints, preview/post/confirm_zero -- just no
+  // UI wraps it). Deliberately NOT given a placeholder href here --
+  // see the button-filtering logic below for why that matters.
+  // OPEN_ACCOUNTING_SETUP's own href IS confirmed real.
+  const READINESS_ACTION_HREF: Partial<Record<string, string>> = {
+    OPEN_ACCOUNTING_SETUP: "/dashboard/accounting/accounts",
+  };
+
+function WorkshopReadinessBanner() {
+  const [readiness, setReadiness] = useState<OrganizationReadiness | null>(null);
+
+  useEffect(() => {
+    organizationReadinessApi.get().then(setReadiness).catch(() => setReadiness(null));
+  }, []);
+
+  if (!readiness || readiness.ready) return null;
+
+  const uniqueActions = Array.from(new Set(readiness.blocks.map((b) => b.action)));
+
+  return (
+    <div
+      className="card"
+      style={{
+        borderColor: "var(--danger)", background: "var(--danger-light)",
+        marginBottom: 24, display: "flex", justifyContent: "space-between",
+        alignItems: "flex-start", gap: 16, flexWrap: "wrap",
+      }}
+    >
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <AlertTriangle size={18} style={{ color: "var(--danger)" }} />
+          <span style={{ fontWeight: 700, fontSize: 15, color: "var(--danger)" }}>
+            Workshop belum siap untuk transaksi
+          </span>
+        </div>
+        <p style={{ fontSize: 13.5, color: "var(--ink)", marginBottom: 8 }}>
+          {readiness.blocks.length} hal perlu diselesaikan sebelum transaksi operasional dapat dijalankan.
+        </p>
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "var(--ink)" }}>
+          {readiness.blocks.map((block) => (
+            <li key={block.code}>{block.message}</li>
+          ))}
+        </ul>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {uniqueActions
+          .filter((action) => READINESS_ACTION_HREF[action])
+          .map((action) => (
+            <Link key={action} href={READINESS_ACTION_HREF[action]!} className="btn-rust" style={{ whiteSpace: "nowrap" }}>
+              {READINESS_ACTION_LABEL[action] ?? "Lihat & Selesaikan"}
+            </Link>
+          ))}
+      </div>
+    </div>
   );
 }
 
@@ -165,6 +240,8 @@ export default function DashboardOverviewPage() {
     <div>
       <h1 className="display" style={{ fontSize: 30, marginBottom: 4, textTransform: "none" }}>Ringkasan</h1>
       <p style={{ color: "var(--steel)", fontSize: 14, marginBottom: 28 }}>Kondisi bengkel Anda hari ini.</p>
+
+      <WorkshopReadinessBanner />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 24 }}>
         <div className="card">
