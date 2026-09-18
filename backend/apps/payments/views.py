@@ -6,6 +6,7 @@ NOTE: TenantScopedAPIView's exact interface is confirmed against the
 real apps/core/views.py.
 """
 from apps.accounting.models import Account
+from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
 from apps.invoicing.models import Invoice
 from apps.purchasing.models import SupplierInvoice
@@ -52,6 +53,14 @@ class InvoicePaymentListCreateView(TenantScopedAPIView):
                 {"success": False, "message": "Invoice tidak ditemukan."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        # 17 Sep 2026 -- Brand-New Workshop Readiness, Step 7. Real
+        # hard block, checked first: a real payment posting touches
+        # Cash/Bank AND AR/AP -- the exact prerequisites this whole
+        # gate exists to guarantee are actually in place.
+        blocked = readiness_block_response(invoice.organization)
+        if blocked is not None:
+            return blocked
 
         input_serializer = PaymentRecordSerializer(data=request.data)
         input_serializer.is_valid(raise_exception=True)
@@ -150,6 +159,14 @@ class SupplierInvoicePayView(TenantScopedAPIView):
                 {"success": False, "message": "Invoice supplier tidak ditemukan."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        # 17 Sep 2026 -- Brand-New Workshop Readiness, Step 7. Same
+        # real gate as InvoicePaymentListCreateView above -- the AP
+        # side of "Payment Posting" from the locked spec's own
+        # generic (not AR-specific) principle.
+        blocked = readiness_block_response(supplier_invoice.organization)
+        if blocked is not None:
+            return blocked
 
         input_serializer = SupplierPaymentRecordSerializer(data=request.data)
         input_serializer.is_valid(raise_exception=True)
