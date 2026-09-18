@@ -761,6 +761,20 @@ class WorkOrderMaterialLineListView(TenantScopedAPIView):
         work_order = self._get_work_order(request, work_order_id)
         if work_order is None:
             return Response({"success": False, "message": "Work order tidak ditemukan."}, status=status.HTTP_404_NOT_FOUND)
+        # 17 Sep 2026 -- Brand-New Workshop Readiness, Step 7 (final
+        # gate, §6 of the locked spec). Real hard block, checked
+        # first, before the WorkOrder's own open-status check: adding
+        # a material line deducts real stock in real time AND
+        # publishes a real PartConsumed event that posts a real
+        # WIP/Inventory journal entry (see WorkOrderMaterialLine.
+        # save()'s own docstring) -- the exact moment this stops
+        # being an in-progress checklist item and becomes a real
+        # accounting fact, same reasoning as WorkOrderCloseView's own
+        # gate above, just one step earlier in the WorkOrder's real
+        # lifecycle.
+        blocked = readiness_block_response(work_order.organization)
+        if blocked is not None:
+            return blocked
         if work_order.status not in OPEN_STATUSES:
             return Response(
                 {"success": False, "message": "Work order ini sudah selesai atau dibatalkan."},
