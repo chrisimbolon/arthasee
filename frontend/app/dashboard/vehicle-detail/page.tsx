@@ -64,7 +64,7 @@ import { IncomingLetter, lettersApi } from "@/lib/api/letters";
 import { ServiceRecord, Vehicle, VehicleEditPayload, VehicleFieldChange, vehiclesApi } from "@/lib/api/service";
 import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
 import { formatDateID } from "@/lib/format";
-import { AlertTriangle, ArrowLeft, Calendar, ClipboardList, FileSearch, FileText, Inbox, Loader2, Pencil, Plus, Receipt, Trash2, Wrench } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Calendar, ChevronDown, ChevronRight, ClipboardList, FileSearch, FileText, Inbox, Loader2, Pencil, Plus, Receipt, Trash2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -188,6 +188,14 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
 
 function VehicleEditCard({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () => void }) {
   const [editing, setEditing] = useState(false);
+  // 18 Sep 2026 -- real, deliberate default: collapsed on load. This
+  // card's own fields (rangka/mesin/BPKB/etc.) are read rarely, not
+  // on every visit, and take up real vertical space above the
+  // Estimasi/Work Order sections that matter far more often -- same
+  // reasoning Riwayat Perubahan's own toggle-to-history pattern
+  // already uses elsewhere in this file, just at the top level of
+  // the whole card instead of one section within it.
+  const [collapsed, setCollapsed] = useState(true);  
   const [form, setForm] = useState({
     plate_number: vehicle.plate_number, vehicle_type: vehicle.vehicle_type,
     model: vehicle.model, manufacture_year: vehicle.manufacture_year,
@@ -220,6 +228,7 @@ function VehicleEditCard({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () =
     try {
       await vehiclesApi.update(vehicle.id, payload);
       setEditing(false);
+      setCollapsed(false);
       onSaved();
     } catch {
       setError("Gagal menyimpan perubahan.");
@@ -242,26 +251,37 @@ function VehicleEditCard({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () =
     { label: "KM Saat Ini", value: String(vehicle.current_odometer_km) },
   ];
 
-  if (!editing) {
-    return (
-      <div className="card" style={{ marginBottom: 24 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase" }}>Data Kendaraan</div>
-          <button onClick={startEditing} className="btn-ghost" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <Pencil size={13} /> Edit
-          </button>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
-          {displayFields.map((f) => (
-            <div key={f.label}>
-              <div style={{ fontSize: 11.5, color: "var(--steel)" }}>{f.label}</div>
-              <div className="mono" style={{ fontSize: 13.5 }}>{f.value || "—"}</div>
+    if (!editing) {
+      return (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <div
+            onClick={() => setCollapsed(!collapsed)}
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: collapsed ? 0 : 14, cursor: "pointer" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase" }}>
+              {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              Data Kendaraan
             </div>
-          ))}
+            <button
+              onClick={(e) => { e.stopPropagation(); startEditing(); }}
+              className="btn-ghost" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 }}
+            >
+              <Pencil size={13} /> Edit
+            </button>
+          </div>
+          {!collapsed && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
+              {displayFields.map((f) => (
+                <div key={f.label}>
+                  <div style={{ fontSize: 11.5, color: "var(--steel)" }}>{f.label}</div>
+                  <div className="mono" style={{ fontSize: 13.5 }}>{f.value || "—"}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-      </div>
-    );
-  }
+      );
+    }
 
   return (
     <form onSubmit={handleSave} className="card" style={{ marginBottom: 24 }}>
