@@ -33,8 +33,12 @@ thing to check independently. `action` on a block is one of a small,
 real, fixed set of frontend routing hints (see ACTION_* constants
 below) — never a free-form string a frontend would have to guess at.
 """
-from apps.accounting.models import Account, AccountingPeriod, OpeningBalanceSession
-from apps.accounting.services.required_accounts import REQUIRED_POSTING_ACCOUNT_CODES
+from apps.accounting.models import (Account, AccountingPeriod,
+                                    OpeningBalanceSession)
+from apps.accounting.services.required_accounts import \
+    REQUIRED_POSTING_ACCOUNT_CODES
+from rest_framework import status
+from rest_framework.response import Response
 
 # Real, fixed set of frontend routing hints a block's own "action"
 # can carry — never a free-form string. Both point at real,
@@ -117,9 +121,9 @@ def check_organization_readiness(organization) -> dict:
     # follows everywhere else (e.g. WorkOrder.close()'s own local
     # ServiceRecord import).
     from apps.inventory.models import Part
-    from apps.workorders.models import Mechanic
-    from apps.service.models import Customer
     from apps.purchasing.models import Supplier
+    from apps.service.models import Customer
+    from apps.workorders.models import Mechanic
 
     if not Part.objects.filter(organization=organization, current_stock__gt=0).exists():
         warnings.append({
@@ -147,3 +151,43 @@ def check_organization_readiness(organization) -> dict:
         "blocks": blocks,
         "warnings": warnings,
     }
+
+def readiness_block_response(organization):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Steps 6/7. The one
+    real, shared entry point every workflow gate (Estimate approval,
+    WorkOrder close, Invoice issue, Payment record) calls FIRST,
+    before its own real action — deliberately kept separate from
+    each model's own internal business-rule checks (mechanic
+    assigned, QC required, open period for THIS specific posting
+    date, etc.), which stay exactly as they are, raised as plain
+    ValueErrors from inside their own model methods. Locked spec's
+    own principle #9: readiness is a reusable organization-level
+    check each workflow explicitly consults, not one giant
+    validation folded into every model's own internals.
+
+    Returns a real, structured 409 Response carrying the FULL
+    machine-readable blocks list — never flattened into a message
+    string — so the frontend's contextual blocked-action UX (locked
+    design: "Estimasi belum dapat disetujui." / "COA Arthasee belum
+    dikonfigurasi." -> "Buka Pengaturan Akuntansi") can render the
+    real, specific action per block, not a generic string a person
+    has to go re-diagnose elsewhere. Returns None when the org IS
+    ready, so a calling view's own real logic proceeds untouched —
+    same "None means proceed" convention this function's own DRF-free
+    sibling (check_organization_readiness) doesn't need, since this
+    is the one place in this module that's deliberately view-layer,
+    not pure.
+    """
+    result = check_organization_readiness(organization)
+    if result["ready"]:
+        return None
+    return Response(
+        {
+            "success": False,
+            "message": "Workshop belum siap untuk transaksi operasional.",
+            "blocks": result["blocks"],
+            "warnings": result["warnings"],
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
