@@ -2563,4 +2563,78 @@ class WorkOrderCloseReadinessGateTests(APITestCase):
         wo = self._wo_at_qc(assigned=False)
         resp = self.client.post(f"/api/work-orders/{wo.id}/close/")
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
-        self.assertNotIn("blocks", resp.data)  # a real business-rule 409, not a readiness one        
+        self.assertNotIn("blocks", resp.data)  # a real business-rule 409, not a readiness one 
+
+class PartConsumedReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7 (final gate,
+    §6 of the locked spec). Real proof the readiness gate is wired
+    onto material-line creation -- the actual moment stock deducts
+    and a real PartConsumed event posts -- and is genuinely ADDITIVE
+    to the existing open-status check, not a replacement for it.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.partconsumedreadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Budi")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+        self.part = Part.objects.create(
+            organization=self.org, name="Kampas Rem", unit="set", unit_price=Decimal("250000.00"),
+        )
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("10.00"), reason="restock",
+        )
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _open_wo(self):
+        return WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle, status="OPEN")
+
+    def test_material_line_blocked_when_org_not_ready(self):
+        wo = self._open_wo()
+        resp = self.client.post(
+            f"/api/work-orders/{wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "2.00"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("10.00"))  # nothing deducted
+
+    def test_material_line_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        wo = self._open_wo()
+        resp = self.client.post(
+            f"/api/work-orders/{wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "2.00"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("8.00"))
+
+    def test_material_line_still_rejected_on_closed_work_order_even_when_org_ready(self):
+        """Real proof the readiness gate is genuinely ADDITIVE, not a
+        replacement for the existing open-status check -- this must
+        fail for a DIFFERENT, real reason even once readiness itself
+        is satisfied."""
+        self._make_org_ready()
+        wo = self._open_wo()
+        wo.status = "CANCELLED"
+        wo.save(update_fields=["status"])
+        resp = self.client.post(
+            f"/api/work-orders/{wo.id}/material-lines/",
+            {"part": str(self.part.id), "quantity": "2.00"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertNotIn("blocks", resp.data)  # a real business-rule 409, not a readiness one               
