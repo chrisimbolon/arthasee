@@ -903,8 +903,24 @@ function VehicleDetailContent() {
 
       <EstimatesSection
         vehicleId={vehicle.id}
-        disableCreate={activeWorkOrder.has}
-        disabledReason={activeWorkOrder.has ? `Kendaraan ini sedang dikerjakan (WO #${activeWorkOrder.number})` : undefined}
+        // 18 Sep 2026 -- real fix: this used to read ONLY
+        // activeWorkOrder.has, silently leaving "Buat Estimasi"
+        // active while this vehicle already had its own PENDING
+        // estimate -- a real, misleading primary CTA sitting fully
+        // enabled next to "Menunggu Persetujuan", and the actual
+        // cause of the repeated 409s. pendingEstimate.has was
+        // already being tracked in this exact component's own
+        // state (see onPendingChange right below, and
+        // WorkOrdersSection's own disableCreate just past this) --
+        // just never wired into THIS section's own button.
+        disableCreate={activeWorkOrder.has || pendingEstimate.has}
+        disabledReason={
+          activeWorkOrder.has
+            ? `Kendaraan ini sedang dikerjakan (WO #${activeWorkOrder.number})`
+            : pendingEstimate.has
+            ? `Kendaraan ini sudah punya estimasi menunggu persetujuan (EST #${pendingEstimate.number})`
+            : undefined
+        }
         onPendingChange={(has, number) => setPendingEstimate({ has, number })}
       />
       <WorkOrdersSection
