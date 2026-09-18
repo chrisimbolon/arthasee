@@ -4,6 +4,7 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
+from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import StockAdjustment
 from django.db import transaction
@@ -336,19 +337,35 @@ class WorkOrderStatusUpdateView(TenantScopedAPIView):
 
 class WorkOrderCloseView(TenantScopedAPIView):
     """
-    POST /api/work-orders/<id>/close/ — freezes into a ServiceRecord.
+    POST /api/work-orders/<id>/close/ -- freezes into a ServiceRecord.
 
     Accepts an optional service_date, so closing a Work Order can
-    genuinely replace the old free-text quick-entry flow entirely —
+    genuinely replace the old free-text quick-entry flow entirely --
     that flow's one real advantage was backdating a visit that
     happened days ago (a forgotten live entry, or migrating old
     paper records). WorkOrder.close() itself already accepted this
     parameter; it was just never exposed through the API until now.
+
+    17 Sep 2026 -- Brand-New Workshop Readiness, Step 7. Real hard
+    block, checked first: closing a WorkOrder freezes it into a real
+    ServiceRecord and, via PartUsage.bulk_create() and the
+    WorkOrderCompleted event, triggers real COGS/WIP journal
+    postings -- the exact moment this stops being an in-progress
+    checklist and becomes a real accounting fact. Material lines
+    already added to this WO already deducted stock in real time as
+    each was created (see WorkOrderMaterialLine.save()'s own
+    docstring) -- that already happened regardless of org readiness,
+    same "harmless planning already done" territory as Estimate
+    creation; this gate is specifically about CLOSE's own downstream
+    posting, not a retroactive block on work already performed.
     """
     model = WorkOrder
 
     def post(self, request, pk):
         order = self.get_object(pk)
+        blocked = readiness_block_response(order.organization)
+        if blocked is not None:
+            return blocked
         service_date = None
         raw_date = request.data.get("service_date")
         if raw_date:
@@ -356,7 +373,7 @@ class WorkOrderCloseView(TenantScopedAPIView):
                 service_date = date.fromisoformat(raw_date)
             except ValueError:
                 return Response(
-                    {"success": False, "message": "Format tanggal tidak valid — gunakan YYYY-MM-DD."},
+                    {"success": False, "message": "Format tanggal tidak valid -- gunakan YYYY-MM-DD."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         try:
