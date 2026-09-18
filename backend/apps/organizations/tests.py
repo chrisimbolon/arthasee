@@ -1,7 +1,14 @@
 # =============================================================================
 # === backend/apps/organizations/tests.py ===
 # =============================================================================
+from datetime import date
+
+from apps.accounting.models import (Account, AccountingPeriod,
+                                    OpeningBalanceSession)
+from apps.accounting.services.readiness import check_organization_readiness
 from apps.authentication.models import CustomUser
+from apps.organizations.models import Organization, OrganizationMembership
+from django.core.management import call_command
 from django.test import SimpleTestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -299,3 +306,104 @@ class OrganizationOnboardingCompleteAPITests(APITestCase):
         resp = self.client.post("/api/organizations/mine/complete-onboarding/")
         self.assertEqual(resp.data["organization"]["phone"], "0812-3456-7890")
         self.assertEqual(resp.data["organization"]["invoice_code"], "AM")
+
+class OnboardingCompleteReadinessTests(APITestCase):
+    """
+    18 Sep 2026 — real, direct proof of the gap found while building
+    the Opening Balance frontend wizard (which turned out to already
+    exist, as OnboardingOverlay.tsx). OrganizationOnboardingCompleteView
+    is called identically from both of that overlay's Step 2 exit
+    paths — this proves the "Bengkel Baru" path (no OpeningBalanceSession
+    ever created) no longer leaves the shop blocked by its own very
+    next screen, and that the real, posted-session path is left
+    completely untouched by this fix.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(
+            name="Arya Motor", invoice_code="AM",
+            phone="081234567890", address="Jl. Contoh No. 1",
+        )
+        self.owner = CustomUser.objects.create_user(
+            email="owner.onboardingcomplete@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_fresh_start_path_resolves_readiness(self):
+        """THE real regression test — before this fix, calling this
+        endpoint with no OpeningBalanceSession at all left the org
+        genuinely unready immediately after 'completing' onboarding."""
+        self.assertFalse(OpeningBalanceSession.objects.filter(organization=self.org).exists())
+
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        result = check_organization_readiness(self.org)
+        self.assertTrue(result["ready"])
+
+    def test_fresh_start_path_creates_a_confirmed_zero_session(self):
+        self.client.post("/api/organizations/mine/complete-onboarding/")
+        session = OpeningBalanceSession.objects.get(organization=self.org)
+        self.assertIsNotNone(session.confirmed_zero_at)
+        self.assertEqual(session.confirmed_zero_by_id, self.owner.id)
+
+    def test_fresh_start_path_seeds_coa_and_a_period(self):
+        self.assertFalse(Account.objects.filter(organization=self.org).exists())
+        self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertTrue(Account.objects.filter(organization=self.org).exists())
+        today = date.today()
+        self.assertTrue(
+            AccountingPeriod.objects.filter(organization=self.org, year=today.year, month=today.month).exists()
+        )
+
+    def test_posted_session_path_is_left_untouched(self):
+        """Real proof this fix never interferes with the OTHER exit
+        path — a session that already exists and is already POSTED
+        must not be re-created or re-confirmed."""
+        from apps.accounting.models import OpeningBalanceCashLine
+
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date.today())
+        OpeningBalanceCashLine.objects.create(organization=self.org, session=session, account_code="1001", amount="100000")
+        # Real, valid balancing line so post() succeeds cleanly.
+        from apps.accounting.models import OpeningBalanceOtherLine
+        OpeningBalanceOtherLine.objects.create(
+            organization=self.org, session=session, account_code="3001",
+            side=OpeningBalanceOtherLine.Side.CREDIT, amount="100000",
+        )
+        session.post(posted_by=self.owner)
+        self.assertEqual(OpeningBalanceSession.objects.filter(organization=self.org).count(), 1)
+
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        session.refresh_from_db()
+        self.assertEqual(session.status, OpeningBalanceSession.Status.POSTED)
+        self.assertIsNone(session.confirmed_zero_at)  # never touched — it was POSTED, not zero-confirmed
+        self.assertEqual(OpeningBalanceSession.objects.filter(organization=self.org).count(), 1)  # no second one created
+
+    def test_missing_profile_still_blocked(self):
+        """Regression proof — the existing Step-1-must-come-first
+        guard is completely unaffected by this fix."""
+        bare_org = Organization.objects.create(name="Bengkel Belum Lengkap")
+        owner = CustomUser.objects.create_user(
+            email="owner.bareorg@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=bare_org, user=owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=owner)
+
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(OpeningBalanceSession.objects.filter(organization=bare_org).exists())
+
+    def test_calling_it_twice_does_not_duplicate_seeding_or_sessions(self):
+        """Real safety proof — seed_chart_of_accounts()/
+        ensure_current_month_period() are called unconditionally on
+        every call; this confirms that's genuinely safe."""
+        self.client.post("/api/organizations/mine/complete-onboarding/")
+        account_count_after_first = Account.objects.filter(organization=self.org).count()
+
+        self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(Account.objects.filter(organization=self.org).count(), account_count_after_first)
+        self.assertEqual(OpeningBalanceSession.objects.filter(organization=self.org).count(), 1)
