@@ -66,10 +66,14 @@ function toNumber(value: string | number): number {
 
 // maxFraction is 0 for balances, 2 for the difference: a rounding
 // difference under Rp 0,50 must never render as "Selisih Rp 0".
+// minimumFractionDigits is pinned to 0 explicitly: without it, some browser
+// engines fall back to IDR's own default of 2 decimals and print a whole
+// difference as "Rp100.000,00" beside balances printed as "Rp240.000".
 function formatRupiah(value: string | number | null | undefined, maxFraction = 0): string {
   if (value === null || value === undefined) return "—";
   return new Intl.NumberFormat("id-ID", {
-    style: "currency", currency: "IDR", maximumFractionDigits: maxFraction,
+    style: "currency", currency: "IDR",
+    minimumFractionDigits: 0, maximumFractionDigits: maxFraction,
   }).format(toNumber(value));
 }
 
@@ -249,7 +253,7 @@ export default function ControlAccountsPage() {
             Halaman ini hanya membaca data; tidak mengubah jurnal apa pun.
           </div>
         </div>
-        <div style={{ display: "flex", gap: 12, alignItems: "flex-end" }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexShrink: 0 }}>
           <div style={{ width: 170 }}>
             <div className="label">Per Tanggal</div>
             <input
@@ -257,7 +261,10 @@ export default function ControlAccountsPage() {
               onChange={(e: ChangeEvent<HTMLInputElement>) => setAsOf(e.target.value)}
             />
           </div>
-          <button onClick={() => runChecks(asOf)} disabled={loading} className="btn-ghost">
+          <button
+            onClick={() => runChecks(asOf)} disabled={loading} className="btn-ghost"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}
+          >
             <RefreshCw size={15} /> Periksa Ulang
           </button>
         </div>
