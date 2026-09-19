@@ -158,10 +158,11 @@ class PurchaseOrder(TenantScopedModel):
             raise ValueError("Purchase Order harus memiliki minimal satu item.")
 
         with transaction.atomic():
+            from apps.accounting.periods import safe_local_date
             po = cls.objects.create(
                 organization=organization, supplier=supplier,
                 status=status or cls.Status.ORDERED,
-                order_date=order_date or timezone.now().date(),
+                order_date=order_date or safe_local_date(timezone.now()),
                 expected_date=expected_date, notes=notes, created_by=created_by,
             )
             for line in lines:
