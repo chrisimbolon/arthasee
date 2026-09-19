@@ -1196,12 +1196,12 @@ export const accountImportApi = {
 
 // =============================================================================
 // Control-Account Reconciliation — Phase 18, Task 18.2 (backend
-// shipped earlier this phase; this is the real, deliberately-deferred
-// frontend, built once inline placement on Daftar Akun was confirmed
-// as the right shape — see that task's own note in the Phase 18
-// close-out doc: "a genuine diagnostic tool, not a workflow an owner
-// needs surfaced day-to-day" — hence living inline on an existing
-// page, not as its own dedicated route.
+// shipped earlier in this phase). Frontend history: first built inline
+// on Daftar Akun (a per-account panel inside the edit drawer). 19 Sep
+// 2026 — moved to its own page, /dashboard/accounting/control-accounts
+// ("Cek Akun Kontrol"), which checks all three supported accounts at
+// once and explains Inventory's Last Cost drift. Daftar Akun now only
+// links to it. This client is shared by both.
 // =============================================================================
 
 // Mirrors reports.reconcile_control_account()'s own real return
@@ -1241,6 +1241,13 @@ export const controlAccountReconciliationApi = {
     }
   },
 };
+
+// The only accounts reports.reconcile_control_account() supports (backend
+// reports.py) — NOT the same set as "every is_control_account account":
+// 1302 (WIP) is a control account too since Phase 18.1, but has no
+// subledger to reconcile against, and asking for it returns a 400. This is
+// also the display order on the Cek Akun Kontrol page.
+export const RECONCILABLE_CONTROL_ACCOUNT_CODES = ["1201", "2001", "1301"] as const;
 
 // =============================================================================
 // Bank Reconciliation — manual statement entry (9 Sep 2026, Phase 17, Task 17.3)
