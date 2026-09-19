@@ -42,3 +42,31 @@ export function formatDateID(dateStr: string | null | undefined): string {
   const date = new Date(year, month - 1, day);
   return date.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
 }
+
+// The shop's own time zone. MUST match the backend's settings.TIME_ZONE
+// (backend/config/settings/base.py) — every posting date the backend
+// derives uses that same zone (apps.accounting.periods.safe_local_date).
+const SHOP_TIME_ZONE = "Asia/Jakarta";
+
+/**
+ * Today's date in the SHOP's own calendar, as "YYYY-MM-DD" — for date-input
+ * defaults ("Per Tanggal", a transaction date, and so on).
+ *
+ * Deliberately NOT `new Date().toISOString().slice(0, 10)`: toISOString()
+ * converts to UTC first, so between 00:00 and 07:00 in Indonesia (UTC+7) it
+ * returns YESTERDAY's date. That is the front-end twin of the backend bug
+ * fixed by safe_local_date() (Cheat Sheet §12) — and on the 1st of a month
+ * it would default a form into the previous, possibly already closed, period.
+ *
+ * Pinned to Asia/Jakarta rather than the browser's own zone so it always
+ * agrees with the backend's idea of "today", even on a device whose clock
+ * is set to another zone. Built with formatToParts so it never depends on
+ * a locale's date-format quirks. `now` is injectable purely for testing.
+ */
+export function todayISO(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: SHOP_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(now);
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
