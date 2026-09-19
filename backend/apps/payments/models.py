@@ -742,7 +742,8 @@ class InternalCashMutation(TenantScopedModel):
 
         with transaction.atomic():
             from apps.accounting.models import AccountingPeriod
-            resolved_date = transaction_date or timezone.now().date()
+            from apps.accounting.periods import safe_local_date
+            resolved_date = transaction_date or safe_local_date(timezone.now())
             AccountingPeriod.assert_open_for_posting(organization, resolved_date)
 
             mutation = cls(
