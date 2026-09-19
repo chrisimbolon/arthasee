@@ -1653,9 +1653,9 @@ class OpeningBalanceSession(TenantScopedModel):
 
             self._validate_before_posting()
 
-            from apps.accounting.periods import ensure_period_for_org
+            from apps.accounting.periods import ensure_period_for_org, safe_local_date
             from django.utils import timezone
-            today = timezone.now().date()
+            today = safe_local_date(timezone.now())
             cursor_year, cursor_month = self.start_date.year, self.start_date.month
             while (cursor_year, cursor_month) <= (today.year, today.month):
                 ensure_period_for_org(self.organization, cursor_year, cursor_month)
