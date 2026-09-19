@@ -22,6 +22,10 @@ import { usePathname } from "next/navigation";
 // bank-statement matching against the real ledger (Phase 17, Task
 // 17.3). Slotted right after Kas Harian — both are Cash/Bank-account
 // lenses on the same underlying ledger.
+// 19 Sep 2026 — /control-accounts added: Cek Akun Kontrol, compares AR /
+// AP / Inventory ledger balances against their real subledgers (Phase 18,
+// Task 18.2). Slotted right after Rekonsiliasi — both are "does the ledger
+// agree with the outside world" checks.
 const SUBNAV = [
   { href: "/dashboard/accounting/reports",  label: "Laporan" },
   { href: "/dashboard/accounting/accounts", label: "Daftar Akun" },
@@ -29,6 +33,7 @@ const SUBNAV = [
   { href: "/dashboard/accounting/general-ledger", label: "Buku Besar" },
   { href: "/dashboard/accounting/kas-harian", label: "Kas Harian" },
   { href: "/dashboard/accounting/reconciliation", label: "Rekonsiliasi" },
+  { href: "/dashboard/accounting/control-accounts", label: "Cek Akun Kontrol" },
   { href: "/dashboard/accounting/operating-expenses", label: "Beban Operasional" },
   { href: "/dashboard/accounting/assets", label: "Aset Tetap" },
 ];
