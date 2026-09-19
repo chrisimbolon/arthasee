@@ -65,10 +65,10 @@ import {
   AccountRow,
   accountsApi,
   AccountSubtype,
-  controlAccountReconciliationApi,
-  ControlAccountReconciliationResult,
+  RECONCILABLE_CONTROL_ACCOUNT_CODES,
   TrialBalanceAccount,
 } from "@/lib/api/accounting";
+import { todayISO } from "@/lib/format";
 import { ChevronDown, ChevronRight, Loader2, Plus } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, ReactNode, useEffect, useState } from "react";
@@ -132,61 +132,27 @@ function formValuesFromAccount(a: AccountRow): AccountFormValues {
   };
 }
 
-function ReconciliationCheck({ accountCode }: { accountCode: string }) {
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
-  const [result, setResult] = useState<ControlAccountReconciliationResult | null>(null);
-  const [checking, setChecking] = useState(false);
-
-  async function handleCheck() {
-    setChecking(true);
-    const data = await controlAccountReconciliationApi.check(accountCode, asOf);
-    setResult(data);
-    setChecking(false);
-  }
-
+// 19 Sep 2026 — Phase 18, Task 18.2 (second pass). The inline "Cek
+// Rekonsiliasi" drawer section that used to live here (one account at a
+// time, no Inventory explanation, and offered for WIP/1302, which the
+// backend rejects) moved to its own page. What remains is a pointer, and
+// only for the three accounts the check actually supports.
+function ControlAccountCheckLink({ accountCode }: { accountCode: string }) {
+  if (!(RECONCILABLE_CONTROL_ACCOUNT_CODES as readonly string[]).includes(accountCode)) return null;
   return (
-    <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
-      <div style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase", marginBottom: 10 }}>
-        Cek Rekonsiliasi
-      </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: result ? 14 : 0 }}>
-        <div>
-          <label className="label">Per Tanggal</label>
-          <input type="date" className="input" value={asOf} onChange={(e) => setAsOf(e.target.value)} />
-        </div>
-        <button onClick={handleCheck} disabled={checking} className="btn-ghost">
-          {checking ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Cek Rekonsiliasi"}
-        </button>
-      </div>
-
-      {result && !result.success && (
-        <div style={{ fontSize: 13, color: "var(--danger)" }}>{result.message}</div>
-      )}
-
-      {result && result.success && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Saldo Buku Besar</div>
-            <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{formatRupiah(result.gl_balance ?? null)}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Total Sub-Ledger</div>
-            <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{formatRupiah(result.subledger_total ?? null)}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 11.5, color: "var(--steel)" }}>Status</div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: result.is_reconciled ? "var(--workshop)" : "var(--danger)" }}>
-              {result.is_reconciled ? "Seimbang" : `Selisih ${formatRupiah(result.difference ?? null)}`}
-            </div>
-          </div>
-        </div>
-      )}
+    <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--line)", fontSize: 13 }}>
+      <Link href="/dashboard/accounting/control-accounts" style={{ color: "var(--rust)", fontWeight: 600 }}>
+        Buka Cek Akun Kontrol →
+      </Link>
+      <span style={{ color: "var(--steel)", marginLeft: 8 }}>
+        Bandingkan saldo akun ini dengan sub-ledger-nya.
+      </span>
     </div>
   );
 }
 
 export default function ChartOfAccountsPage() {
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [asOf, setAsOf] = useState(() => todayISO());
   const [trialRows, setTrialRows] = useState<TrialBalanceAccount[] | null>(null);
   const [accountRows, setAccountRows] = useState<AccountRow[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -420,7 +386,7 @@ function EditPanelRow({
           onCancel={onCancel}
           onSaved={onSaved}
         />
-        {account.is_control_account && <ReconciliationCheck accountCode={account.code} />}
+        {account.is_control_account && <ControlAccountCheckLink accountCode={account.code} />}
       </td>
     </tr>
   );
