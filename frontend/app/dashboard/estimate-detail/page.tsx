@@ -5,11 +5,13 @@
 // static export needs every route's HTML identical regardless of
 // ?id= value, since real estimate UUIDs don't exist at build time.
 // =============================================================================
+import ReadinessBlockNotice from "@/components/readiness/ReadinessBlockNotice";
 import {
   Estimate, EstimateLineKind, EstimateRejectionReason, estimateLineItemsApi, estimatesApi,
 } from "@/lib/api/estimates";
 import { organizationsApi } from "@/lib/api/organizations";
 import { Part, partsApi } from "@/lib/api/service";
+import { ReadinessBlockedError, readinessBlockFromError } from "@/lib/readiness";
 import { ArrowLeft, Download, Loader2, Plus, Printer, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -432,6 +434,8 @@ function EstimateDetailContent() {
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 20 Sep 2026 — the readiness gate's own 409 on approval, with its real reasons.
+  const [blocked, setBlocked] = useState<ReadinessBlockedError | null>(null);
   const [rejectReason, setRejectReason] = useState<EstimateRejectionReason>("TOO_EXPENSIVE");
   const [rejectNotes, setRejectNotes] = useState("");
   const [rejecting, setRejecting] = useState(false);
@@ -458,7 +462,7 @@ function EstimateDetailContent() {
     // a no-op if nothing's actually unsaved, and a genuine failure
     // (e.g. the odometer's own hard-block) aborts the approval
     // outright instead of silently discarding the value.
-    setError(null);
+    setError(null); setBlocked(null);
     try {
       await odometerRef.current?.flush();
       await diagnosisRef.current?.flush();
@@ -474,13 +478,21 @@ function EstimateDetailContent() {
       const proceed = window.confirm("Estimasi ini belum punya item — lanjutkan?");
       if (!proceed) return;
     }
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setBlocked(null);
     try {
       await estimatesApi.approve(estimateId);
       load();
     } catch (err) {
-      const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
-      setError(apiMessage || "Gagal menyetujui estimasi.");
+      // 20 Sep 2026 — approval is a readiness-gated action (creating an estimate is
+      // deliberately not). The gate's `message` is only a generic summary sentence;
+      // the specific reasons live in `blocks`, so show those.
+      const gate = readinessBlockFromError(err, "Estimasi belum dapat disetujui.");
+      if (gate) {
+        setBlocked(gate);
+      } else {
+        const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+        setError(apiMessage || "Gagal menyetujui estimasi.");
+      }
     } finally {
       setBusy(false);
     }
@@ -593,6 +605,7 @@ function EstimateDetailContent() {
         </div>
       </div>
 
+      {blocked && <ReadinessBlockNotice blocked={blocked} />}
       {error && <div className="no-print" style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
         <PrintableQuotation estimate={estimate} orgName={orgName} orgAddress={orgAddress} />
