@@ -10,6 +10,7 @@ import {
 } from "@/lib/api/accounting";
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { ActiveJob, activeJobsApi, dashboardApi, DashboardSummary } from "@/lib/api/workorders";
+import { READINESS_ACTION_HREF, READINESS_ACTION_LABEL } from "@/lib/readiness";
 import {
   AlertTriangle, ArrowLeftRight, Car, CheckCircle2, Clock, Landmark, Layers,
   Loader2, TrendingDown, TrendingUp, Users, Wallet, Wrench,
@@ -63,19 +64,11 @@ function DeltaCaption({ delta }: { delta: ReportDelta }) {
 // button) -- COA_NOT_SEEDED and OPENING_BALANCE_NOT_RESOLVED can
 // both fire at once, pointing to two genuinely different real
 // screens; picking just one would silently hide the other.
-const READINESS_ACTION_LABEL: Record<string, string> = {
-  OPEN_ACCOUNTING_SETUP: "Buka Pengaturan Akuntansi",
-  OPEN_OPENING_BALANCE: "Lengkapi Saldo Awal",
-};
-  // 17 Sep 2026 -- confirmed: no frontend page exists yet for Opening
-  // Balance (backend is fully built -- OpeningBalanceSession, its
-  // line-type CRUD endpoints, preview/post/confirm_zero -- just no
-  // UI wraps it). Deliberately NOT given a placeholder href here --
-  // see the button-filtering logic below for why that matters.
-  // OPEN_ACCOUNTING_SETUP's own href IS confirmed real.
-  const READINESS_ACTION_HREF: Partial<Record<string, string>> = {
-    OPEN_ACCOUNTING_SETUP: "/dashboard/accounting/accounts",
-  };
+// 20 Sep 2026 — the action labels and destinations this banner uses now live in
+// lib/readiness.ts, shared with the blocked-action notices on the gated screens,
+// so a destination added once appears in every place at the same moment.
+// (The 17 Sep note that used to sit here — no Opening Balance destination exists
+// yet, deliberately no placeholder href — moved there with the maps.)
 
 function WorkshopReadinessBanner() {
   const [readiness, setReadiness] = useState<OrganizationReadiness | null>(null);
