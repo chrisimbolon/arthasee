@@ -15,9 +15,11 @@
 // balance payment later) are a real, supported case, not just a
 // single overwritable field.
 // =============================================================================
+import ReadinessBlockNotice from "@/components/readiness/ReadinessBlockNotice";
 import { Invoice, InvoiceStatus, invoicesApi } from "@/lib/api/invoicing";
 import { organizationsApi } from "@/lib/api/organizations";
 import { Payment, PaymentMethod, paymentsApi } from "@/lib/api/payments";
+import { ReadinessBlockedError, readinessBlockFromError } from "@/lib/readiness";
 import { ArrowLeft, Download, Loader2, Printer } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -101,6 +103,9 @@ function InvoiceDetailContent() {
   const [updating, setUpdating] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 20 Sep 2026 — the readiness gate's own 409 for the two gated actions on this
+  // page (issue an invoice; record a payment), shown with its real reason.
+  const [blocked, setBlocked] = useState<ReadinessBlockedError | null>(null);
 // 17 Sep 2026 -- real, deliberate split from `error` above: this is
   // never a failure state, and clearing on any new action (payment
   // resubmit, status change) keeps a stale success message from
@@ -141,12 +146,16 @@ function InvoiceDetailContent() {
 
   const changeStatus = async (status: InvoiceStatus) => {
     if (!invoice) return;
-    setUpdating(true); setError(null);
+    setUpdating(true); setError(null); setBlocked(null);
     try {
       const updated = await invoicesApi.updateStatus(invoice.id, status);
       setInvoice(updated);
-    } catch {
-      setError("Gagal mengubah status invoice.");
+    } catch (err) {
+      // 20 Sep 2026 — DRAFT -> ISSUED is a readiness-gated action (cancelling is
+      // deliberately not). A gate 409 used to fall into the generic line below.
+      const gate = readinessBlockFromError(err, "Invoice belum dapat diterbitkan.");
+      if (gate) setBlocked(gate);
+      else setError("Gagal mengubah status invoice.");
     } finally {
       setUpdating(false);
     }
@@ -163,12 +172,13 @@ function InvoiceDetailContent() {
     setPaymentMethod("cash");
     setPaymentReference("");
     setError(null);
+    setBlocked(null);
     setShowPaymentForm(true);
   };
 
   const submitPayment = async () => {
     if (!invoice) return;
-    setSubmittingPayment(true); setError(null); setSuccessMessage(null);
+    setSubmittingPayment(true); setError(null); setSuccessMessage(null); setBlocked(null);
     try {
       // Captured before load() below overwrites paymentAmount's own
       // meaning-in-context -- this is "what was just paid," not
@@ -208,7 +218,12 @@ function InvoiceDetailContent() {
       // status) that are genuinely more useful to show than a flat
       // "gagal" string here, unlike a plain status PATCH which never
       // had anything that specific to say.
-      setError(err?.response?.data?.message ?? "Gagal mencatat pembayaran.");
+      // 20 Sep 2026 — the gate's 409 carries only a generic summary sentence in
+      // `message`; the specific reasons live in `blocks`. Show those, with any
+      // real destination, instead of just the summary.
+      const gate = readinessBlockFromError(err, "Pembayaran belum dapat dicatat.");
+      if (gate) setBlocked(gate);
+      else setError(err?.response?.data?.message ?? "Gagal mencatat pembayaran.");
     } finally {
       setSubmittingPayment(false);
     }
@@ -276,6 +291,7 @@ function InvoiceDetailContent() {
       </div>
 
       {successMessage && <div className="no-print" style={{ background: "#e8f5ee", color: "#2e7d4f", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14, fontWeight: 600 }}>{successMessage}</div>}
+      {blocked && <ReadinessBlockNotice blocked={blocked} />}
       {error && <div className="no-print" style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
 
       <div className="card" style={{ maxWidth: 720, margin: "0 auto", padding: 40 }}>
