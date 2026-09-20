@@ -4,6 +4,7 @@
 // Same query-param pattern as vehicle-detail/invoice-detail — static
 // export needs every route's HTML identical regardless of ?id= value.
 // =============================================================================
+import ReadinessBlockNotice from "@/components/readiness/ReadinessBlockNotice";
 import { Part, partsApi } from "@/lib/api/service";
 import { TrackingLink, trackingLinksApi } from "@/lib/api/tracking";
 import {
@@ -16,6 +17,8 @@ import {
   workOrderStagesApi,
   WorkOrderStatus,
 } from "@/lib/api/workorders";
+import { todayISO } from "@/lib/format";
+import { ReadinessBlockedError, readinessBlockFromError } from "@/lib/readiness";
 import { AlertTriangle, ArrowLeft, Check, Copy, Download, Link2, Loader2, Pencil, Plus, Printer, Trash2, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -824,16 +827,30 @@ function MaterialLinesSection({ wo, catalog, onUpdated }: { wo: WorkOrder; catal
   const [qty, setQty]       = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState<string | null>(null);
+  // 20 Sep 2026 — the readiness gate's own 409 on part consumption, with its real reasons.
+  const [blocked, setBlocked] = useState<ReadinessBlockedError | null>(null);
 
   const addLine = async () => {
     if (!partId || !qty) return;
-    setSaving(true); setError(null);
+    setSaving(true); setError(null); setBlocked(null);
     try {
       await workOrderMaterialLinesApi.create(wo.id, { part: partId, quantity: Number(qty) });
       setPartId(""); setQty("");
       onUpdated();
-    } catch {
-      setError("Gagal menambahkan material — periksa ketersediaan stok.");
+    } catch (err) {
+      // 20 Sep 2026 — adding a material line is a readiness-gated action (it is the real
+      // moment stock deducts and a PartConsumed event posts). This used to answer EVERY
+      // failure with "check stock availability", which sent people hunting for a stock
+      // problem that did not exist. A gate 409 now gets the shared notice; any other
+      // failure shows the server's own message when it sent one, keeping the old text
+      // only as the fallback.
+      const gate = readinessBlockFromError(err, "Material belum dapat ditambahkan.");
+      if (gate) {
+        setBlocked(gate);
+      } else {
+        const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+        setError(apiMessage || "Gagal menambahkan material — periksa ketersediaan stok.");
+      }
     } finally {
       setSaving(false);
     }
@@ -854,6 +871,7 @@ function MaterialLinesSection({ wo, catalog, onUpdated }: { wo: WorkOrder; catal
   return (
     <div className="card" style={{ marginBottom: 20 }}>
       <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Material</h3>
+      {blocked && <ReadinessBlockNotice blocked={blocked} />}
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 14 }}>{error}</div>}
       {wo.material_lines.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13.5, marginBottom: 12 }}>Belum ada material digunakan.</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: editable ? 14 : 0 }}>
@@ -896,7 +914,12 @@ function WorkOrderDetailContent() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [closeDate, setCloseDate] = useState(new Date().toISOString().slice(0, 10));
+  // 20 Sep 2026 — the readiness gate's own 409 on closing a work order.
+  const [blocked, setBlocked] = useState<ReadinessBlockedError | null>(null);
+  // 20 Sep 2026 — was new Date().toISOString().slice(0, 10): the UTC day, which reads
+  // YESTERDAY between 00:00 and 07:00 WIB — and this date is what the job's cost posts
+  // under (on the 1st of a month, the previous, possibly closed, period).
+  const [closeDate, setCloseDate] = useState(() => todayISO());
   const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const load = () => workOrdersApi.get(workOrderId).then(setWo).finally(() => setLoading(false));
@@ -924,13 +947,22 @@ function WorkOrderDetailContent() {
   };
 
   const handleClose = async () => {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setBlocked(null);
     try {
       await workOrdersApi.close(workOrderId, closeDate);
       load();
     } catch (err) {
-      const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
-      setError(apiMessage || "Gagal menyelesaikan work order.");
+      // 20 Sep 2026 — closing is a readiness-gated action. The notice renders at the top
+      // of the page and this button is far below it, so bring it into view — otherwise the
+      // person clicks, nothing visibly happens, and they click again.
+      const gate = readinessBlockFromError(err, "Work order belum dapat diselesaikan.");
+      if (gate) {
+        setBlocked(gate);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } else {
+        const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+        setError(apiMessage || "Gagal menyelesaikan work order.");
+      }
     } finally {
       setBusy(false);
     }
@@ -1084,6 +1116,7 @@ function WorkOrderDetailContent() {
 
       <TrackingLinksSection workOrderId={wo.id} />
 
+      {blocked && <ReadinessBlockNotice blocked={blocked} />}
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
       <IntakeCard wo={wo} mechanics={mechanics} onUpdated={load} />
