@@ -4,7 +4,9 @@
 // Flat top-level page, matching invoice-detail's own real convention
 // — NOT nested under dashboard/purchasing/, reached via ?id=.
 // =============================================================================
+import ReadinessBlockNotice from "@/components/readiness/ReadinessBlockNotice";
 import { SupplierInvoice, supplierInvoicesApi } from "@/lib/api/purchasing";
+import { ReadinessBlockedError, readinessBlockFromError } from "@/lib/readiness";
 import { ArrowLeft, Loader2, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -28,6 +30,9 @@ export default function SupplierInvoiceDetailPage() {
   const [paying, setPaying] = useState(false);
   const [method, setMethod] = useState<"cash" | "bank_transfer">("bank_transfer");
   const [error, setError] = useState<string | null>(null);
+  // 20 Sep 2026 — the readiness gate's own 409 (a shop that is not yet ready to
+  // transact), shown with its real reason instead of a generic failure line.
+  const [blocked, setBlocked] = useState<ReadinessBlockedError | null>(null);
 
   const load = () => {
     if (!id) { setLoading(false); return; }
@@ -38,12 +43,19 @@ export default function SupplierInvoiceDetailPage() {
   useEffect(() => { load(); }, [id]);
 
   const handlePay = async () => {
-    setPaying(true); setError(null);
+    setPaying(true); setError(null); setBlocked(null);
     try {
       await supplierInvoicesApi.pay(id, method);
       load();
-    } catch {
-      setError("Gagal mencatat pembayaran.");
+    } catch (err: any) {
+      // 20 Sep 2026 — paying a supplier invoice is one of the six readiness-gated
+      // actions. This used to discard the response entirely, so a shop that was
+      // merely not ready saw "Gagal mencatat pembayaran." and assumed the app was
+      // broken. A gate 409 now gets the shared notice; any other failure shows the
+      // server's own message when it sent one, like invoice-detail already does.
+      const gate = readinessBlockFromError(err, "Pembayaran belum dapat dicatat.");
+      if (gate) setBlocked(gate);
+      else setError(err?.response?.data?.message ?? "Gagal mencatat pembayaran.");
       setPaying(false);
     }
   };
@@ -95,6 +107,7 @@ export default function SupplierInvoiceDetailPage() {
         </div>
       </div>
 
+      {blocked && <ReadinessBlockNotice blocked={blocked} />}
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
       <div className="card">
