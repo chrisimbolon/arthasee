@@ -28,6 +28,7 @@ import {
   generalLedgerApi, GeneralLedgerResult, GeneralLedgerRow, JournalEntryRow,
   TrialBalanceAccount,
 } from "@/lib/api/accounting";
+import { todayISO } from "@/lib/format";
 import { ChevronDown, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
@@ -40,10 +41,6 @@ function formatRupiah(value: string | number): string {
   return new Intl.NumberFormat("id-ID", {
     style: "currency", currency: "IDR", maximumFractionDigits: 0,
   }).format(toNumber(value));
-}
-
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
 }
 
 const PAGE_SIZE = 50;
