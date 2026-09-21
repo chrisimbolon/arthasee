@@ -14,6 +14,7 @@ import {
   OperatingExpense, OperatingExpenseMethod, operatingExpensesApi,
 } from "@/lib/api/payments";
 import { Mechanic, mechanicsApi } from "@/lib/api/workorders";
+import { todayISO } from "@/lib/format";
 import { Loader2, Plus, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -54,7 +55,7 @@ function CreateExpenseModal({
   // today, but Made needs a real way to record a genuinely backdated
   // expense (e.g. entering last week's utility bill a few days late)
   // without hitting a false "period closed" block for no real reason.
-  const [paidAt, setPaidAt] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidAt, setPaidAt] = useState(() => todayISO());
   const [reference, setReference] = useState("");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
