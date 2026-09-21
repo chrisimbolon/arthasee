@@ -15,7 +15,7 @@ import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service"
 import {
   IncomingLetter, LETTER_SOURCE_LABEL, lettersApi, OutgoingLetter,
 } from "@/lib/api/letters";
-import { formatDateID } from "@/lib/format";
+import { formatDateID, todayISO } from "@/lib/format";
 import { FileDown, Inbox, Loader2, Plus, Send } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -75,8 +75,8 @@ function CreateIncomingLetterModal({ onClose, onCreated }: { onClose: () => void
   const [vehicles, setVehicles]   = useState<Vehicle[]>([]);
   const [form, setForm] = useState({
     sender: "", subject: "",
-    letter_date: new Date().toISOString().slice(0, 10),
-    received_date: new Date().toISOString().slice(0, 10),
+    letter_date: todayISO(),
+    received_date: todayISO(),
     customer: "", vehicle: "",
   });
   const [file, setFile]     = useState<File | null>(null);
