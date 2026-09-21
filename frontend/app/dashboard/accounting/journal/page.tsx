@@ -6,6 +6,7 @@ import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   accountingApi, FailedPosting, JournalEntryRow, JournalSource,
 } from "@/lib/api/accounting";
+import { todayISO } from "@/lib/format";
 import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
@@ -182,7 +183,7 @@ function FailedPostingsPanel({ failures }: { failures: FailedPosting[] }) {
 export default function JournalPage() {
   const [source, setSource] = useState<SourceFilter>("ALL");
   const [since, setSince] = useState(`${new Date().getFullYear()}-01-01`);
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [asOf, setAsOf] = useState(() => todayISO());
   const [entries, setEntries] = useState<JournalEntryRow[] | null>(null);
   const [failures, setFailures] = useState<FailedPosting[] | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
