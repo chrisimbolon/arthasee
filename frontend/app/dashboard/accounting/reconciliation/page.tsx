@@ -31,6 +31,7 @@ import {
   ReconciliationJournalLineRow, ReconciliationMatchRow, ReconciliationSummary,
 } from "@/lib/api/accounting";
 import { parseSpreadsheetFile, SPREADSHEET_IMPORT_ACCEPT } from "@/lib/fileImport";
+import { todayISO } from "@/lib/format";
 import { Loader2, Plus, Upload } from "lucide-react";
 import { ChangeEvent, useEffect, useState } from "react";
 
@@ -207,7 +208,7 @@ function ImportStatementLinesWizard({
 export default function ReconciliationPage() {
   const [accounts, setAccounts] = useState<AccountRow[] | null>(null);
   const [accountCode, setAccountCode] = useState<string>("");
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [asOf, setAsOf] = useState(() => todayISO());
 
   const [summary, setSummary] = useState<ReconciliationSummary | null>(null);
   const [matched, setMatched] = useState<ReconciliationMatchRow[] | null>(null);
@@ -544,7 +545,7 @@ function StatementLineForm({
 }: {
   accountCode: string; onCancel: () => void; onSaved: () => void;
 }) {
-  const [statementDate, setStatementDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [statementDate, setStatementDate] = useState(() => todayISO());
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
   const [submitting, setSubmitting] = useState(false);
