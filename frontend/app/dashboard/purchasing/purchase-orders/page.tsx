@@ -16,6 +16,7 @@
 import PurchasingSubNav from "@/components/purchasing/PurchasingSubNav";
 import { PurchaseOrder, purchaseOrdersApi, Supplier, suppliersApi } from "@/lib/api/purchasing";
 import { FluidBrand, Part, partsApi, VehicleBrand, ViscosityGrade } from "@/lib/api/service";
+import { todayISO } from "@/lib/format";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
@@ -86,7 +87,7 @@ function CreatePOModal({
   suppliers: Supplier[]; parts: Part[]; onClose: () => void; onCreated: (po: PurchaseOrder) => void;
 }) {
   const [supplierId, setSupplierId] = useState("");
-  const [orderDate, setOrderDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [orderDate, setOrderDate] = useState(() => todayISO());
   const [expectedDate, setExpectedDate] = useState("");
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<LineInput[]>([emptyLine()]);
