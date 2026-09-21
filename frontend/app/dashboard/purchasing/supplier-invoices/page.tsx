@@ -16,6 +16,7 @@ import {
   SupplierInvoice, supplierInvoicesApi,
   suppliersApi,
 } from "@/lib/api/purchasing";
+import { todayISO } from "@/lib/format";
 import { FileDown, Loader2, Plus, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
@@ -37,7 +38,7 @@ function CreateInvoiceModal({
 }) {
   const [supplierId, setSupplierId] = useState("");
   const [amount, setAmount] = useState("");
-  const [invoiceDate, setInvoiceDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [invoiceDate, setInvoiceDate] = useState(() => todayISO());
   const [dueDate, setDueDate] = useState("");
   const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState("");
   const [selectedGrnIds, setSelectedGrnIds] = useState<Set<string>>(new Set());
