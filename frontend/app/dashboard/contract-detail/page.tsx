@@ -16,7 +16,7 @@ import {
   Contract, ContractImport, TerminPeriod,
   contractImportsApi, contractsApi, terminPeriodsApi,
 } from "@/lib/api/contracts";
-import { formatDateID } from "@/lib/format";
+import { formatDateID, todayISO } from "@/lib/format";
 import {
   AlertTriangle, ArrowLeft, Car, ChevronDown, ChevronRight, Download,
   History, Loader2, UploadCloud, Wallet, X,
@@ -84,7 +84,7 @@ function RecordRealizationModal({ period, onClose, onRecorded }: {
   // genuinely differs, which is the exact scenario amount_received
   // being its own real field (not just a boolean) exists for.
   const [amount, setAmount] = useState(period.amount_expected);
-  const [receivedDate, setReceivedDate] = useState(new Date().toISOString().slice(0, 10));
+  const [receivedDate, setReceivedDate] = useState(() => todayISO());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
