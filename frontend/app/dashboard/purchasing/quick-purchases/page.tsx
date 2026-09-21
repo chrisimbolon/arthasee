@@ -16,6 +16,7 @@ import {
   Supplier, suppliersApi,
 } from "@/lib/api/purchasing";
 import { ItemType, Part, partsApi, VehicleBrand } from "@/lib/api/service";
+import { todayISO } from "@/lib/format";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -206,7 +207,7 @@ function CreateQuickPurchaseModal({
   // confirmed live, this exact form, the moment August 2026 closed
   // and the entire feature stopped working for real use. Same real
   // fix already applied to OperatingExpense's own form.
-  const [purchasedAt, setPurchasedAt] = useState(() => new Date().toISOString().slice(0, 10));
+  const [purchasedAt, setPurchasedAt] = useState(() => todayISO());
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<LineInput[]>([emptyLine()]);
   const [saving, setSaving] = useState(false);
