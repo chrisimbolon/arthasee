@@ -5,6 +5,7 @@
 import api from "@/lib/api";
 import { accountingApi, JournalEntryRow, TrialBalanceAccount } from "@/lib/api/accounting";
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
+import { todayISO } from "@/lib/format";
 import { ArrowLeft, Loader2, Plus, Trash2, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, useEffect, useState } from "react";
@@ -59,7 +60,7 @@ export default function ManualJournalPage() {
   const [roleLoading, setRoleLoading] = useState(true);
   const [accounts, setAccounts] = useState<TrialBalanceAccount[]>([]);
 
-  const [postingDate, setPostingDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [postingDate, setPostingDate] = useState(() => todayISO());
   const [reason, setReason] = useState("");
   const [lines, setLines] = useState<LineInput[]>([emptyLine(), emptyLine()]);
 
