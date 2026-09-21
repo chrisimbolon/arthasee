@@ -33,6 +33,7 @@ import {
   accountingApi, JournalEntryRow, JournalLineInput, TrialBalanceAccount,
 } from "@/lib/api/accounting";
 import api from "@/lib/api";
+import { todayISO } from "@/lib/format";
 import { ArrowLeft, Check, Loader2, Plus, Trash2, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -119,7 +120,7 @@ function JournalCorrectContent() {
   const [entry, setEntry] = useState<JournalEntryRow | null>(null);
   const [entryLoading, setEntryLoading] = useState(true);
 
-  const [postingDate, setPostingDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [postingDate, setPostingDate] = useState(() => todayISO());
   const [reason, setReason] = useState("");
   const [lines, setLines] = useState<LineInput[]>([emptyLine(), emptyLine()]);
 
