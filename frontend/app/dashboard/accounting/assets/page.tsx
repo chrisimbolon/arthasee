@@ -13,6 +13,7 @@
 // =============================================================================
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import { Asset, AssetPaymentMethod, assetsApi } from "@/lib/api/accounting";
+import { todayISO } from "@/lib/format";
 import { Loader2, Plus, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -28,7 +29,7 @@ function formatRupiah(value: string | number): string {
 
 function RecordAssetModal({ onClose, onCreated }: { onClose: () => void; onCreated: (a: Asset) => void }) {
   const [name, setName] = useState("");
-  const [acquisitionDate, setAcquisitionDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [acquisitionDate, setAcquisitionDate] = useState(() => todayISO());
   const [cost, setCost] = useState("");
   const [usefulLifeMonths, setUsefulLifeMonths] = useState("");
   const [method, setMethod] = useState<AssetPaymentMethod>("cash");
