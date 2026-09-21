@@ -4,6 +4,7 @@
 // =============================================================================
 import PurchasingSubNav from "@/components/purchasing/PurchasingSubNav";
 import { purchasingReportsApi, SupplierReliabilityResponse } from "@/lib/api/purchasing";
+import { todayISO } from "@/lib/format";
 import { Loader2 } from "lucide-react";
 import { ChangeEvent, useEffect, useState } from "react";
 
@@ -25,7 +26,7 @@ function onTimePillType(rate: string | number | null): string {
 }
 
 export default function SupplierReliabilityPage() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [since, setSince] = useState(`${new Date().getFullYear()}-01-01`);
   const [asOf, setAsOf] = useState(today);
   const [data, setData] = useState<SupplierReliabilityResponse | null>(null);
