@@ -12,6 +12,7 @@ import {
   ProfitLossComparisonResponse,
   ProfitLossResponse, ProfitLossTrendResponse, ReportDelta, ReportLine, TrialBalanceResponse,
 } from "@/lib/api/accounting";
+import { todayISO } from "@/lib/format";
 import { Loader2, Lock, TriangleAlert, Unlock } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { ChangeEvent, useEffect, useState } from "react";
@@ -172,7 +173,7 @@ function ComparisonPanel({ since, asOf }: { since: string; asOf: string }) {
 // ── Trial Balance ────────────────────────────────────────────────
 
 function TrialBalancePanel() {
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [asOf, setAsOf] = useState(() => todayISO());
   const [data, setData] = useState<TrialBalanceResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -330,7 +331,7 @@ function ProfitLossPanel() {
   // own confirmed anchoring rule ("if the picker is set to August
   // 2026 and he selects 6 Months, it renders March–August 2026").
   const [view, setView] = useState<"single" | "trend">("single");
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [since, setSince] = useState(`${new Date().getFullYear()}-01-01`);
   const [asOf, setAsOf] = useState(today);
   const [data, setData] = useState<ProfitLossResponse | null>(null);
@@ -421,7 +422,7 @@ function SinglePeriodProfitLoss({
 // ── Balance Sheet ────────────────────────────────────────────────
 
 function BalanceSheetPanel() {
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [asOf, setAsOf] = useState(() => todayISO());
   const [data, setData] = useState<BalanceSheetResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -495,7 +496,7 @@ function BalanceSheetPanel() {
 // ── Cash Conversion Cycle ────────────────────────────────────────
 
 function CashConversionCyclePanel() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [since, setSince] = useState(`${new Date().getFullYear()}-01-01`);
   const [asOf, setAsOf] = useState(today);
   const [data, setData] = useState<CashConversionCycleResponse | null>(null);
@@ -555,7 +556,7 @@ function CashConversionCyclePanel() {
 // ── Aging AR / AP ────────────────────────────────────────────────
 
 function AgingPanel({ type }: { type: "ar" | "ap" }) {
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [asOf, setAsOf] = useState(() => todayISO());
   const [data, setData] = useState<AgingReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
