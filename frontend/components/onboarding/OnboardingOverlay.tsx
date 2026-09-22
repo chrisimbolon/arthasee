@@ -62,7 +62,15 @@ function extractMessage(err: unknown, fallback: string): string {
 
 // ── Shared small pieces ─────────────────────────────────────────
 
-function Overlay({ width, children }: { width: number; children: ReactNode }) {
+// 22 Sep 2026 — `embedded` lets OpeningBalanceStep render as an ordinary
+// in-page card (Roadmap Open Decision #33: the opening-balance path for a
+// shop that is already operating, not mid-first-login) instead of the
+// fixed, full-screen, dimmed-background modal every onboarding caller still
+// gets by default (embedded defaults to false — no existing caller changes).
+function Overlay({ width, children, embedded = false }: { width: number; children: ReactNode; embedded?: boolean }) {
+  if (embedded) {
+    return <div className="card" style={{ width: "100%", maxWidth: width }}>{children}</div>;
+  }
   return (
     <div style={{ position: "fixed", inset: 0, background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
       <div className="card" style={{ width, maxHeight: "90vh", overflowY: "auto" }}>
@@ -695,7 +703,10 @@ function PayableSection({ session, onChange, setError }: SectionProps) {
   );
 }
 
-function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
+// 22 Sep 2026 — exported (was module-private) so a standalone page can
+// render it directly for a shop that is already past first login. See the
+// `embedded` prop below and this file's own module docstring.
+export function OpeningBalanceStep({ onComplete, embedded = false }: { onComplete: () => void; embedded?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState<OpeningBalanceSessionResponse | null>(null);
   const [startDate, setStartDate] = useState(todayISO());
@@ -789,7 +800,7 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
 
   if (loading) {
     return (
-      <Overlay width={480}>
+      <Overlay width={480} embedded={embedded}>
         <div style={{ display: "flex", justifyContent: "center", padding: 60, color: "var(--steel)" }}>
           <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
         </div>
@@ -806,8 +817,8 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
   // nothing to add is a real, normal path too.
   if (!session) {
     return (
-      <Overlay width={520}>
-        <StepBadge current={2} />
+      <Overlay width={520} embedded={embedded}>
+        {!embedded && <StepBadge current={2} />}
         <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
           Saldo Awal Bengkel
         </h1>
@@ -834,6 +845,12 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
         >
           {goingFresh ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Bengkel Baru — Tidak Ada Saldo Awal"}
         </button>
+        {embedded && (
+          <p style={{ fontSize: 12, color: "var(--steel)", marginTop: 10, lineHeight: 1.5 }}>
+            Hanya untuk bengkel yang benar-benar baru berdiri tanpa saldo awal. Jika bengkel Anda
+            sudah punya riwayat transaksi sebelum memakai Arthasee, pilih <b>Isi Saldo Awal</b> di atas.
+          </p>
+        )}
       </Overlay>
     );
   }
@@ -850,8 +867,8 @@ function OpeningBalanceStep({ onComplete }: { onComplete: () => void }) {
   const canPost = hasContent && !posting && !reviewing;
 
   return (
-    <Overlay width={760}>
-      <StepBadge current={2} />
+    <Overlay width={760} embedded={embedded}>
+      {!embedded && <StepBadge current={2} />}
       <h1 className="display" style={{ fontSize: 24, marginBottom: 4, textTransform: "none" }}>
         Saldo Awal Bengkel
       </h1>
