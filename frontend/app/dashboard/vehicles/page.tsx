@@ -3,19 +3,10 @@
 // === frontend/app/dashboard/vehicles/page.tsx ===
 // =============================================================================
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
+import { formatDateShortID } from "@/lib/format";
 import { AlertTriangle, Calendar, Check, ChevronDown, Loader2, Plus, Search, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-
-// 18 Sep 2026 -- dd-mm-yyyy specifically for this list's own compact
-// "Servis Terakhir" column -- v.last_service_date arrives as a plain
-// "YYYY-MM-DD" string (a DateField, never a datetime), so this is a
-// direct, safe string split -- no real Date object/timezone
-// conversion involved at all.
-function formatDateShortID(isoDate: string): string {
-  const [year, month, day] = isoDate.split("-");
-  return `${day}-${month}-${year}`;
-}
 
 function CustomerCombobox({ customers, value, onChange }: {
   customers: Customer[]; value: string; onChange: (id: string) => void;

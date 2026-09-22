@@ -28,7 +28,7 @@ import {
   generalLedgerApi, GeneralLedgerResult, GeneralLedgerRow, JournalEntryRow,
   TrialBalanceAccount,
 } from "@/lib/api/accounting";
-import { todayISO } from "@/lib/format";
+import { formatDateShortID, todayISO } from "@/lib/format";
 import { ChevronDown, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
@@ -238,7 +238,7 @@ export default function GeneralLedgerPage() {
                       <Fragment key={row.line_id}>
                         <tr onClick={() => toggleEntry(row.entry_id)} style={{ cursor: "pointer" }}>
                           <td>{isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</td>
-                          <td>{row.posting_date}</td>
+                          <td>{formatDateShortID(row.posting_date)}</td>
                           <td className="mono">{row.entry_number}</td>
                           <td onClick={(e) => e.stopPropagation()}><ReferenceCell row={row} /></td>
                           <td style={{ fontSize: 13, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

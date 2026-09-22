@@ -6,7 +6,7 @@ import AccountingSubNav from "@/components/accounting/AccountingSubNav";
 import {
   accountingApi, FailedPosting, JournalEntryRow, JournalSource,
 } from "@/lib/api/accounting";
-import { todayISO } from "@/lib/format";
+import { formatDateShortID, todayISO } from "@/lib/format";
 import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { ChangeEvent, Fragment, useEffect, useState } from "react";
@@ -78,7 +78,7 @@ function JournalEntriesTable({
             <tr onClick={() => onToggle(e.id)} style={{ cursor: "pointer" }}>
               <td>{expanded.has(e.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</td>
               <td className="mono">{e.entry_number}</td>
-              <td>{e.posting_date}</td>
+              <td>{formatDateShortID(e.posting_date)}</td>
               <td style={{ fontSize: 13 }}>{sourceLabel(e.source)}</td>
               <td style={{ fontSize: 13, color: "var(--steel)" }}>{e.event_type || "—"}</td>
               <td style={{ fontSize: 13, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

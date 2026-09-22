@@ -67,3 +67,18 @@ export function todayISO(now: Date = new Date()): string {
   const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
+
+// 22 Sep 2026 — moved here from vehicles/page.tsx (its own original comment
+// kept below), once journal/page.tsx and general-ledger/page.tsx needed the
+// same short form for their own dense, multi-column ledger tables — a raw
+// "2026-09-21" posting_date sitting next to a "22/09/2026" date-range picker
+// on the same screen was the real, live inconsistency that prompted this.
+//
+// dd-mm-yyyy specifically for a compact table column — v.last_service_date /
+// e.posting_date / row.posting_date all arrive as a plain "YYYY-MM-DD"
+// string (a DateField, never a datetime), so this is a direct, safe string
+// split — no real Date object/timezone conversion involved at all.
+export function formatDateShortID(isoDate: string): string {
+  const [year, month, day] = isoDate.split("-");
+  return `${day}-${month}-${year}`;
+}
