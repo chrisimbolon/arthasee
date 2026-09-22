@@ -32,10 +32,6 @@
 // specially crafted file" threat model those advisories describe.
 import * as XLSX from "xlsx";
 
-// Real, dependency-free CSV parser — handles quoted fields (embedded
-// commas, escaped "" quotes), \r\n or \n line endings. Same real
-// implementation already proven for Account import (Phase 18, Task
-// 18.8), moved here so it's shared rather than duplicated per page.
 function parseCsvText(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
