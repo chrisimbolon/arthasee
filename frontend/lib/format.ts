@@ -43,9 +43,6 @@ export function formatDateID(dateStr: string | null | undefined): string {
   return date.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
 }
 
-// The shop's own time zone. MUST match the backend's settings.TIME_ZONE
-// (backend/config/settings/base.py) — every posting date the backend
-// derives uses that same zone (apps.accounting.periods.safe_local_date).
 const SHOP_TIME_ZONE = "Asia/Jakarta";
 
 /**
