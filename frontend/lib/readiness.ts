@@ -36,6 +36,10 @@ export const READINESS_ACTION_LABEL: Record<string, string> = {
 // href here and every banner and notice picks it up.
 export const READINESS_ACTION_HREF: Partial<Record<string, string>> = {
   OPEN_ACCOUNTING_SETUP: "/dashboard/accounting/accounts",
+  // 22 Sep 2026 — Roadmap Open Decision #33, resolved: reuses the existing
+  // OpeningBalanceStep wizard, embedded outside first-login (see the new page
+  // itself and OnboardingOverlay.tsx for the full reasoning).
+  OPEN_OPENING_BALANCE: "/dashboard/accounting/opening-balance",
 };
 
 export interface ReadinessBlockedError {
