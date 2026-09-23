@@ -305,6 +305,11 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
   const [quantity, setQuantity] = useState("1");
   const [unitPrice, setUnitPrice] = useState("");
   const [priceFocused, setPriceFocused] = useState(false);
+  // 24 Sep 2026 — Made's own stated policy: a workshop must earn margin on
+  // parts, HPP alone is not enough. The selected part's own cost_price,
+  // tracked alongside unitPrice so the warning below can compare live as
+  // the person types, without re-looking the part up on every keystroke.
+  const [selectedCostPrice, setSelectedCostPrice] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Real gap caught in QA: selecting a Part previously only set
@@ -327,6 +332,12 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
     setPartId(id);
     const selected = catalog.find((p) => p.id === id);
     setUnitPrice(selected ? String(Math.round(Number(selected.unit_price))) : "");
+    // cost_price is 0 for a part with no real GRN yet (§ formatDateShortID's
+    // own sibling convention elsewhere: 0/unset means "unknown", not "free") —
+    // null in that case, same as marginPercent() on the inventory page, so the
+    // warning below never fires against a fake zero cost.
+    const cost = selected ? Number(selected.cost_price) : 0;
+    setSelectedCostPrice(selected && cost > 0 ? cost : null);
   };
 
   // Also clears a stale auto-filled price when switching away from
@@ -334,7 +345,7 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
   // unrelated part's price was showing a moment ago.
   const handleKindChange = (newKind: EstimateLineKind) => {
     setKind(newKind);
-    setPartId(""); setDescription(""); setUnitPrice("");
+    setPartId(""); setDescription(""); setUnitPrice(""); setSelectedCostPrice(null);
   };
 
   const addLine = async () => {
@@ -413,6 +424,17 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
           <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={addLine} disabled={saving}>
             <Plus size={13} /> Tambah
           </button>
+        </div>
+      )}
+
+      {/* 24 Sep 2026 — warning only, never a block. Made's own stated rule
+          ("harus ada margin dari HPP") is a business judgment call, not an
+          accounting-integrity guardrail — a warranty replacement or a
+          deliberate goodwill price is a real, legitimate reason to override
+          this, and only the person entering the line can make that call. */}
+      {editable && kind === "part" && selectedCostPrice !== null && unitPrice !== "" && Number(unitPrice) <= selectedCostPrice && (
+        <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 6 }}>
+          Harga di bawah atau sama dengan HPP ({money(String(selectedCostPrice))}) — bengkel tidak akan untung dari part ini.
         </div>
       )}
 
