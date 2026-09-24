@@ -179,7 +179,15 @@ export default function ActiveJobsPage() {
                         formatRupiah(wo.total)
                       ) : (
                         <span style={{ color: "var(--steel)" }}>
-                          {formatRupiah(wo.total)} <span style={{ fontSize: 11 }}>(Suku Cadang)*</span>
+                          {formatRupiah(wo.total)}{" "}
+                          {/* 24 Sep 2026 — the asterisk used to point at no explanation
+                              anywhere on this page. A real tooltip instead of a dangling "*". */}
+                          <span
+                            title="Total sementara: hanya suku cadang, dihitung dari harga jual saat ini. Belum termasuk jasa, dan belum final sampai invoice dibuat."
+                            style={{ fontSize: 11, textDecoration: "underline dotted", cursor: "help" }}
+                          >
+                            (Suku Cadang)*
+                          </span>
                         </span>
                       )}
                     </td>
