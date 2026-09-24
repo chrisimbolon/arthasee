@@ -484,13 +484,30 @@ class WorkOrder(TenantScopedModel):
             # save() below) — this only needs to leave the historical
             # PartUsage record behind for Invoice to later snapshot
             # from, not move any stock a second time.
+            # 24 Sep 2026 — real bug found live: this used to pass
+            # line.unit_price_at_time straight through, which is
+            # WorkOrderMaterialLine's OWN field — correctly valued at
+            # Part.cost_price since the 24 Aug 2026 ledger-consistency fix
+            # (see that model's own save(), and its module docstring).
+            # PartUsage.unit_price_at_time is a DIFFERENT column on a
+            # DIFFERENT model, meaning the SELLING price frozen for
+            # invoicing (see PartUsage.save()'s own default: self.part.
+            # unit_price) — same field name, opposite meaning. Copying one
+            # into the other meant every part with a real recorded cost
+            # has been invoiced at cost since 24 Aug — confirmed on
+            # production: 14 lines, all CV Arya Motor, Rp 359.000 total,
+            # 13 already PAID. Reading line.part.unit_price directly here
+            # instead restores PartUsage's own already-correct default;
+            # WorkOrderMaterialLine.unit_price_at_time itself, and every
+            # WIP/COGS posting that depends on it, is completely
+            # untouched by this change.
             PartUsage.objects.bulk_create([
                 PartUsage(
                     organization=self.organization,
                     service_record=record,
                     part=line.part,
                     quantity=line.quantity,
-                    unit_price_at_time=line.unit_price_at_time,
+                    unit_price_at_time=line.part.unit_price,
                 )
                 for line in material_lines
             ])

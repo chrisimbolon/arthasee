@@ -8,7 +8,7 @@ from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import StockAdjustment
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -140,7 +140,15 @@ class WorkOrderMasterListView(TenantScopedAPIView):
                 "vehicle", "vehicle__customer", "assigned_to",
                 "service_record", "service_record__invoice",
             )
-            .prefetch_related("material_lines")
+            # 24 Sep 2026 — select_related("part") added on the prefetch itself:
+            # _serialize() below now reads line.part.unit_price per material
+            # line, which without this would be one extra query per line,
+            # per work order, on this list endpoint — a real N+1 this fix
+            # would otherwise introduce while fixing the pricing bug.
+            .prefetch_related(Prefetch(
+                "material_lines",
+                queryset=WorkOrderMaterialLine.objects.select_related("part"),
+            ))
         )
 
         status_filter = request.query_params.get("status")
@@ -173,8 +181,18 @@ class WorkOrderMasterListView(TenantScopedAPIView):
             total = invoice.total
             total_is_final = True
         else:
+            # 24 Sep 2026 — real bug found live, same root cause as
+            # WorkOrder.close()'s own PartUsage.bulk_create() (see that
+            # fix's own comment for the full story): this summed
+            # line.unit_price_at_time, WorkOrderMaterialLine's own COST
+            # field, not the customer-facing selling price. A shop's own
+            # "jobs in progress" list was silently showing an at-cost
+            # running total. line.part.unit_price is today's real selling
+            # price — correct for a value already explicitly marked
+            # total_is_final=False (an in-progress estimate, not a frozen
+            # invoice line).
             total = sum(
-                (line.quantity * line.unit_price_at_time for line in wo.material_lines.all()),
+                (line.quantity * line.part.unit_price for line in wo.material_lines.all()),
                 Decimal("0"),
             )
             total_is_final = False
