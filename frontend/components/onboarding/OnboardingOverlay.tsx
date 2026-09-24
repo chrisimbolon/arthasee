@@ -404,7 +404,17 @@ function AssetSection({ session, onChange, setError }: SectionProps) {
 }
 
 function OtherSection({ session, onChange, setError }: SectionProps) {
-  const [accountCode, setAccountCode] = useState("3001");
+  // 24 Sep 2026 — was useState("3001"): this field used to load already
+  // pre-filled with the equity account, alongside a hint naming it "the
+  // usual final balancer" — an active nudge toward manually forcing balance
+  // with a 3001 credit, exactly the "blind plug silently called Owner
+  // Capital" anti-pattern flagged in review (Sansan's "balancing != classi-
+  // fication" note). The system already has a real, correct mechanism for
+  // this — 3002 Ekuitas Saldo Awal, computed automatically and shown on the
+  // confirmation screen above — this field starting empty stops steering
+  // people around it. 3001 itself is NOT blocked here: a real, deliberate
+  // owner-capital injection is still a legitimate line in this section.
+  const [accountCode, setAccountCode] = useState("");
   const [side, setSide] = useState<OpeningBalanceOtherSide>("credit");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
@@ -432,7 +442,7 @@ function OtherSection({ session, onChange, setError }: SectionProps) {
   };
 
   return (
-    <SectionCard title="Lainnya" hint="Modal pemilik, pinjaman, pajak terutang, atau akun lain yang tidak masuk kategori di atas — masukkan kode akunnya langsung. Modal Pemilik (3001) biasanya jadi penyeimbang akhir.">
+    <SectionCard title="Lainnya" hint="Modal pemilik (jika ada setoran modal yang nyata), pinjaman, pajak terutang, atau akun lain yang tidak masuk kategori di atas — masukkan kode akunnya langsung. Tidak tahu persis rinciannya? Biarkan saja — selisihnya otomatis masuk ke akun 3002 Ekuitas Saldo Awal saat Anda konfirmasi.">
       {session.other_lines.length > 0 && (
         <div style={{ marginBottom: 10 }}>
           {session.other_lines.map((l) => (
@@ -445,7 +455,7 @@ function OtherSection({ session, onChange, setError }: SectionProps) {
         </div>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <input className="input mono" placeholder="Kode akun (cth. 3001)" value={accountCode} onChange={(e) => setAccountCode(e.target.value)} style={{ width: 130 }} />
+        <input className="input mono" placeholder="Kode akun (cth. 2101)" value={accountCode} onChange={(e) => setAccountCode(e.target.value)} style={{ width: 130 }} />
         <select className="input" value={side} onChange={(e) => setSide(e.target.value as OpeningBalanceOtherSide)} style={{ width: 100 }}>
           <option value="credit">Kredit</option>
           <option value="debit">Debit</option>
