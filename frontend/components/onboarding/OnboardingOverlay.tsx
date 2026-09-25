@@ -35,6 +35,7 @@ import {
   OpeningBalanceSessionResponse, openingBalanceApi,
 } from "@/lib/api/accounting";
 import AccountForm, { emptyFormValues } from "@/components/accounting/AccountForm";
+import { authApi } from "@/lib/api/auth";
 import { Organization, organizationsApi } from "@/lib/api/organizations";
 import { Supplier, suppliersApi } from "@/lib/api/purchasing";
 import { Customer, customersApi } from "@/lib/api/service";
@@ -82,10 +83,34 @@ function Overlay({ width, children, embedded = false }: { width: number; childre
   );
 }
 
-function StepBadge({ current }: { current: 1 | 2 | 3 }) {
+function StepBadge({ current }: { current: 1 | 2 | 3 | 4 }) {
   return (
     <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--rust)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 10 }}>
-      Langkah {current} dari 3
+      Langkah {current} dari 4
+    </div>
+  );
+}
+
+function WizardNav({ onBack, onCancel }: { onBack?: () => void; onCancel?: () => void }) {
+  if (!onBack && !onCancel) return null;
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+      {onBack ? (
+        <button
+          type="button" onClick={onBack}
+          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--steel)", fontSize: 12.5, padding: 0, display: "flex", alignItems: "center", gap: 4 }}
+        >
+          ← Kembali
+        </button>
+      ) : <span />}
+      {onCancel ? (
+        <button
+          type="button" onClick={onCancel}
+          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--steel)", fontSize: 12.5, padding: 0 }}
+        >
+          Batal & Keluar
+        </button>
+      ) : <span />}
     </div>
   );
 }
@@ -182,9 +207,21 @@ function LineRow({ label, sub, amount, onDelete }: { label: string; sub?: string
 // this step makes that already-true fact visible, nothing more. Add-only:
 // editing an existing standard account stays on Daftar Akun, after
 // onboarding, where has_posted_history-based locking already applies.
-function FoundationStep({ onDone }: { onDone: () => void }) {
+// 25 Sep 2026 — `view` replaces the old boolean `customizing`: a third
+// state, "preview", shows the real Daftar Akun rows (code, name, · CONTROL
+// badge) instead of just names — "don't just say the COA is ready, show
+// what Arthasee created" (Sansan's review). Same `grouped` data source
+// backs both "summary" and "preview" — never two separate computations
+// that could drift from each other.
+function FoundationStep({
+  onDone, onBack, onCancel,
+}: {
+  onDone: () => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
   const [accounts, setAccounts] = useState<AccountRow[] | null>(null);
-  const [customizing, setCustomizing] = useState(false);
+  const [view, setView] = useState<"summary" | "preview" | "customize">("summary");
 
   const load = () => { accountsApi.list().then(setAccounts); };
   useEffect(() => { load(); }, []);
@@ -202,7 +239,8 @@ function FoundationStep({ onDone }: { onDone: () => void }) {
 
   return (
     <Overlay width={560}>
-      <StepBadge current={1} />
+      <WizardNav onBack={onBack} onCancel={onCancel} />
+      <StepBadge current={3} />
       <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
         Sistem Akuntansi Standar Bengkel Indonesia Telah Siap
       </h1>
@@ -214,41 +252,81 @@ function FoundationStep({ onDone }: { onDone: () => void }) {
         <div style={{ display: "flex", justifyContent: "center", padding: 30 }}>
           <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
         </div>
-      ) : !customizing ? (
-        <>
-          {grouped.map((g) => (
-            <div key={g.type} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>
-                {g.label}
-              </div>
-              <div style={{ fontSize: 13, color: "var(--ink)" }}>
-                {g.accounts.map((a) => a.name).join(", ")}
-              </div>
-            </div>
-          ))}
-          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-            <button type="button" className="btn-rust" onClick={onDone}>Lanjut ke Profil Bengkel →</button>
-            <button type="button" className="btn-ghost" onClick={() => setCustomizing(true)}>⚙️ Sesuaikan / Tambah Akun</button>
-          </div>
-        </>
-      ) : (
+      ) : view === "customize" ? (
         <AccountForm
           mode="create"
           initial={emptyFormValues()}
           lockClassification={false}
           allAccounts={merged}
           excludeIdFromParentOptions={null}
-          onCancel={() => setCustomizing(false)}
-          onSaved={() => { setCustomizing(false); load(); }}
+          onCancel={() => setView("summary")}
+          onSaved={() => { setView("summary"); load(); }}
         />
+      ) : (
+        <>
+          {view === "summary" ? (
+            grouped.map((g) => (
+              <div key={g.type} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>
+                  {g.label}
+                </div>
+                <div style={{ fontSize: 13, color: "var(--ink)" }}>
+                  {g.accounts.map((a) => a.name).join(", ")}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14, marginBottom: 4, maxHeight: 320, overflowY: "auto" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--workshop)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 10 }}>
+                Daftar Akun · Preview
+              </div>
+              {grouped.map((g) => (
+                <div key={g.type} style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--rust)", textTransform: "uppercase", marginBottom: 4 }}>
+                    {g.label}
+                  </div>
+                  {g.accounts.map((a) => (
+                    <div key={a.id} style={{ display: "flex", gap: 10, fontSize: 12.5, padding: "3px 0" }}>
+                      <span className="mono" style={{ color: "var(--steel)", width: 46, flexShrink: 0 }}>{a.code}</span>
+                      <span>
+                        {a.name}
+                        {a.is_control_account && (
+                          <span style={{ fontSize: 10.5, color: "var(--steel)", marginLeft: 6 }}>· CONTROL</span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, marginTop: 20, flexWrap: "wrap" }}>
+            <button type="button" className="btn-rust" onClick={onDone}>Lanjut →</button>
+            <button type="button" className="btn-ghost" onClick={() => setView(view === "preview" ? "summary" : "preview")}>
+              {view === "preview" ? "Ringkas" : "Lihat Detail Akun"}
+            </button>
+            <button type="button" className="btn-ghost" onClick={() => setView("customize")}>⚙️ Sesuaikan / Tambah Akun</button>
+          </div>
+        </>
       )}
     </Overlay>
   );
 }
 
-// ── Step 2 — profile ────────────────────────────────────────────
+// ── Step 1 — profile ────────────────────────────────────────────
 
-function ProfileStep({ organization, onDone }: { organization: Organization; onDone: () => void }) {
+function ProfileStep({
+  organization, onDone, onCancel,
+}: {
+  organization: Organization;
+  // 25 Sep 2026 — hands the just-saved values back to the root, which
+  // keeps its own live `org` state now (not just the original prop) —
+  // the real fix for Kembali: without this, going Step 2 -> Kembali would
+  // remount ProfileStep from the ORIGINAL organization prop and silently
+  // show pre-onboarding values, discarding what was just saved.
+  onDone: (updated: { phone: string; address: string; invoice_code: string }) => void;
+  onCancel: () => void;
+}) {
   const [phone, setPhone] = useState(organization.phone || "");
   const [address, setAddress] = useState(organization.address || "");
   const [invoiceCode, setInvoiceCode] = useState(organization.invoice_code);
@@ -265,10 +343,11 @@ function ProfileStep({ organization, onDone }: { organization: Organization; onD
       // Real update(), NOT completeOnboarding() — Step 1 only ever
       // SAVES the profile now; onboarding_completed only ever flips
       // at the very end of Step 2.
-      await organizationsApi.update({
+      const updated = {
         phone: phone.trim(), address: address.trim(), invoice_code: invoiceCode.trim().toUpperCase(),
-      });
-      onDone();
+      };
+      await organizationsApi.update(updated);
+      onDone(updated);
     } catch (err) {
       setError(extractMessage(err, "Gagal menyimpan pengaturan awal."));
     } finally {
@@ -278,7 +357,8 @@ function ProfileStep({ organization, onDone }: { organization: Organization; onD
 
   return (
     <Overlay width={480}>
-      <StepBadge current={2} />
+      <WizardNav onCancel={onCancel} />
+      <StepBadge current={1} />
       <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
         Selamat Datang di Arthasee!
       </h1>
@@ -322,14 +402,61 @@ function ProfileStep({ organization, onDone }: { organization: Organization; onD
         </div>
 
         <button className="btn-rust" type="submit" disabled={!canSubmit} style={{ width: "100%", justifyContent: "center" }}>
-          {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Lanjut ke Saldo Awal →"}
+          {saving ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Lanjut ke Tipe Bengkel →"}
         </button>
       </form>
     </Overlay>
   );
 }
 
-// ── Step 2 — Opening Balance ────────────────────────────────────
+// ── Step 2 — shop type ──────────────────────────────────────────
+
+function ShopTypeStep({
+  onSelect, onBack, onCancel,
+}: {
+  onSelect: (type: "new" | "existing") => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Overlay width={520}>
+      <WizardNav onBack={onBack} onCancel={onCancel} />
+      <StepBadge current={2} />
+      <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
+        Tipe Bengkel
+      </h1>
+      <p style={{ fontSize: 13.5, color: "var(--steel)", marginBottom: 22, lineHeight: 1.5 }}>
+        Apakah bengkel Anda baru berdiri, atau sudah berjalan sebelum memakai Arthasee?
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <button
+          type="button" className="btn-ghost" onClick={() => onSelect("new")}
+          style={{ justifyContent: "flex-start", textAlign: "left", padding: "14px 16px", height: "auto" }}
+        >
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Bengkel Baru</div>
+            <div style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 2 }}>
+              Belum ada kas, stok, atau aset dari sebelum memakai Arthasee.
+            </div>
+          </div>
+        </button>
+        <button
+          type="button" className="btn-ghost" onClick={() => onSelect("existing")}
+          style={{ justifyContent: "flex-start", textAlign: "left", padding: "14px 16px", height: "auto" }}
+        >
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Bengkel Lama</div>
+            <div style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 2 }}>
+              Sudah punya kas, stok, atau aset dari sebelum memakai Arthasee.
+            </div>
+          </div>
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
+// ── Step 4 — Opening Balance ────────────────────────────────────
 
 type SectionProps = {
   session: OpeningBalanceSessionResponse;
@@ -790,7 +917,18 @@ function PayableSection({ session, onChange, setError }: SectionProps) {
 // 22 Sep 2026 — exported (was module-private) so a standalone page can
 // render it directly for a shop that is already past first login. See the
 // `embedded` prop below and this file's own module docstring.
-export function OpeningBalanceStep({ onComplete, embedded = false }: { onComplete: () => void; embedded?: boolean }) {
+export function OpeningBalanceStep({
+  onComplete, embedded = false, onBack, onCancel,
+}: {
+  onComplete: () => void;
+  embedded?: boolean;
+  // 25 Sep 2026 — optional: only the first-login wizard's own root passes
+  // these. The standalone /dashboard/accounting/opening-balance page
+  // (Task 19.9) never does, so WizardNav renders nothing there — no
+  // change to that page needed.
+  onBack?: () => void;
+  onCancel?: () => void;
+}) {
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState<OpeningBalanceSessionResponse | null>(null);
   const [startDate, setStartDate] = useState(todayISO());
@@ -902,7 +1040,8 @@ export function OpeningBalanceStep({ onComplete, embedded = false }: { onComplet
   if (!session) {
     return (
       <Overlay width={520} embedded={embedded}>
-        {!embedded && <StepBadge current={3} />}
+        <WizardNav onBack={onBack} onCancel={onCancel} />
+        {!embedded && <StepBadge current={4} />}
         <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
           Saldo Awal Bengkel
         </h1>
@@ -952,7 +1091,8 @@ export function OpeningBalanceStep({ onComplete, embedded = false }: { onComplet
 
   return (
     <Overlay width={760} embedded={embedded}>
-      {!embedded && <StepBadge current={3} />}
+      <WizardNav onBack={onBack} onCancel={onCancel} />
+      {!embedded && <StepBadge current={4} />}
       <h1 className="display" style={{ fontSize: 24, marginBottom: 4, textTransform: "none" }}>
         Saldo Awal Bengkel
       </h1>
@@ -1013,6 +1153,62 @@ export function OpeningBalanceStep({ onComplete, embedded = false }: { onComplet
   );
 }
 
+// 25 Sep 2026 — the real completion path for a "Bengkel Baru" shop, which
+// skips Step 4 entirely (Chris's own explicit sign-off). Calls the exact
+// same endpoint OpeningBalanceStep's own "Bengkel Baru" button already
+// calls; verified safe weeks ago by reading OrganizationOnboardingCompleteView
+// in full — with no OpeningBalanceSession yet, it creates one and confirms
+// zero itself.
+function FinishingStep({
+  onComplete, onBack, onCancel,
+}: {
+  onComplete: () => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+
+  const run = async () => {
+    setError(null);
+    try {
+      await organizationsApi.completeOnboarding();
+      onComplete();
+    } catch (err) {
+      setError(extractMessage(err, "Gagal menyelesaikan pengaturan awal."));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  useEffect(() => {
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <Overlay width={440}>
+      <WizardNav onBack={onBack} onCancel={onCancel} />
+      {error ? (
+        <>
+          <ErrorBanner text={error} />
+          <button
+            type="button" className="btn-rust" onClick={() => { setRetrying(true); run(); }} disabled={retrying}
+            style={{ width: "100%", justifyContent: "center" }}
+          >
+            {retrying ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Coba Lagi"}
+          </button>
+        </>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "30px 0", gap: 12 }}>
+          <Loader2 size={22} style={{ animation: "spin 1s linear infinite" }} />
+          <div style={{ fontSize: 13.5, color: "var(--steel)" }}>Menyelesaikan pengaturan awal...</div>
+        </div>
+      )}
+    </Overlay>
+  );
+}
+
 // ── Root ─────────────────────────────────────────────────────────
 
 export default function OnboardingOverlay({
@@ -1021,20 +1217,66 @@ export default function OnboardingOverlay({
   organization: Organization;
   onComplete: () => void;
 }) {
-  // Real resume logic — the fix for the mid-Step-2-refresh gap found
-  // during the architecture review: if the profile is already saved
-  // (Step 1 genuinely happened, even in an earlier, interrupted
-  // session), skip straight to Step 2 rather than re-showing Step 1
-  // from scratch.
-  const [step, setStep] = useState<"foundation" | "profile" | "opening_balance">(
-    organization.phone && organization.address ? "opening_balance" : "foundation",
+  // 25 Sep 2026 — restructured to Sansan's 4-step canonical order (Chris's
+  // explicit sign-off): Profil -> Tipe Bengkel -> Sistem Akuntansi Standar
+  // -> Saldo Awal, the last one skipped entirely for a new shop.
+  //
+  // `org` is a real, live copy of the organization prop, updated the
+  // moment ProfileStep saves — not just the original prop forever. Real
+  // fix for Kembali: without this, going back to Step 1 and forward again
+  // would show stale, pre-onboarding values.
+  const [org, setOrg] = useState(organization);
+  const [shopType, setShopType] = useState<"new" | "existing" | null>(null);
+  // Resume logic: phone && address now lands on Step 2 (Tipe Bengkel),
+  // never straight to Opening Balance — Step 2 and Step 3 must always be
+  // seen at least once, even on a resumed session.
+  const [step, setStep] = useState<"profile" | "shop_type" | "foundation" | "opening_balance" | "finishing">(
+    organization.phone && organization.address ? "shop_type" : "profile",
   );
 
-  if (step === "foundation") {
-    return <FoundationStep onDone={() => setStep("profile")} />;
-  }
+  // Plain logout — tokenStorage.clear(), no server call — then a full
+  // reload to /login, not a soft client-side route change, so no stale
+  // organization data lingers in memory from before the cancel.
+  const handleCancel = () => {
+    authApi.logout();
+    window.location.href = "/login";
+  };
+
   if (step === "profile") {
-    return <ProfileStep organization={organization} onDone={() => setStep("opening_balance")} />;
+    return (
+      <ProfileStep
+        organization={org}
+        onCancel={handleCancel}
+        onDone={(updated) => { setOrg({ ...org, ...updated }); setStep("shop_type"); }}
+      />
+    );
   }
-  return <OpeningBalanceStep onComplete={onComplete} />;
+  if (step === "shop_type") {
+    return (
+      <ShopTypeStep
+        onBack={() => setStep("profile")}
+        onCancel={handleCancel}
+        onSelect={(type) => { setShopType(type); setStep("foundation"); }}
+      />
+    );
+  }
+  if (step === "foundation") {
+    return (
+      <FoundationStep
+        onBack={() => setStep("shop_type")}
+        onCancel={handleCancel}
+        onDone={() => setStep(shopType === "new" ? "finishing" : "opening_balance")}
+      />
+    );
+  }
+  if (step === "finishing") {
+    return <FinishingStep onComplete={onComplete} onBack={() => setStep("foundation")} onCancel={handleCancel} />;
+  }
+  return (
+    <OpeningBalanceStep
+      onComplete={onComplete}
+      onBack={() => setStep("foundation")}
+      onCancel={handleCancel}
+    />
+  );
 }
