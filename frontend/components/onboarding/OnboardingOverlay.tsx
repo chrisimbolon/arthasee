@@ -30,9 +30,11 @@
 // asymmetry between the two pickers, not an oversight.
 // =============================================================================
 import {
+  AccountRow, accountsApi, ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER,
   OpeningBalanceActionResult, OpeningBalanceOtherSide, OpeningBalancePreviewResponse,
   OpeningBalanceSessionResponse, openingBalanceApi,
 } from "@/lib/api/accounting";
+import AccountForm, { emptyFormValues } from "@/components/accounting/AccountForm";
 import { Organization, organizationsApi } from "@/lib/api/organizations";
 import { Supplier, suppliersApi } from "@/lib/api/purchasing";
 import { Customer, customersApi } from "@/lib/api/service";
@@ -80,10 +82,10 @@ function Overlay({ width, children, embedded = false }: { width: number; childre
   );
 }
 
-function StepBadge({ current }: { current: 1 | 2 }) {
+function StepBadge({ current }: { current: 1 | 2 | 3 }) {
   return (
     <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--rust)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 10 }}>
-      Langkah {current} dari 2
+      Langkah {current} dari 3
     </div>
   );
 }
@@ -172,7 +174,79 @@ function LineRow({ label, sub, amount, onDelete }: { label: string; sub?: string
   );
 }
 
-// ── Step 1 — profile ────────────────────────────────────────────
+// ── Step 1 — accounting foundation ───────────────────────────────
+// 25 Sep 2026 — Sansan's review: accounting deserves an explicit, visible
+// moment, not something that silently already happened before onboarding
+// even opens. Confirmed by reading RegisterView (authentication/views.py):
+// seed_chart_of_accounts() already runs synchronously at registration —
+// this step makes that already-true fact visible, nothing more. Add-only:
+// editing an existing standard account stays on Daftar Akun, after
+// onboarding, where has_posted_history-based locking already applies.
+function FoundationStep({ onDone }: { onDone: () => void }) {
+  const [accounts, setAccounts] = useState<AccountRow[] | null>(null);
+  const [customizing, setCustomizing] = useState(false);
+
+  const load = () => { accountsApi.list().then(setAccounts); };
+  useEffect(() => { load(); }, []);
+
+  // Always null — a brand-new shop genuinely has no trial-balance row yet
+  // for any account. Structurally satisfies AccountForm's own
+  // MergedAccountRow[] parameter (balance: string | number | null)
+  // without a second real API call here.
+  const merged = (accounts ?? []).map((a) => ({ ...a, balance: null as string | number | null }));
+
+  const grouped = ACCOUNT_TYPE_ORDER.map((type) => ({
+    type, label: ACCOUNT_TYPE_LABELS[type],
+    accounts: merged.filter((a) => a.account_type === type && !a.parent),
+  })).filter((g) => g.accounts.length > 0);
+
+  return (
+    <Overlay width={560}>
+      <StepBadge current={1} />
+      <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
+        Sistem Akuntansi Standar Bengkel Indonesia Telah Siap
+      </h1>
+      <p style={{ fontSize: 13.5, color: "var(--steel)", marginBottom: 18, lineHeight: 1.5 }}>
+        Arthasee sudah menyiapkan struktur akun standar untuk bengkel Anda — tidak perlu diatur manual.
+      </p>
+
+      {accounts === null ? (
+        <div style={{ display: "flex", justifyContent: "center", padding: 30 }}>
+          <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
+        </div>
+      ) : !customizing ? (
+        <>
+          {grouped.map((g) => (
+            <div key={g.type} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--steel)", textTransform: "uppercase", marginBottom: 4 }}>
+                {g.label}
+              </div>
+              <div style={{ fontSize: 13, color: "var(--ink)" }}>
+                {g.accounts.map((a) => a.name).join(", ")}
+              </div>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button type="button" className="btn-rust" onClick={onDone}>Lanjut ke Profil Bengkel →</button>
+            <button type="button" className="btn-ghost" onClick={() => setCustomizing(true)}>⚙️ Sesuaikan / Tambah Akun</button>
+          </div>
+        </>
+      ) : (
+        <AccountForm
+          mode="create"
+          initial={emptyFormValues()}
+          lockClassification={false}
+          allAccounts={merged}
+          excludeIdFromParentOptions={null}
+          onCancel={() => setCustomizing(false)}
+          onSaved={() => { setCustomizing(false); load(); }}
+        />
+      )}
+    </Overlay>
+  );
+}
+
+// ── Step 2 — profile ────────────────────────────────────────────
 
 function ProfileStep({ organization, onDone }: { organization: Organization; onDone: () => void }) {
   const [phone, setPhone] = useState(organization.phone || "");
@@ -204,7 +278,7 @@ function ProfileStep({ organization, onDone }: { organization: Organization; onD
 
   return (
     <Overlay width={480}>
-      <StepBadge current={1} />
+      <StepBadge current={2} />
       <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
         Selamat Datang di Arthasee!
       </h1>
@@ -828,7 +902,7 @@ export function OpeningBalanceStep({ onComplete, embedded = false }: { onComplet
   if (!session) {
     return (
       <Overlay width={520} embedded={embedded}>
-        {!embedded && <StepBadge current={2} />}
+        {!embedded && <StepBadge current={3} />}
         <h1 className="display" style={{ fontSize: 24, marginBottom: 8, textTransform: "none" }}>
           Saldo Awal Bengkel
         </h1>
@@ -878,7 +952,7 @@ export function OpeningBalanceStep({ onComplete, embedded = false }: { onComplet
 
   return (
     <Overlay width={760} embedded={embedded}>
-      {!embedded && <StepBadge current={2} />}
+      {!embedded && <StepBadge current={3} />}
       <h1 className="display" style={{ fontSize: 24, marginBottom: 4, textTransform: "none" }}>
         Saldo Awal Bengkel
       </h1>
@@ -952,10 +1026,13 @@ export default function OnboardingOverlay({
   // (Step 1 genuinely happened, even in an earlier, interrupted
   // session), skip straight to Step 2 rather than re-showing Step 1
   // from scratch.
-  const [step, setStep] = useState<"profile" | "opening_balance">(
-    organization.phone && organization.address ? "opening_balance" : "profile",
+  const [step, setStep] = useState<"foundation" | "profile" | "opening_balance">(
+    organization.phone && organization.address ? "opening_balance" : "foundation",
   );
 
+  if (step === "foundation") {
+    return <FoundationStep onDone={() => setStep("profile")} />;
+  }
   if (step === "profile") {
     return <ProfileStep organization={organization} onDone={() => setStep("opening_balance")} />;
   }
