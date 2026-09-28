@@ -1803,6 +1803,45 @@ class OpeningBalanceSession(TenantScopedModel):
         self.confirmed_zero_by = confirmed_by
         self.save(update_fields=["confirmed_zero_at", "confirmed_zero_by"])
 
+    @classmethod
+    def ensure_zero_opening_position(cls, *, organization, start_date, confirmed_by=None):
+        """
+        28 Sep 2026 — the one real entry point for "this workshop is new, it has
+        no opening position to record", used by OrganizationOnboardingComplete
+        View when a shop finishes onboarding as a Bengkel Baru.
+
+        Real gap this closes: that endpoint used to confirm zero ONLY when no
+        session existed at all, and left any existing session untouched — on
+        the assumption that an existing session was always already POSTED. It
+        isn't: an empty DRAFT is easy to create (open Saldo Awal, click "Isi
+        Saldo Awal", go back, choose Bengkel Baru), and is_opening_position_
+        resolved is False for it — so onboarding_completed flipped to True
+        while the readiness gate still answered OPENING_BALANCE_NOT_RESOLVED:
+        a shop that "finished" onboarding and was blocked on its very first
+        transaction.
+
+        Cases (a session is unique per organization, so a stale draft can
+        never simply be replaced by a new one — it has to be resolved):
+          - no session yet                 -> create it, confirm zero (as before)
+          - already resolved               -> left completely untouched: POSTED
+                                              (a real opening balance) or already
+                                              confirmed zero
+          - DRAFT, no lines, unresolved    -> confirm zero  (the new case)
+          - DRAFT with real lines entered  -> confirm_zero() raises its own
+                                              ValueError, propagated unchanged.
+                                              Never discards data entered in good
+                                              faith — same rule confirm_zero()
+                                              itself already states.
+        Returns the session.
+        """
+        session = cls.objects.filter(organization=organization).first()
+        if session is None:
+            session = cls.objects.create(organization=organization, start_date=start_date)
+        if session.is_opening_position_resolved:
+            return session
+        session.confirm_zero(confirmed_by=confirmed_by)
+        return session
+
 class OpeningBalanceCashLine(TenantScopedModel):
     ACCOUNT_CHOICES = [("1001", "Kas"), ("1101", "Bank")]
 
