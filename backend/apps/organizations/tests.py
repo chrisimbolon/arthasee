@@ -407,3 +407,83 @@ class OnboardingCompleteReadinessTests(APITestCase):
         self.client.post("/api/organizations/mine/complete-onboarding/")
         self.assertEqual(Account.objects.filter(organization=self.org).count(), account_count_after_first)
         self.assertEqual(OpeningBalanceSession.objects.filter(organization=self.org).count(), 1)
+
+
+    # ------------------------------------------------------------------
+    # 28 Sep 2026 — the abandoned-draft gap. The tests above prove the two
+    # cases the endpoint originally handled: NO session at all, and an
+    # already-POSTED one. There is a third, easy-to-reach state: an EMPTY
+    # DRAFT (Saldo Awal opened, "Isi Saldo Awal" clicked, then back to Tipe
+    # Bengkel and Bengkel Baru chosen). It used to be left untouched, so
+    # onboarding_completed flipped to True while the readiness gate still
+    # answered OPENING_BALANCE_NOT_RESOLVED — a finished onboarding, and a
+    # shop blocked on its very first transaction.
+    # ------------------------------------------------------------------
+
+    def test_empty_draft_session_is_confirmed_zero_and_stops_blocking_readiness(self):
+        """THE fix — the abandoned empty draft must not survive as a permanent block."""
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date.today())
+        self.assertFalse(session.is_opening_position_resolved)
+
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        session.refresh_from_db()
+        self.assertIsNotNone(session.confirmed_zero_at)
+        self.assertEqual(session.confirmed_zero_by_id, self.owner.id)
+        self.assertEqual(session.status, OpeningBalanceSession.Status.DRAFT)  # confirmed zero, never "posted"
+        self.assertEqual(OpeningBalanceSession.objects.filter(organization=self.org).count(), 1)  # unique per org — resolved, not replaced
+        self.assertTrue(check_organization_readiness(self.org)["ready"])
+
+    def test_draft_session_with_real_lines_is_refused_and_onboarding_not_completed(self):
+        """Never discards data entered in good faith: a clean 400 BEFORE the flag flips."""
+        from apps.accounting.models import OpeningBalanceCashLine
+
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date.today())
+        OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=session, account_code="1001", amount="100000",
+        )
+
+        resp = self.client.post("/api/organizations/mine/complete-onboarding/")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(resp.data["success"])
+        self.assertIn("data yang sudah dimasukkan", resp.data["message"])
+        self.org.refresh_from_db()
+        self.assertFalse(self.org.onboarding_completed)
+        session.refresh_from_db()
+        self.assertIsNone(session.confirmed_zero_at)
+        self.assertEqual(session.cash_lines.count(), 1)  # the entered line is still there
+
+    def test_refused_draft_can_be_completed_after_the_lines_are_cleared(self):
+        """The refusal message's own advice ('hapus semua baris terlebih dahulu') genuinely works."""
+        from apps.accounting.models import OpeningBalanceCashLine
+
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date.today())
+        line = OpeningBalanceCashLine.objects.create(
+            organization=self.org, session=session, account_code="1001", amount="100000",
+        )
+        first = self.client.post("/api/organizations/mine/complete-onboarding/")
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+
+        line.delete()
+        second = self.client.post("/api/organizations/mine/complete-onboarding/")
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        session.refresh_from_db()
+        self.assertIsNotNone(session.confirmed_zero_at)
+        self.org.refresh_from_db()
+        self.assertTrue(self.org.onboarding_completed)
+
+    def test_confirmed_zero_timestamp_is_not_rewritten_by_a_second_call(self):
+        """A retry (e.g. after a network blip) must not silently re-stamp the confirmation."""
+        self.client.post("/api/organizations/mine/complete-onboarding/")
+        session = OpeningBalanceSession.objects.get(organization=self.org)
+        first_confirmed_at = session.confirmed_zero_at
+        self.assertIsNotNone(first_confirmed_at)
+
+        second = self.client.post("/api/organizations/mine/complete-onboarding/")
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        session.refresh_from_db()
+        self.assertEqual(session.confirmed_zero_at, first_confirmed_at)
