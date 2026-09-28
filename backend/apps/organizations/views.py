@@ -159,9 +159,26 @@ class OrganizationOnboardingCompleteView(APIView):
         # handlePost) is left completely untouched by this.
         seed_chart_of_accounts(org)
         ensure_current_month_period(org)
-        if not OpeningBalanceSession.objects.filter(organization=org).exists():
-            session = OpeningBalanceSession.objects.create(organization=org, start_date=date.today())
-            session.confirm_zero(confirmed_by=request.user)
+        # 28 Sep 2026 — CORRECTION to the comment above: an existing session is
+        # NOT always already POSTED. An empty DRAFT (started, then abandoned —
+        # e.g. "Isi Saldo Awal" clicked, then back to Tipe Bengkel and Bengkel
+        # Baru chosen) used to be left untouched here, so onboarding_completed
+        # flipped to True while the readiness gate still said
+        # OPENING_BALANCE_NOT_RESOLVED. ensure_zero_opening_position() resolves
+        # every case in one place (see its own docstring): create+confirm when
+        # there is none, confirm an empty draft, leave a POSTED or already-
+        # confirmed session alone, and REFUSE a draft holding real lines — the
+        # refusal is returned as a clean 400 BEFORE onboarding_completed is
+        # flipped, never a silent discard of data entered in good faith.
+        try:
+            OpeningBalanceSession.ensure_zero_opening_position(
+                organization=org, start_date=date.today(), confirmed_by=request.user,
+            )
+        except ValueError as exc:
+            return Response(
+                {"success": False, "message": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         org.onboarding_completed = True
         org.save(update_fields=["onboarding_completed"])
