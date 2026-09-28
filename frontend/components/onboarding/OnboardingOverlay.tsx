@@ -435,7 +435,7 @@ function ShopTypeStep({
         >
           <div>
             <div style={{ fontWeight: 700, fontSize: 14 }}>Bengkel Baru</div>
-            <div style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 2 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 400, color: "inherit", opacity: 0.72, marginTop: 2 }}>
               Belum ada kas, stok, atau aset dari sebelum memakai Arthasee.
             </div>
           </div>
@@ -446,7 +446,7 @@ function ShopTypeStep({
         >
           <div>
             <div style={{ fontWeight: 700, fontSize: 14 }}>Bengkel Lama</div>
-            <div style={{ fontSize: 12.5, color: "var(--steel)", marginTop: 2 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 400, color: "inherit", opacity: 0.72, marginTop: 2 }}>
               Sudah punya kas, stok, atau aset dari sebelum memakai Arthasee.
             </div>
           </div>
@@ -1058,21 +1058,28 @@ export function OpeningBalanceStep({
 
         <button
           type="button" className="btn-rust" onClick={handleCreateSession} disabled={creating}
-          style={{ width: "100%", justifyContent: "center", marginBottom: 12 }}
+          style={{ width: "100%", justifyContent: "center", marginBottom: embedded ? 12 : 0 }}
         >
           {creating ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Isi Saldo Awal"}
         </button>
-        <button
-          type="button" className="btn-ghost" onClick={handleFreshStart} disabled={goingFresh}
-          style={{ width: "100%", justifyContent: "center" }}
-        >
-          {goingFresh ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Bengkel Baru — Tidak Ada Saldo Awal"}
-        </button>
+        {/* 28 Sep 2026 — `embedded` is the STANDALONE /dashboard/accounting/opening-balance
+            page (Task 19.9), where an already-onboarded shop has no earlier step that
+            asked "baru atau lama?". Inside the first-login wizard that question was
+            already answered on Step 2 (Tipe Bengkel), so asking it a second time here
+            was redundant — and only a Bengkel Lama shop ever reaches this screen. */}
         {embedded && (
-          <p style={{ fontSize: 12, color: "var(--steel)", marginTop: 10, lineHeight: 1.5 }}>
-            Hanya untuk bengkel yang benar-benar baru berdiri tanpa saldo awal. Jika bengkel Anda
-            sudah punya riwayat transaksi sebelum memakai Arthasee, pilih <b>Isi Saldo Awal</b> di atas.
-          </p>
+          <>
+            <button
+              type="button" className="btn-ghost" onClick={handleFreshStart} disabled={goingFresh}
+              style={{ width: "100%", justifyContent: "center" }}
+            >
+              {goingFresh ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Bengkel Baru — Tidak Ada Saldo Awal"}
+            </button>
+            <p style={{ fontSize: 12, color: "var(--steel)", marginTop: 10, lineHeight: 1.5 }}>
+              Hanya untuk bengkel yang benar-benar baru berdiri tanpa saldo awal. Jika bengkel Anda
+              sudah punya riwayat transaksi sebelum memakai Arthasee, pilih <b>Isi Saldo Awal</b> di atas.
+            </p>
+          </>
         )}
       </Overlay>
     );
@@ -1127,12 +1134,14 @@ export function OpeningBalanceStep({
       <OtherSection session={session} onChange={refresh} setError={setError} />
 
       <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
-        <button
-          type="button" className="btn-ghost" onClick={handleFreshStart} disabled={goingFresh || posting || reviewing}
-          style={{ flex: 1, justifyContent: "center" }}
-        >
-          {goingFresh ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Batal — Bengkel Baru Saja"}
-        </button>
+        {embedded && (
+          <button
+            type="button" className="btn-ghost" onClick={handleFreshStart} disabled={goingFresh || posting || reviewing}
+            style={{ flex: 1, justifyContent: "center" }}
+          >
+            {goingFresh ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : "Batal — Bengkel Baru Saja"}
+          </button>
+        )}
         <button
           type="button" className="btn-rust" onClick={handlePostClick} disabled={!canPost}
           style={{ flex: 2, justifyContent: "center" }}
@@ -1153,12 +1162,14 @@ export function OpeningBalanceStep({
   );
 }
 
-// 25 Sep 2026 — the real completion path for a "Bengkel Baru" shop, which
-// skips Step 4 entirely (Chris's own explicit sign-off). Calls the exact
-// same endpoint OpeningBalanceStep's own "Bengkel Baru" button already
-// calls; verified safe weeks ago by reading OrganizationOnboardingCompleteView
-// in full — with no OpeningBalanceSession yet, it creates one and confirms
-// zero itself.
+// 25 Sep 2026, updated 28 Sep 2026 — the real completion path for a
+// "Bengkel Baru" shop, which now skips Steps 3 AND 4 (Chris and Sansan's
+// explicit sign-off): picking Bengkel Baru on Step 2 lands here directly.
+// Calls the exact same endpoint OpeningBalanceStep's own "Bengkel Baru"
+// button always called. As of 28 Sep 2026 that endpoint also resolves a
+// stale, EMPTY draft session (OpeningBalanceSession.ensure_zero_opening_
+// position) and answers 400 if the draft holds real lines — the error shown
+// below, with "Kembali" back to Step 2 to pick Bengkel Lama instead.
 function FinishingStep({
   onComplete, onBack, onCancel,
 }: {
@@ -1226,7 +1237,6 @@ export default function OnboardingOverlay({
   // fix for Kembali: without this, going back to Step 1 and forward again
   // would show stale, pre-onboarding values.
   const [org, setOrg] = useState(organization);
-  const [shopType, setShopType] = useState<"new" | "existing" | null>(null);
   // Resume logic: phone && address now lands on Step 2 (Tipe Bengkel),
   // never straight to Opening Balance — Step 2 and Step 3 must always be
   // seen at least once, even on a resumed session.
@@ -1252,11 +1262,15 @@ export default function OnboardingOverlay({
     );
   }
   if (step === "shop_type") {
+    // 28 Sep 2026 — the choice is routed the moment it is made, so no
+    // `shopType` state is kept anywhere: Bengkel Baru finishes right here
+    // (Steps 3 and 4 skipped), Bengkel Lama continues to Step 3. Foundation's
+    // own "Lanjut" therefore always means "on to Saldo Awal".
     return (
       <ShopTypeStep
         onBack={() => setStep("profile")}
         onCancel={handleCancel}
-        onSelect={(type) => { setShopType(type); setStep("foundation"); }}
+        onSelect={(type) => setStep(type === "new" ? "finishing" : "foundation")}
       />
     );
   }
@@ -1265,12 +1279,12 @@ export default function OnboardingOverlay({
       <FoundationStep
         onBack={() => setStep("shop_type")}
         onCancel={handleCancel}
-        onDone={() => setStep(shopType === "new" ? "finishing" : "opening_balance")}
+        onDone={() => setStep("opening_balance")}
       />
     );
   }
   if (step === "finishing") {
-    return <FinishingStep onComplete={onComplete} onBack={() => setStep("foundation")} onCancel={handleCancel} />;
+    return <FinishingStep onComplete={onComplete} onBack={() => setStep("shop_type")} onCancel={handleCancel} />;
   }
   return (
     <OpeningBalanceStep
