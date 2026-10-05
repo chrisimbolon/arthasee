@@ -6,8 +6,9 @@ from decimal import Decimal
 from apps.core.models import Outbox
 from rest_framework import serializers
 
-from .models import (Account, AccountingPeriod, Asset, AssetDepreciationEntry,
-                     BankStatementLine, DepreciationRun, JournalEntry,
+from .models import (Account, AccountingPeriod, Asset, AssetCategory,
+                     AssetDepreciationEntry, BankStatementLine,
+                     DepreciationRun, JournalEntry,
                      JournalLine, OpeningBalanceAssetLine,
                      OpeningBalanceCashLine, OpeningBalanceOtherLine,
                      OpeningBalancePartLine, OpeningBalancePayable,
@@ -166,6 +167,29 @@ class AccountingPeriodSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class AssetCategorySerializer(serializers.ModelSerializer):
+    """
+    4 Oct 2026 — fixed-asset categories, Chris's explicit sign-off: robust,
+    predictable, future-proof. Entirely read-only — no add-category UI this
+    batch; the two real rows (Peralatan, Kendaraan) are seeded, never
+    created through this API. Flat fields, same convention as every other
+    read-only config serializer in this file (AccountSerializer,
+    AccountingPeriodSerializer) — no nested account objects, since the
+    three account codes are resolved at POSTING time only (Account.
+    resolve()), the same "code, not FK" pattern this file already
+    establishes for account_code fields elsewhere.
+    """
+    class Meta:
+        model  = AssetCategory
+        fields = [
+            "id", "name",
+            "fixed_asset_account_code", "accumulated_depreciation_account_code",
+            "depreciation_expense_account_code", "default_useful_life_months",
+            "is_default", "created_at",
+        ]
+        read_only_fields = fields
+
+
 class AssetSerializer(serializers.ModelSerializer):
     """
     29 Aug 2026 — real fixed asset register, Made's own confirmed
@@ -180,17 +204,23 @@ class AssetSerializer(serializers.ModelSerializer):
     Asset.record() (which also posts its own acquisition journal
     entry in the same transaction), never through a generic
     serializer.save().
+
+    4 Oct 2026 — category_name added, same flat, read-friendly
+    convention as AccountSerializer's own parent_name — never used in
+    any balance/total math, purely for display.
     """
     monthly_depreciation     = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     accumulated_depreciation = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     book_value               = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     created_by_name          = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+    category_name            = serializers.CharField(source="category.name", read_only=True)
 
     class Meta:
         model  = Asset
         fields = [
             "id", "number", "sequence_number", "name", "acquisition_date",
             "cost", "useful_life_months", "method", "is_active",
+            "category", "category_name",
             "monthly_depreciation", "accumulated_depreciation", "book_value",
             "created_by", "created_by_name", "created_at",
         ]
@@ -205,12 +235,21 @@ class AssetRecordSerializer(serializers.Serializer):
     every asset would slow down exactly the kind of fast,
     low-ceremony entry this system optimizes for elsewhere
     (QuickPurchase, OperatingExpense).
+
+    4 Oct 2026 — `category` added, optional (a real AssetCategory
+    UUID). Omitting it (or sending null) falls back to AssetCategory.
+    get_default(organization) inside Asset.record() itself — the
+    exact mechanism that keeps every pre-existing caller of this
+    endpoint, and OpeningBalanceSession.post()'s own direct model-
+    layer call (which never passes category at all), completely
+    behavior-preserving.
     """
     name               = serializers.CharField(max_length=200)
     acquisition_date   = serializers.DateField()
     cost               = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
     useful_life_months = serializers.IntegerField(min_value=1)
     method             = serializers.ChoiceField(choices=[("cash", "Tunai"), ("bank", "Transfer Bank")], default="cash")
+    category           = serializers.UUIDField(required=False, allow_null=True, default=None)
 
 
 class AssetDepreciationEntrySerializer(serializers.ModelSerializer):
