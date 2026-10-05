@@ -12,7 +12,7 @@
 // not for triggering depreciation directly.
 // =============================================================================
 import AccountingSubNav from "@/components/accounting/AccountingSubNav";
-import { Asset, AssetPaymentMethod, assetsApi } from "@/lib/api/accounting";
+import { Asset, AssetCategory, AssetPaymentMethod, assetCategoriesApi, assetsApi } from "@/lib/api/accounting";
 import { todayISO } from "@/lib/format";
 import { Loader2, Plus, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
@@ -27,14 +27,43 @@ function formatRupiah(value: string | number): string {
   }).format(toNumber(value));
 }
 
-function RecordAssetModal({ onClose, onCreated }: { onClose: () => void; onCreated: (a: Asset) => void }) {
+function RecordAssetModal({
+  categories, onClose, onCreated,
+}: {
+  categories: AssetCategory[]; onClose: () => void; onCreated: (a: Asset) => void;
+}) {
   const [name, setName] = useState("");
   const [acquisitionDate, setAcquisitionDate] = useState(() => todayISO());
   const [cost, setCost] = useState("");
   const [usefulLifeMonths, setUsefulLifeMonths] = useState("");
+  const [categoryId, setCategoryId] = useState("");
   const [method, setMethod] = useState<AssetPaymentMethod>("cash");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Defaults to the seeded default category (Peralatan) once
+  // categories load — matches Asset.record()'s own server-side
+  // fallback exactly, so the UI default and the "category omitted"
+  // default never disagree.
+  useEffect(() => {
+    if (!categoryId && categories.length > 0) {
+      const defaultCategory = categories.find((c) => c.is_default) ?? categories[0];
+      setCategoryId(defaultCategory.id);
+    }
+  }, [categories, categoryId]);
+
+  // 4 Oct 2026 — convenience default, never a lock (Chris's explicit
+  // sign-off): prefills the useful-life field from the chosen
+  // category's own default ONLY while that field is still empty —
+  // once the person types anything, re-selecting a category never
+  // overwrites it.
+  const handleCategoryChange = (id: string) => {
+    setCategoryId(id);
+    const category = categories.find((c) => c.id === id);
+    if (category?.default_useful_life_months && !usefulLifeMonths) {
+      setUsefulLifeMonths(String(category.default_useful_life_months));
+    }
+  };
 
   // No salvage-value field, deliberately — Chris's own confirmed
   // call: Made doesn't estimate resale values for shop tools, v1
@@ -45,7 +74,7 @@ function RecordAssetModal({ onClose, onCreated }: { onClose: () => void; onCreat
     ? toNumber(cost) / toNumber(usefulLifeMonths)
     : null;
 
-  const canSubmit = name.trim() && toNumber(cost || "0") > 0 && toNumber(usefulLifeMonths || "0") > 0 && !saving;
+  const canSubmit = name.trim() && toNumber(cost || "0") > 0 && toNumber(usefulLifeMonths || "0") > 0 && !!categoryId && !saving;
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -54,6 +83,7 @@ function RecordAssetModal({ onClose, onCreated }: { onClose: () => void; onCreat
     const result = await assetsApi.record({
       name: name.trim(), acquisition_date: acquisitionDate,
       cost: toNumber(cost), useful_life_months: parseInt(usefulLifeMonths, 10), method,
+      category: categoryId,
     });
     setSaving(false);
     if (!result.success || !result.asset) {
@@ -84,6 +114,16 @@ function RecordAssetModal({ onClose, onCreated }: { onClose: () => void; onCreat
           <div style={{ marginBottom: 14 }}>
             <label className="label">Tanggal Perolehan</label>
             <input className="input" type="date" required value={acquisitionDate} onChange={(e) => setAcquisitionDate(e.target.value)} />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <label className="label">Kategori Aset</label>
+            <select className="input" required value={categoryId} onChange={(e) => handleCategoryChange(e.target.value)}>
+              {categories.length === 0 && <option value="">Memuat...</option>}
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 6 }}>
@@ -135,12 +175,17 @@ function RecordAssetModal({ onClose, onCreated }: { onClose: () => void; onCreat
 
 export default function AssetsPage() {
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [categories, setCategories] = useState<AssetCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
 
   const load = () => {
     setLoading(true);
-    assetsApi.list().then((res) => { setAssets(res ?? []); setLoading(false); });
+    Promise.all([assetsApi.list(), assetCategoriesApi.list()]).then(([assetsRes, categoriesRes]) => {
+      setAssets(assetsRes ?? []);
+      setCategories(categoriesRes ?? []);
+      setLoading(false);
+    });
   };
   useEffect(() => { load(); }, []);
 
@@ -167,7 +212,7 @@ export default function AssetsPage() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Nomor</th><th>Nama</th><th>Tanggal Perolehan</th>
+                <th>Nomor</th><th>Nama</th><th>Kategori</th><th>Tanggal Perolehan</th>
                 <th>Harga Perolehan</th><th>Akumulasi Penyusutan</th><th>Nilai Buku</th><th>Status</th>
               </tr>
             </thead>
@@ -176,6 +221,7 @@ export default function AssetsPage() {
                 <tr key={a.id}>
                   <td className="mono" style={{ color: "var(--rust)", fontWeight: 600 }}>{a.number}</td>
                   <td>{a.name}</td>
+                  <td style={{ fontSize: 13, color: "var(--steel)" }}>{a.category_name}</td>
                   <td style={{ fontSize: 13, color: "var(--steel)" }}>{new Date(a.acquisition_date).toLocaleDateString("id-ID")}</td>
                   <td className="mono">{formatRupiah(a.cost)}</td>
                   <td className="mono" style={{ color: "var(--steel)" }}>{formatRupiah(a.accumulated_depreciation)}</td>
@@ -188,7 +234,7 @@ export default function AssetsPage() {
                 </tr>
               ))}
               {assets.length === 0 && (
-                <tr><td colSpan={7} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>Belum ada aset tercatat</td></tr>
+                <tr><td colSpan={8} style={{ textAlign: "center", padding: 32, color: "var(--steel)" }}>Belum ada aset tercatat</td></tr>
               )}
             </tbody>
           </table>
@@ -197,6 +243,7 @@ export default function AssetsPage() {
 
       {showCreate && (
         <RecordAssetModal
+          categories={categories}
           onClose={() => setShowCreate(false)}
           onCreated={(a) => setAssets((prev) => [a, ...prev])}
         />
