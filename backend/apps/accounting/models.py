@@ -1211,6 +1211,106 @@ class ReconciliationMatch(TenantScopedModel):
             statement_line=statement_line, journal_line=journal_line, matched_by=matched_by,
         )
 
+class AssetCategory(TenantScopedModel):
+    """
+    4 Oct 2026 — Fixed-asset categories, Chris's explicit sign-off: robust,
+    predictable, future-proof. Real gap this closes, confirmed directly
+    against CV Arya Motor's own real assets (a lift, tools, two vehicles):
+    every asset acquisition and every month's depreciation run posted to
+    the SAME single hardcoded pair of accounts (1401/1402, plus 6004 for
+    the expense side) regardless of what the asset actually was — a shop's
+    building and its hand tools, if it had both, could never be told apart
+    in the books.
+
+    Deliberately NOT a free-form admin "account mapping" screen (Chris's
+    own explicit call, 4 Oct 2026, after reviewing Aris's reference system's
+    much larger mapping surface) — this is scoped to exactly one real,
+    confirmed dimension: fixed-asset categories. Two seeded rows
+    (Peralatan, Kendaraan), no add-category UI this batch. If a real need
+    for more surfaces later, this model already carries the right shape to
+    extend from — see this file's own design-doc discussion for why that
+    extension would be additive, not a rewrite.
+
+    Account codes, not FKs to Account — same established pattern Asset.
+    record() and OpeningBalanceOtherLine already use everywhere else in
+    this file: resolved via Account.resolve() at the moment of posting,
+    not a direct foreign key. This avoids a seeding-order dependency (an
+    AssetCategory row can exist before its own Account rows do, exactly
+    like every other code-based reference in this codebase) and gives the
+    same clear, actionable error (Account.resolve()'s own "has the Chart
+    of Accounts been seeded?" message) if something is ever genuinely
+    missing.
+
+    `default_useful_life_months` is a CONVENIENCE PREFILL only — Chris's
+    explicit sign-off: "category values are convenience defaults, not
+    rigid locks." The frontend form pre-fills from this when a category is
+    picked, but the person entering an asset can always override it. Never
+    enforced or validated against here.
+
+    `is_default` — a stable, non-human-editable marker for "the category a
+    legacy or not-yet-categorized asset belongs to," used by
+    Asset.record()'s own backward-compatible fallback (see that method's
+    own docstring). Deliberately a boolean, not a lookup by `name` — this
+    codebase's own established discipline is that a human-editable display
+    label is never a safe identifier to resolve by (same reasoning behind
+    every other code-based, not name-based, reference in this file). No
+    hard DB constraint enforcing "at most one default per org" yet — there
+    is no UI to create a second category at all this batch, so the real
+    risk is effectively zero; worth a real constraint if an add-category
+    screen is ever built.
+    """
+    id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100, verbose_name="Nama Kategori")
+    fixed_asset_account_code = models.CharField(
+        max_length=10, verbose_name="Kode Akun Aset Tetap",
+        help_text="Akun yang didebit saat aset dalam kategori ini diperoleh.",
+    )
+    accumulated_depreciation_account_code = models.CharField(
+        max_length=10, verbose_name="Kode Akun Akumulasi Penyusutan",
+        help_text="Akun kontra-aset yang dikredit setiap bulan saat aset dalam kategori ini disusutkan.",
+    )
+    depreciation_expense_account_code = models.CharField(
+        max_length=10, verbose_name="Kode Akun Beban Penyusutan",
+        help_text="Akun beban yang didebit setiap bulan saat aset dalam kategori ini disusutkan.",
+    )
+    default_useful_life_months = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name="Umur Manfaat Default (Bulan)",
+        help_text="Hanya nilai awal (prefill) pada form — selalu bisa diubah manual per aset.",
+    )
+    is_default = models.BooleanField(
+        default=False, verbose_name="Kategori Default",
+        help_text="Kategori yang dipakai untuk aset lama/legacy yang belum dikategorikan — "
+                  "satu per organisasi, ditentukan oleh seeding, bukan oleh pengguna.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Asset Category"
+        verbose_name_plural  = "Asset Categories"
+        ordering             = ["name"]
+        unique_together      = [("organization", "name")]
+
+    def __str__(self):
+        return f"{self.name} ({self.organization})"
+
+    @classmethod
+    def get_default(cls, organization):
+        """
+        The one real entry point for "the category a legacy or not-yet-
+        categorized asset belongs to" — used by Asset.record()'s own
+        backward-compatible fallback when no category is explicitly given.
+        Raises a clear, actionable error if seeding genuinely never ran for
+        this org — same "has the Chart of Accounts been seeded?" style
+        precedent as Account.resolve().
+        """
+        category = cls.objects.filter(organization=organization, is_default=True).first()
+        if category is None:
+            raise ValueError(
+                f"Tidak ada kategori aset default untuk organisasi '{organization.name}' — "
+                f"sudah dijalankan seeding kategori aset (python manage.py seed_coa)?"
+            )
+        return category
+
 class AssetSequence(TenantScopedModel):
     """Mirrors every other Sequence model in this codebase exactly."""
     id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1245,6 +1345,15 @@ class Asset(TenantScopedModel):
     method = models.CharField(
         max_length=20, choices=[("straight_line", "Garis Lurus")],
         default="straight_line", verbose_name="Metode Penyusutan",
+    )
+    # 4 Oct 2026 — PROTECT: same "a target with real linked history must
+    # never vanish out from under it" discipline as every other real FK in
+    # this file (Account.parent, JournalLine.account). There is no delete
+    # path for AssetCategory at all this batch, but PROTECT is still the
+    # right, consistent default regardless of whether that path exists yet.
+    category = models.ForeignKey(
+        "AssetCategory", on_delete=models.PROTECT, related_name="assets",
+        verbose_name="Kategori Aset",
     )
     is_active = models.BooleanField(default=True, verbose_name="Aktif")
     created_by = models.ForeignKey(
@@ -1283,19 +1392,34 @@ class Asset(TenantScopedModel):
     @classmethod
     def record(
         cls, *, organization, name, acquisition_date, cost, useful_life_months,
-        method="cash", created_by=None, post_acquisition_entry=True,
+        category=None, method="cash", created_by=None, post_acquisition_entry=True,
     ):
+        """
+        4 Oct 2026 — `category` is OPTIONAL, defaulting to AssetCategory.
+        get_default(organization) when omitted. This is deliberate, not an
+        oversight: OpeningBalanceSession.post() calls this method for a
+        legacy asset entered at onboarding WITHOUT ever passing category —
+        that call site is intentionally left completely untouched this
+        batch (Chris's own explicit call to keep onboarding out of scope).
+        Falling back to the default category, which carries the exact same
+        account codes (1401/1402/6004) that call site always posted to
+        anyway, means this is a behavior-preserving change for onboarding,
+        not a silent regression.
+        """
         if cost is None or cost <= Decimal("0"):
             raise ValueError("Harga perolehan aset harus lebih dari nol.")
         if useful_life_months is None or useful_life_months <= 0:
             raise ValueError("Umur manfaat aset harus lebih dari nol bulan.")
+        if category is None:
+            category = AssetCategory.get_default(organization)
 
         with transaction.atomic():
             AccountingPeriod.assert_open_for_posting(organization, acquisition_date)
 
             asset = cls.objects.create(
                 organization=organization, name=name, acquisition_date=acquisition_date,
-                cost=cost, useful_life_months=useful_life_months, created_by=created_by,
+                cost=cost, useful_life_months=useful_life_months, category=category,
+                created_by=created_by,
             )
 
             if post_acquisition_entry:
@@ -1309,7 +1433,7 @@ class Asset(TenantScopedModel):
                     memo=f"Perolehan aset — {asset.number} {name}",
                     created_by=created_by,
                     lines=[
-                        {"account": Account.resolve(organization, "1401"), "debit": cost},
+                        {"account": Account.resolve(organization, category.fixed_asset_account_code), "debit": cost},
                         {"account": Account.resolve(organization, cash_or_bank_code), "credit": cost},
                     ],
                 )
@@ -1340,15 +1464,32 @@ class DepreciationRun(TenantScopedModel):
 
     @classmethod
     def execute(cls, *, organization, accounting_period, run_by=None):
+        """
+        4 Oct 2026 — now groups eligible entries by asset.category and
+        posts one debit/credit pair PER CATEGORY touched this run, instead
+        of always posting a single pair to the hardcoded 6004/1402. The
+        real per-asset eligibility and amount logic directly below
+        (same-month-as-acquisition skip, already-fully-depreciated skip,
+        remaining/is_final_month/amount) is UNCHANGED — only the posting
+        step, at the bottom of this method, is different. For an org where
+        every asset is still in the one default category — true for every
+        shop today, until a Kendaraan asset is deliberately recategorized —
+        this produces the exact same two lines, same accounts, same total,
+        as the code it replaces.
+
+        select_related("category") added to the existing select_for_update()
+        chain — grouping by category and resolving its account codes per
+        asset would otherwise be a real N+1 query pattern.
+        """
         with transaction.atomic():
             assets = (
                 Asset.objects
                 .filter(organization=organization, is_active=True)
+                .select_related("category")
                 .select_for_update()
             )
 
             entries_to_create = []
-            total = Decimal("0")
 
             for asset in assets:
                 same_month_as_acquisition = (
@@ -1370,7 +1511,6 @@ class DepreciationRun(TenantScopedModel):
                     continue
 
                 entries_to_create.append((asset, amount, is_final_month))
-                total += amount
 
             if not entries_to_create:
                 return cls.objects.create(
@@ -1378,16 +1518,40 @@ class DepreciationRun(TenantScopedModel):
                     journal_entry=None, total_amount=Decimal("0"),
                 )
 
+            zero = Decimal("0")
+            total = sum((amount for _, amount, _ in entries_to_create), zero)
+
+            # One (expense, accumulated-depreciation) pair per category
+            # actually touched this run — every pair is individually
+            # balanced by construction, so the overall entry balances too;
+            # JournalEntry.post() itself only validates the OVERALL total,
+            # never requires any particular line pairing (confirmed by
+            # reading that method in full).
+            by_category: dict = {}
+            for asset, amount, _ in entries_to_create:
+                by_category[asset.category_id] = by_category.get(asset.category_id, zero) + amount
+
+            lines = []
+            for category_id, category_total in by_category.items():
+                category = next(a.category for a, _, _ in entries_to_create if a.category_id == category_id)
+                lines.append({
+                    "account": Account.resolve(organization, category.depreciation_expense_account_code),
+                    "debit": category_total,
+                    "description": f"Penyusutan — {category.name}",
+                })
+                lines.append({
+                    "account": Account.resolve(organization, category.accumulated_depreciation_account_code),
+                    "credit": category_total,
+                    "description": f"Penyusutan — {category.name}",
+                })
+
             journal_entry = JournalEntry.post(
                 organization=organization,
                 posting_date=accounting_period.end_date,
                 source=JournalEntry.Source.DEPRECIATION,
                 memo=f"Penyusutan aset — {accounting_period.start_date}–{accounting_period.end_date}",
                 created_by=run_by,
-                lines=[
-                    {"account": Account.resolve(organization, "6004"), "debit": total},
-                    {"account": Account.resolve(organization, "1402"), "credit": total},
-                ],
+                lines=lines,
             )
 
             run = cls.objects.create(
