@@ -1,6 +1,7 @@
 # =============================================================================
 # === backend/apps/authentication/tests.py ===
 # =============================================================================
+from apps.accounting.coa import STANDARD_COA
 from apps.accounting.models import Account
 from apps.organizations.models import Organization, OrganizationMembership
 from rest_framework import status
@@ -65,12 +66,12 @@ class RegisterViewTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
         org = Organization.objects.get(name="Arya Motor Test")
-        # 8 Sep 2026 — 26 -> 27: account 3002 (Ekuitas Saldo Awal)
-        # added in the accounting COA-redesign review, the real
-        # dedicated target for OpeningBalanceSession.post()'s own
-        # explicit variance plug. Mirrors the same fix in
-        # apps.accounting.tests.SeedCoaTests.
-        self.assertEqual(Account.objects.filter(organization=org).count(), 27)
+        # 4 Oct 2026 — real fix, mirrors apps.accounting.tests.SeedCoaTests:
+        # was a hardcoded literal (26 -> 27 -> stale again at 30 once
+        # Kendaraan's own accounts were added for fixed-asset
+        # categories). Asserts against len(STANDARD_COA) directly so
+        # this never silently goes stale the same way again.
+        self.assertEqual(Account.objects.filter(organization=org).count(), len(STANDARD_COA))
 
     def test_register_still_creates_nothing_on_duplicate_email_with_seeding_added(self):
         """
