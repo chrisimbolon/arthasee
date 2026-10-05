@@ -460,8 +460,23 @@ export const accountingApi = {
 
 // 29 Aug 2026 — real fixed asset register & automated depreciation,
 // Made's own confirmed request.
+// 4 Oct 2026 — fixed-asset categories (Peralatan/Kendaraan), Chris's
+// explicit sign-off: robust, predictable, future-proof. Read-only on
+// the frontend too — no add-category UI this batch, the dropdown
+// just lists the two real seeded rows.
 
 export type AssetPaymentMethod = "cash" | "bank";
+
+export interface AssetCategory {
+  id: string;
+  name: string;
+  fixed_asset_account_code: string;
+  accumulated_depreciation_account_code: string;
+  depreciation_expense_account_code: string;
+  default_useful_life_months: number | null;
+  is_default: boolean;
+  created_at: string;
+}
 
 export interface Asset {
   id: string;
@@ -473,6 +488,13 @@ export interface Asset {
   useful_life_months: number;
   method: string;
   is_active: boolean;
+  // 4 Oct 2026 — always a real AssetCategory id now (never null) —
+  // every Asset row, old and new, was backfilled onto the seeded
+  // default (Peralatan) by the migration. category_name is a flat,
+  // read-friendly field, same convention as AccountRow's own
+  // parent_name.
+  category: string;
+  category_name: string;
   // Real Python properties on the backend, computed on read from
   // AssetDepreciationEntry rows — never cached, never stale.
   monthly_depreciation: string | number;
@@ -489,6 +511,11 @@ export interface RecordAssetPayload {
   cost: number | string;
   useful_life_months: number;
   method?: AssetPaymentMethod;
+  // 4 Oct 2026 — optional: omitting it (or sending null) falls back
+  // to the org's default category server-side (Asset.record()'s own
+  // AssetCategory.get_default() fallback) — the exact mechanism that
+  // keeps this a behavior-preserving addition.
+  category?: string;
 }
 
 export interface RecordAssetResult {
@@ -530,6 +557,12 @@ export const assetsApi = {
       return { success: false, message: message || "Gagal mencatat aset." };
     }
   },
+};
+
+// 4 Oct 2026 — fixed-asset categories. Read-only, same "no add-UI
+// this batch" scope as the backend's own AssetCategoryListView.
+export const assetCategoriesApi = {
+  list: () => getListOrNull<AssetCategory>("/api/accounting/asset-categories/", "asset_categories", {}),
 };
 
 export const depreciationRunApi = {
