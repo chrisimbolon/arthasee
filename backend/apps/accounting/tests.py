@@ -70,6 +70,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from .coa import STANDARD_COA
 from .models import (Account, AccountingPeriod, Asset, BankStatementLine,
                      DepreciationRun, JournalEntry, JournalLine,
                      OpeningBalanceAssetLine, OpeningBalanceCashLine,
@@ -101,10 +102,12 @@ class SeedCoaTests(TestCase):
 
     def test_seed_creates_every_standard_account(self):
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
-        # 8 Sep 2026 — 26 -> 27: account 3002 (Ekuitas Saldo Awal)
-        # added this review, the real dedicated target for
-        # OpeningBalanceSession.post()'s own explicit variance plug.
-        self.assertEqual(Account.objects.filter(organization=self.org).count(), 27)
+        # 4 Oct 2026 — real fix: was a hardcoded literal (26 -> 27 ->
+        # stale again at 30 once Kendaraan's own 1403/1404/6007 were
+        # added for fixed-asset categories, Chris's explicit sign-off).
+        # Asserts against len(STANDARD_COA) directly so the next
+        # required-account addition can't silently break this again.
+        self.assertEqual(Account.objects.filter(organization=self.org).count(), len(STANDARD_COA))
         # A handful of specific codes, not just the count — the count
         # alone wouldn't catch a wrong code silently replacing a real
         # one from the Roadmap v2.2 COA Blueprint.
@@ -128,9 +131,9 @@ class SeedCoaTests(TestCase):
 
         call_command("seed_coa", organization=str(self.org.id), verbosity=0)
 
-        # 8 Sep 2026 — 26 -> 27, same reason as test_seed_creates_
+        # 4 Oct 2026 — same len(STANDARD_COA) fix as test_seed_creates_
         # every_standard_account above.
-        self.assertEqual(Account.objects.filter(organization=self.org).count(), 27)
+        self.assertEqual(Account.objects.filter(organization=self.org).count(), len(STANDARD_COA))
         account_1001.refresh_from_db()
         self.assertEqual(account_1001.name, "Kas (Customized)")
 
