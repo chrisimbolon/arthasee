@@ -63,8 +63,9 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from . import reports, trace_forward
-from .models import (Account, AccountingPeriod, Asset, BankStatementLine,
-                     DepreciationRun, JournalEntry, JournalLine,
+from .models import (Account, AccountingPeriod, Asset, AssetCategory,
+                     BankStatementLine, DepreciationRun, JournalEntry,
+                     JournalLine,
                      OpeningBalanceAssetLine, OpeningBalanceCashLine,
                      OpeningBalanceOtherLine, OpeningBalancePartLine,
                      OpeningBalancePayable, OpeningBalanceReceivable,
@@ -72,8 +73,8 @@ from .models import (Account, AccountingPeriod, Asset, BankStatementLine,
 from .serializers import (AccountEditSerializer,
                           AccountImportRequestSerializer,
                           AccountingPeriodSerializer, AccountRecordSerializer,
-                          AccountSerializer, AssetRecordSerializer,
-                          AssetSerializer,
+                          AccountSerializer, AssetCategorySerializer,
+                          AssetRecordSerializer, AssetSerializer,
                           BankStatementImportRequestSerializer,
                           BankStatementLineRecordSerializer,
                           BankStatementLineSerializer,
@@ -1280,6 +1281,25 @@ class AccountingPeriodReopenView(TenantScopedAPIView):
         return Response({"success": True, "period": AccountingPeriodSerializer(period).data})
 
 
+class AssetCategoryListView(TenantScopedAPIView):
+    """
+    GET /api/accounting/asset-categories/
+
+    4 Oct 2026 — fixed-asset categories, Chris's explicit sign-off:
+    robust, predictable, future-proof. Read-only — no add-category UI
+    this batch (deliberate scope call, see the model's own docstring
+    in models.py). Open to any authenticated org member, same stakes
+    class as AccountListCreateView.get() — reading which categories
+    exist is harmless, informational data; nothing here mutates
+    anything.
+    """
+    model = AssetCategory
+
+    def get(self, request):
+        categories = self.get_queryset().order_by("name")
+        return Response({"success": True, "asset_categories": AssetCategorySerializer(categories, many=True).data})
+
+
 class AssetListCreateView(TenantScopedAPIView):
     """
     GET  /api/accounting/assets/  — every real fixed asset for this org
@@ -1290,6 +1310,14 @@ class AssetListCreateView(TenantScopedAPIView):
     journal entry, posted in the same transaction — lives in
     Asset.record(); this view is thin, same discipline as every
     other real write path in this codebase.
+
+    4 Oct 2026 — `category` resolved here, in the view, mirroring
+    ReconciliationMatchListCreateView.post()'s own real precedent
+    (resolve a real instance in the view, hand it to the model
+    method) — Asset.record() itself already shipped, live, tested,
+    expecting a real AssetCategory instance or None; this avoids
+    touching that already-deployed method's signature again for a
+    style preference.
     """
     model = Asset
 
@@ -1309,12 +1337,21 @@ class AssetListCreateView(TenantScopedAPIView):
         input_serializer.is_valid(raise_exception=True)
         data = input_serializer.validated_data
 
+        category = None
+        if data.get("category"):
+            category = AssetCategory.objects.filter(organization=organization, pk=data["category"]).first()
+            if category is None:
+                return Response(
+                    {"success": False, "message": "Kategori aset tidak ditemukan."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
         try:
             asset = Asset.record(
                 organization=organization, name=data["name"],
                 acquisition_date=data["acquisition_date"], cost=data["cost"],
                 useful_life_months=data["useful_life_months"], method=data.get("method", "cash"),
-                created_by=request.user,
+                category=category, created_by=request.user,
             )
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
