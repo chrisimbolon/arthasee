@@ -7,7 +7,8 @@ from .views import (AccountDetailView, AccountImportCommitView,
                     AccountImportPreviewView, AccountingPeriodCloseView,
                     AccountingPeriodListView, AccountingPeriodReopenView,
                     AccountListCreateView, AgingAPView, AgingARView,
-                    AssetListCreateView, BalanceSheetView,
+                    AssetCategoryListView, AssetListCreateView,
+                    BalanceSheetView,
                     BankStatementImportCommitView,
                     BankStatementImportPreviewView,
                     BankStatementLineDetailView,
@@ -93,6 +94,10 @@ urlpatterns = [
     # 29 Aug 2026 — real fixed asset register & automated
     # depreciation, Made's own confirmed request.
     path("assets/", AssetListCreateView.as_view(), name="asset-list-create"),
+    # 4 Oct 2026 — fixed-asset categories (Peralatan/Kendaraan),
+    # Chris's explicit sign-off. Read-only — no add-category UI this
+    # batch.
+    path("asset-categories/", AssetCategoryListView.as_view(), name="asset-category-list"),
     path("periods/<uuid:period_id>/depreciation-run/", DepreciationRunDetailView.as_view(), name="depreciation-run-detail"),
     # 3 Sep 2026 — Opening Balance onboarding, Sansan's own canonical
     # onboarding proposal (meticulously reviewed and revised before
