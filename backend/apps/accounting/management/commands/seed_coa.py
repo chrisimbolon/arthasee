@@ -24,8 +24,8 @@ Usage:
     python manage.py seed_coa                      # every active Organization
     python manage.py seed_coa --organization <uuid>  # one specific Organization
 """
-from apps.accounting.coa import (STANDARD_COA, seed_asset_categories,
-                                 seed_chart_of_accounts)
+from apps.accounting.coa import (STANDARD_COA, seed_account_role_mappings,
+                                 seed_asset_categories, seed_chart_of_accounts)
 from apps.accounting.periods import ensure_current_month_period
 from apps.organizations.models import Organization
 from django.core.management.base import BaseCommand, CommandError
@@ -58,6 +58,7 @@ class Command(BaseCommand):
             created_count = seed_chart_of_accounts(org)
             already_existed = len(STANDARD_COA) - created_count
             category_count = seed_asset_categories(org)
+            role_mapping_count = seed_account_role_mappings(org)
             period = ensure_current_month_period(org)
 
             if options["verbosity"] >= 1:
@@ -65,5 +66,6 @@ class Command(BaseCommand):
                     f"{org.name}: {created_count} account(s) created, "
                     f"{already_existed} already existed. "
                     f"{category_count} asset categor{'y' if category_count == 1 else 'ies'} created. "
+                    f"{role_mapping_count} account role mapping(s) created. "
                     f"Period {period.start_date}–{period.end_date} ready."
                 ))
