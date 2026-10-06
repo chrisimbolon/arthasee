@@ -28,10 +28,17 @@ export interface Organization {
   // deliberate LOOSENING of an existing guard (AccountingPeriod.
   // close()'s own strict sequential-order check), not a toggle on
   // something previously unconstrained.
-  requires_sequential_period_closing: boolean;  
+  requires_sequential_period_closing: boolean;
   plan:         string;
   is_active:    boolean;
   created_at:   string;
+  // 6 Oct 2026 — Organization Logo. Read-only here (output) — the
+  // real write path is uploadLogo()/deleteLogo() below, a dedicated
+  // multipart endpoint, never this interface's own update(). Relative
+  // /media/ URL string, same shape as SupplierInvoice's own
+  // `attachment` field already is — null when no logo has been
+  // uploaded yet.
+  logo:         string | null;
 }
 
 export const organizationsApi = {
@@ -76,6 +83,22 @@ export const organizationsApi = {
   // exit paths (a posted OpeningBalanceSession, or "Bengkel Baru").
   async completeOnboarding(): Promise<Organization> {
     const { data } = await api.post("/api/organizations/mine/complete-onboarding/");
+    return data.organization;
+  },
+
+  // 6 Oct 2026 — Organization Logo. Same FormData-multipart pattern
+  // already proven by purchasingApi.uploadAttachment() — a real file
+  // doesn't mix with a JSON body, so this is its own dedicated call,
+  // not a field on update() above.
+  async uploadLogo(file: File): Promise<Organization> {
+    const formData = new FormData();
+    formData.append("logo", file);
+    const { data } = await api.post("/api/organizations/mine/logo/", formData);
+    return data.organization;
+  },
+
+  async deleteLogo(): Promise<Organization> {
+    const { data } = await api.delete("/api/organizations/mine/logo/");
     return data.organization;
   },
 };
