@@ -34,6 +34,7 @@ carried no ID, and Kas Harian builds its title separately anyway
 """
 from decimal import Decimal
 
+from apps.accounting.models import AccountRole
 from apps.inventory.events import PartConsumed, StockOpnameCompleted
 from apps.invoicing.events import InvoiceIssued
 from apps.payments.events import (InternalCashMutationRecorded,
@@ -54,8 +55,15 @@ def cash_or_bank_account_code(method: str) -> str:
     reversal (Task 2.3, Half B). One real definition, not multiple
     copies that could quietly drift apart if the mapping ever gets
     more nuanced (a dedicated QRIS account, say).
+
+    6 Oct 2026 — Account Role Mapping, Batch 1. Returns a ROLE now
+    (AccountRole.CASH/BANK), not a literal code — journal_generator.
+    post_for_event() is what turns a role into this organization's own
+    real account code, via AccountRoleMapping.resolve(). Every caller
+    already just threads this straight into an "account_code" dict key,
+    so nothing downstream of this function needed to change.
     """
-    return "1001" if method == "cash" else "1101"
+    return AccountRole.CASH if method == "cash" else AccountRole.BANK
 
 
 def _lines(*entries):
@@ -124,8 +132,8 @@ def resolve(event) -> dict:
         return {
             "memo": f"Part consumed — material line {event.material_line_id}",
             "lines": _lines(
-                {"account_code": "1302", "side": "debit",  "amount": event.amount},
-                {"account_code": "1301", "side": "credit", "amount": event.amount},
+                {"account_code": AccountRole.WIP,       "side": "debit",  "amount": event.amount},
+                {"account_code": AccountRole.INVENTORY, "side": "credit", "amount": event.amount},
             ),
         }
 
@@ -133,8 +141,8 @@ def resolve(event) -> dict:
         return {
             "memo": f"Work order completed — {event.work_order_id}",
             "lines": _lines(
-                {"account_code": "5001", "side": "debit",  "amount": event.amount},
-                {"account_code": "1302", "side": "credit", "amount": event.amount},
+                {"account_code": AccountRole.MATERIAL_COGS, "side": "debit",  "amount": event.amount},
+                {"account_code": AccountRole.WIP,           "side": "credit", "amount": event.amount},
             ),
         }
 
@@ -142,9 +150,9 @@ def resolve(event) -> dict:
         return {
             "memo": f"Invoice issued — {event.invoice_id}",
             "lines": _lines(
-                {"account_code": "1201", "side": "debit",  "amount": event.total},
-                {"account_code": "4001", "side": "credit", "amount": event.service_amount},
-                {"account_code": "4002", "side": "credit", "amount": event.parts_amount},
+                {"account_code": AccountRole.AR,              "side": "debit",  "amount": event.total},
+                {"account_code": AccountRole.REVENUE_SERVICE, "side": "credit", "amount": event.service_amount},
+                {"account_code": AccountRole.REVENUE_PARTS,   "side": "credit", "amount": event.parts_amount},
             ),
         }
 
@@ -155,7 +163,7 @@ def resolve(event) -> dict:
             "memo": f"Payment received — {event.customer_name}",
             "lines": _lines(
                 {"account_code": cash_or_bank_account_code(event.method), "side": "debit",  "amount": event.amount},
-                {"account_code": "1201",                                   "side": "credit", "amount": event.amount},
+                {"account_code": AccountRole.AR,                           "side": "credit", "amount": event.amount},
             ),
         }
 
@@ -200,8 +208,8 @@ def resolve(event) -> dict:
         return {
             "memo": f"Goods received — GRN {event.goods_received_note_id}",
             "lines": _lines(
-                {"account_code": "1301", "side": "debit",  "amount": event.amount},
-                {"account_code": "2010", "side": "credit", "amount": event.amount},
+                {"account_code": AccountRole.INVENTORY, "side": "debit",  "amount": event.amount},
+                {"account_code": AccountRole.GR_IR,     "side": "credit", "amount": event.amount},
             ),
         }
 
@@ -218,7 +226,7 @@ def resolve(event) -> dict:
             # 2 Sep 2026 — real name, not event.quick_purchase_id.
             "memo": f"Quick purchase — {event.supplier_name}",
             "lines": _lines(
-                {"account_code": "1301",                                          "side": "debit",  "amount": event.amount},
+                {"account_code": AccountRole.INVENTORY,                            "side": "debit",  "amount": event.amount},
                 {"account_code": cash_or_bank_account_code(event.payment_method), "side": "credit", "amount": event.amount},
             ),
         }
@@ -239,7 +247,7 @@ def resolve(event) -> dict:
             "memo": f"Purchase return — {event.purchase_return_id}",
             "lines": _lines(
                 {"account_code": event.debit_account_code, "side": "debit",  "amount": event.amount},
-                {"account_code": "1301",                    "side": "credit", "amount": event.amount},
+                {"account_code": AccountRole.INVENTORY,     "side": "credit", "amount": event.amount},
             ),
         }
 
@@ -247,8 +255,8 @@ def resolve(event) -> dict:
         return {
             "memo": f"Supplier invoice received — {event.supplier_invoice_id}",
             "lines": _lines(
-                {"account_code": "2010", "side": "debit",  "amount": event.amount},
-                {"account_code": "2001", "side": "credit", "amount": event.amount},
+                {"account_code": AccountRole.GR_IR, "side": "debit",  "amount": event.amount},
+                {"account_code": AccountRole.AP,    "side": "credit", "amount": event.amount},
             ),
         }
 
@@ -257,7 +265,7 @@ def resolve(event) -> dict:
             # 2 Sep 2026 — real name, not event.supplier_payment_id.
             "memo": f"Supplier payment made — {event.supplier_name}",
             "lines": _lines(
-                {"account_code": "2001",                                   "side": "debit",  "amount": event.amount},
+                {"account_code": AccountRole.AP,                           "side": "debit",  "amount": event.amount},
                 {"account_code": cash_or_bank_account_code(event.method),  "side": "credit", "amount": event.amount},
             ),
         }
@@ -274,10 +282,10 @@ def resolve(event) -> dict:
         return {
             "memo": f"Stock opname completed — session {event.stock_opname_session_id}",
             "lines": _lines(
-                {"account_code": "5004", "side": "debit",  "amount": event.shortage_amount},
-                {"account_code": "1301", "side": "credit", "amount": event.shortage_amount},
-                {"account_code": "1301", "side": "debit",  "amount": event.surplus_amount},
-                {"account_code": "4004", "side": "credit", "amount": event.surplus_amount},
+                {"account_code": AccountRole.STOCK_OPNAME_SHORTAGE, "side": "debit",  "amount": event.shortage_amount},
+                {"account_code": AccountRole.INVENTORY,             "side": "credit", "amount": event.shortage_amount},
+                {"account_code": AccountRole.INVENTORY,             "side": "debit",  "amount": event.surplus_amount},
+                {"account_code": AccountRole.STOCK_OPNAME_SURPLUS,  "side": "credit", "amount": event.surplus_amount},
             ),
         }
 
