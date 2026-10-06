@@ -33,7 +33,8 @@ not something this idempotent seeding function can safely do on its
 own (it must never silently overwrite a field a shop's own accountant
 may have since customized).
 """
-from apps.accounting.models import Account, AssetCategory
+from apps.accounting.models import (Account, AccountRole, AccountRoleMapping,
+                                    AssetCategory)
 
 AccountType = Account.AccountType
 NormalBalance = Account.NormalBalance
@@ -167,6 +168,53 @@ def seed_asset_categories(organization) -> int:
                 "default_useful_life_months": default_life,
                 "is_default": is_default,
             },
+        )
+        if created:
+            created_count += 1
+    return created_count
+
+
+# 6 Oct 2026 — (role, account_code). Every value here is EXACTLY the
+# code already hardcoded today in posting_engine.py/models.py, reconciled
+# by AST sweep of the real files, not recalled from memory — see
+# AccountRole's own docstring (models.py) for the full scope correction
+# this went through (Sansan's review). Seeding this changes nothing
+# about what any org posts until a shop's own accountant edits a row.
+STANDARD_ACCOUNT_ROLE_MAPPINGS = [
+    (AccountRole.CASH,                   "1001"),
+    (AccountRole.BANK,                   "1101"),
+    (AccountRole.AR,                     "1201"),
+    (AccountRole.AP,                     "2001"),
+    (AccountRole.GR_IR,                  "2010"),
+    (AccountRole.INVENTORY,              "1301"),
+    (AccountRole.WIP,                    "1302"),
+    (AccountRole.REVENUE_SERVICE,        "4001"),
+    (AccountRole.REVENUE_PARTS,          "4002"),
+    (AccountRole.STOCK_OPNAME_SURPLUS,   "4004"),
+    (AccountRole.MATERIAL_COGS,          "5001"),
+    (AccountRole.STOCK_OPNAME_SHORTAGE,  "5004"),
+    (AccountRole.OPENING_BALANCE_EQUITY, "3002"),
+    (AccountRole.RETAINED_EARNINGS,      "3101"),
+]
+
+
+def seed_account_role_mappings(organization) -> int:
+    """
+    6 Oct 2026 — the AccountRoleMapping sibling to seed_chart_of_accounts()/
+    seed_asset_categories() above. Idempotent — get_or_create per
+    (organization, role): safe to call more than once without overwriting
+    a role a shop's own accountant has since remapped to a different code.
+
+    Called from the same real places seed_chart_of_accounts() already is
+    — the management command, and the registration/onboarding-complete
+    seeding call sites — so every org, new and old, ends up with all 14
+    roles mapped to today's exact hardcoded codes.
+    """
+    created_count = 0
+    for role, account_code in STANDARD_ACCOUNT_ROLE_MAPPINGS:
+        _, created = AccountRoleMapping.objects.get_or_create(
+            organization=organization, role=role,
+            defaults={"account_code": account_code},
         )
         if created:
             created_count += 1
