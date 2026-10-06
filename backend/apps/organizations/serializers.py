@@ -22,8 +22,14 @@ class OrganizationSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "invoice_code", "phone", "address", "onboarding_completed",
             "requires_sequential_period_closing", "plan", "is_active", "created_at",
+            # 6 Oct 2026 — read-only HERE (output), same precedent as
+            # SupplierInvoiceSerializer's own "attachment": the real
+            # write path is OrganizationLogoView's dedicated multipart
+            # endpoint (views.py), never this JSON serializer, since a
+            # real file doesn't mix with the rest of a plain PATCH body.
+            "logo",
         ]
-        read_only_fields = ["id", "onboarding_completed", "created_at"]
+        read_only_fields = ["id", "onboarding_completed", "created_at", "logo"]
 
 
 class OrganizationSettingsUpdateSerializer(serializers.ModelSerializer):
