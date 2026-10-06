@@ -36,7 +36,7 @@ this codebase already follows (all SET_NULL, all optional).
 """
 from decimal import Decimal
 
-from apps.accounting.models import Account, JournalEntry
+from apps.accounting.models import Account, AccountRoleMapping, JournalEntry
 from apps.accounting.periods import safe_local_date
 from apps.accounting.posting_engine import cash_or_bank_account_code
 from apps.organizations.models import Organization
@@ -138,12 +138,25 @@ def reverse_for_refund_event(event) -> JournalEntry | None:
         # real refund.
         return None
 
+    # 6 Oct 2026, Fix 2 — real bug found via Chris's own full test run:
+    # this call site was never touched by the original Account Role
+    # Mapping patch, despite cash_or_bank_account_code()'s own docstring
+    # (posting_engine.py) explicitly naming this function as a real
+    # caller — a genuine miss in the original audit. That function now
+    # returns an AccountRole (AccountRole.CASH/BANK), not a literal code,
+    # so its result has to go through AccountRoleMapping.resolve() too,
+    # same as every other caller — no isinstance() guard needed here,
+    # since this call site's input is always an AccountRole now, never a
+    # dynamic literal.
     lines = [
         {"account": line.account, "debit": line.credit_amount, "credit": None}
         for line in revenue_lines
     ] + [
         {
-            "account": Account.resolve(organization, cash_or_bank_account_code(event.method)),
+            "account": Account.resolve(
+                organization,
+                AccountRoleMapping.resolve(organization, cash_or_bank_account_code(event.method)),
+            ),
             "debit": None,
             "credit": total_revenue,
         },
