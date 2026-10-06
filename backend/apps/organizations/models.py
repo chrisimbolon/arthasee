@@ -78,6 +78,21 @@ class Organization(models.Model):
     # OnboardingCompleteSerializer, the one real place this ever
     # flips to True.
     onboarding_completed = models.BooleanField(default=False, verbose_name="Pengaturan Awal Selesai")
+    # 6 Oct 2026 — Chris's own ask, illustrated with Arya Motor's real
+    # letterhead. null=True/blank=True, same "genuinely optional at
+    # the DB level" convention phone/address/invoice_code already
+    # use — most existing organizations have no logo and that's a
+    # completely normal, permanent state, not a "setup incomplete"
+    # signal. Written only through OrganizationLogoView's own
+    # dedicated multipart endpoint (views.py) — never through
+    # OrganizationSettingsUpdateSerializer's plain JSON PATCH, same
+    # "a real file doesn't mix with a JSON body" split already
+    # established for SupplierInvoice.attachment.
+    logo = models.ImageField(
+        upload_to="organization_logos/%Y/%m/", null=True, blank=True,
+        verbose_name="Logo Bengkel",
+        help_text="Ditampilkan di Pengaturan Bengkel dan pada invoice PDF.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
