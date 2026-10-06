@@ -7,7 +7,9 @@ from apps.accounting.coa import (seed_account_role_mappings,
                                  seed_asset_categories, seed_chart_of_accounts)
 from apps.accounting.models import OpeningBalanceSession
 from apps.accounting.periods import ensure_current_month_period
+from PIL import Image
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -75,6 +77,119 @@ class MyOrganizationView(APIView):
             "success":      True,
             "organization": OrganizationSerializer(membership.organization).data,
         })
+
+
+class OrganizationLogoView(APIView):
+    """
+    POST/DELETE /api/organizations/mine/logo/ — upload or remove the
+    shop's own logo, shown on this Settings page and on every
+    generated invoice PDF (build_invoice_pdf in apps.invoicing.pdf).
+
+    Separate endpoint from MyOrganizationView's own JSON PATCH, same
+    "a real file doesn't mix with a JSON body" reasoning already
+    established for SupplierInvoiceUploadAttachmentView. Owner-only —
+    same role check as MyOrganizationView.patch(): a shop's brand
+    identity is exactly the kind of setting a staff member must never
+    be able to silently swap out from under the owner.
+
+    6 Oct 2026 — real server-side validation, deliberately stricter
+    than this codebase's three existing FileField upload endpoints
+    (SupplierInvoice.attachment, ContractImport.original_file,
+    IncomingLetter.file — none of which validate anything server-
+    side today). Those sit behind a click-to-download link; this file
+    renders INLINE, automatically, on two real, visible surfaces the
+    moment it's uploaded — a bad or malicious file here is a much
+    louder, more immediate failure than on those three.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
+    MAX_SIZE_BYTES = 2 * 1024 * 1024  # 2 MB
+
+    def _get_owned_organization(self, request):
+        """
+        Shared by post()/delete() below — same membership + owner-role
+        lookup MyOrganizationView.patch() already uses, factored out
+        rather than duplicated a third time.
+        """
+        membership = request.user.memberships.filter(
+            is_active=True
+        ).select_related("organization").first()
+        if not membership:
+            return None, Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if membership.role != "owner":
+            return None, Response(
+                {"success": False, "message": "Hanya pemilik bengkel yang bisa mengubah logo."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return membership.organization, None
+
+    def post(self, request):
+        organization, error_response = self._get_owned_organization(request)
+        if error_response:
+            return error_response
+
+        file_obj = request.FILES.get("logo")
+        if file_obj is None:
+            return Response(
+                {"success": False, "message": "File logo tidak ditemukan pada request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if file_obj.content_type not in self.ALLOWED_CONTENT_TYPES:
+            return Response(
+                {"success": False, "message": "Format file harus PNG, JPEG, atau WEBP."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if file_obj.size > self.MAX_SIZE_BYTES:
+            return Response(
+                {"success": False, "message": "Ukuran file maksimal 2 MB."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Real content verification, not just the browser-supplied
+        # Content-Type header above (trivially spoofed) — PIL actually
+        # opens and verifies the file is a genuine, undamaged image
+        # before it's ever saved as this org's logo. Image.verify()
+        # consumes the file object's internal state, so file_obj is
+        # explicitly rewound before it's handed to the model field —
+        # the ORIGINAL uploaded bytes get saved, not anything PIL
+        # touched.
+        try:
+            image = Image.open(file_obj)
+            image.verify()
+        except Exception:
+            return Response(
+                {"success": False, "message": "File bukan gambar yang valid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        file_obj.seek(0)
+
+        # Real cleanup, not an afterthought — every re-upload would
+        # otherwise leave the previous file behind on disk forever,
+        # since Django never deletes the old file on its own when a
+        # FileField/ImageField is simply reassigned.
+        old_logo = organization.logo
+        organization.logo = file_obj
+        organization.save(update_fields=["logo"])
+        if old_logo:
+            old_logo.delete(save=False)
+
+        return Response({"success": True, "organization": OrganizationSerializer(organization).data})
+
+    def delete(self, request):
+        organization, error_response = self._get_owned_organization(request)
+        if error_response:
+            return error_response
+
+        if organization.logo:
+            organization.logo.delete(save=False)
+            organization.logo = None
+            organization.save(update_fields=["logo"])
+
+        return Response({"success": True, "organization": OrganizationSerializer(organization).data})
 
 
 class OrganizationOnboardingCompleteView(APIView):
