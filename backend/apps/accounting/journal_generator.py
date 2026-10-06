@@ -16,7 +16,7 @@ must be idempotent wherever realistically possible; this is where
 that promise is actually kept for accounting postings.
 """
 from apps.accounting import posting_engine
-from apps.accounting.models import Account, JournalEntry
+from apps.accounting.models import Account, AccountRole, AccountRoleMapping, JournalEntry
 from apps.organizations.models import Organization
 from django.utils import timezone
 
@@ -44,9 +44,37 @@ def post_for_event(event) -> JournalEntry | None:
         return None
 
     organization = Organization.objects.get(id=event.organization_id)
+    # 6 Oct 2026 — Account Role Mapping, Batch 1. posting_engine.resolve()
+    # returns a ROLE for most lines (AccountRole.AR, etc.) — AccountRoleMapping.
+    # resolve() is the step that turns a role into THIS organization's own
+    # real account code, seeded to today's exact hardcoded value for every
+    # existing org, so a shop that never edits its mapping posts the
+    # byte-identical journal entry it always has. Account.resolve() itself
+    # is completely unchanged — still the one place a code becomes a real
+    # Account row.
+    #
+    # 6 Oct 2026, Fix 2 — real bug found via Chris's own full test run
+    # (1255 tests, failures=11/errors=4): three event types deliberately
+    # carry an already-real, literal account code frozen at creation time,
+    # never a role — OperatingExpenseRecorded.account_code,
+    # InternalCashMutationRecorded.to_account_code/from_account_code,
+    # PurchaseReturned.debit_account_code (see posting_engine.py's own
+    # resolve() — those three lines pass event.*_account_code straight
+    # through, untouched by the AccountRole patch). Routing those through
+    # AccountRoleMapping.resolve() unconditionally raised
+    # "No AccountRoleMapping for role='6003' found..." for exactly those
+    # three event types. isinstance() is a reliable discriminator:
+    # AccountRole members are real Django TextChoices (str+Enum hybrid)
+    # instances at runtime; the three dynamic events' codes are plain str
+    # literals never constructed via that enum.
     lines = [
         {
-            "account": Account.resolve(organization, entry["account_code"]),
+            "account": Account.resolve(
+                organization,
+                AccountRoleMapping.resolve(organization, entry["account_code"])
+                if isinstance(entry["account_code"], AccountRole)
+                else entry["account_code"],
+            ),
             "debit":  entry["amount"] if entry["side"] == "debit" else None,
             "credit": entry["amount"] if entry["side"] == "credit" else None,
         }
