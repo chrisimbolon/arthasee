@@ -636,9 +636,15 @@ class AccountingPeriod(TenantScopedModel):
                     lines.append({"account": Account.resolve(self.organization, row["code"]), "credit": row["amount"]})
 
             if net_income > Decimal("0"):
-                lines.append({"account": Account.resolve(self.organization, "3101"), "credit": net_income})
+                retained_earnings_account = Account.resolve(
+                    self.organization, AccountRoleMapping.resolve(self.organization, AccountRole.RETAINED_EARNINGS),
+                )
+                lines.append({"account": retained_earnings_account, "credit": net_income})
             elif net_income < Decimal("0"):
-                lines.append({"account": Account.resolve(self.organization, "3101"), "debit": -net_income})
+                retained_earnings_account = Account.resolve(
+                    self.organization, AccountRoleMapping.resolve(self.organization, AccountRole.RETAINED_EARNINGS),
+                )
+                lines.append({"account": retained_earnings_account, "debit": -net_income})
 
             closing_entry = None
             if lines:
@@ -1311,6 +1317,116 @@ class AssetCategory(TenantScopedModel):
             )
         return category
 
+
+class AccountRole(models.TextChoices):
+    """
+    6 Oct 2026 — Account Role Mapping, Batch 1 (global dependency
+    layer). Sansan's own explicit scope correction, confirmed against
+    the real posting_engine.py/models.py via an AST sweep of every
+    4-digit string literal: these are the 14 account codes Arthasee's
+    own posting rules hardcode today — 12 in posting_engine.py's
+    resolve(), plus 2 more here in models.py (OpeningBalanceSession.
+    post()'s equity plug, AccountingPeriod.close()'s net-income
+    closing entry).
+
+    This is Arthasee's own internal dependency list, NOT the complete
+    Account Mapping architecture and NOT a shop-facing catalog —
+    contextual roles (item/service category, tax, payment method) are
+    a separate, later design layer. AssetCategory already owns fixed-
+    asset roles on its own per-category axis (1401/1402/6004,
+    1403/1404/6007, ...) and is deliberately NOT folded in here — a
+    different axis (one-to-many) from this one (one-to-one, org-wide).
+
+    Role names corrected against the real seeded COA (coa.py), not
+    against what an event's own name implies: MATERIAL_COGS (5001) is
+    seeded as "HPP Sparepart (COGS)", and WorkOrderCompleted's own
+    docstring confirms the amount posted there is parts cost released
+    from WIP, never labor — an earlier "COGS_SERVICE" draft name was
+    wrong, not just a style nit. STOCK_OPNAME_SURPLUS/_SHORTAGE
+    (4004/5004) are seeded specifically for stock-opname variance
+    (PENDAPATAN_LAIN_LAIN subtype), not a generic revenue/COGS
+    catch-all.
+
+    Naming WIP (1302) a role mirrors an already-live, unconditional
+    posting target (PartConsumed debits it, WorkOrderCompleted
+    credits it, today, in production) — it does not finalize or
+    reopen Arthasee's WIP-vs-direct-COGS accounting policy. That
+    policy question, if it needs revisiting, is separate and prior.
+    """
+    CASH                   = "CASH", "Kas"
+    BANK                   = "BANK", "Bank"
+    AR                     = "AR", "Piutang Usaha"
+    AP                     = "AP", "Utang Usaha"
+    GR_IR                  = "GR_IR", "Persediaan Belum Ditagih"
+    INVENTORY              = "INVENTORY", "Persediaan"
+    WIP                    = "WIP", "Barang Dalam Proses"
+    REVENUE_SERVICE        = "REVENUE_SERVICE", "Pendapatan Jasa"
+    REVENUE_PARTS          = "REVENUE_PARTS", "Pendapatan Suku Cadang"
+    STOCK_OPNAME_SURPLUS   = "STOCK_OPNAME_SURPLUS", "Selisih Stok Opname (Kelebihan)"
+    MATERIAL_COGS          = "MATERIAL_COGS", "HPP Sparepart (COGS)"
+    STOCK_OPNAME_SHORTAGE  = "STOCK_OPNAME_SHORTAGE", "Selisih Stok Opname (Kekurangan)"
+    OPENING_BALANCE_EQUITY = "OPENING_BALANCE_EQUITY", "Ekuitas Saldo Awal"
+    RETAINED_EARNINGS      = "RETAINED_EARNINGS", "Laba Ditahan"
+
+
+class AccountRoleMapping(TenantScopedModel):
+    """
+    6 Oct 2026 — Account Role Mapping, Batch 1. One row per (organization,
+    role) — which real account code this org posts a given global role
+    to. Seeded for every org with today's exact hardcoded code
+    (coa.seed_account_role_mappings()) the same moment the rest of the
+    COA is seeded, so a shop that never touches this table posts the
+    byte-identical journal entry it always has.
+
+    account_code is a plain CharField, NOT a ForeignKey to Account —
+    same established pattern AssetCategory's own fixed_asset_account_code
+    etc. already use. Account.code is immutable for the life of the row
+    (apply_edit() above never accepts code as a kwarg), so a string
+    carries the identical safety guarantee an FK would, resolved via
+    Account.resolve() at the moment of posting — this also avoids a
+    seeding-order dependency, exactly like every other code-based
+    reference in this file.
+
+    Deliberately NOT a shop-facing "Account Mapping" page yet — this
+    batch is the backend foundation only, proven invisible-by-default
+    first. The actual mapping UI is a separate, later batch, same
+    "build the mechanism, prove it's silent, then expose it" split
+    already used for AssetCategory.
+    """
+    id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    role = models.CharField(max_length=30, choices=AccountRole.choices, verbose_name="Peran Akun")
+    account_code = models.CharField(max_length=10, verbose_name="Kode Akun")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Account Role Mapping"
+        verbose_name_plural  = "Account Role Mappings"
+        ordering             = ["role"]
+        unique_together      = [("organization", "role")]
+
+    def __str__(self):
+        return f"{self.role} → {self.account_code} ({self.organization})"
+
+    @classmethod
+    def resolve(cls, organization, role):
+        """
+        The one real entry point for turning a global AccountRole into
+        this organization's own real account code — journal_generator.
+        post_for_event() is the one real caller. Same error style as
+        Account.resolve() itself: loud and actionable, never a silent
+        None, since a missing mapping means seeding never ran for this
+        org (or ran before this feature existed).
+        """
+        try:
+            return cls.objects.get(organization=organization, role=role).account_code
+        except cls.DoesNotExist as exc:
+            raise ValueError(
+                f"No AccountRoleMapping for role={role!r} found for organization "
+                f"{organization.name!r} — has the Chart of Accounts been "
+                f"seeded (python manage.py seed_coa)?"
+            ) from exc
+
+
 class AssetSequence(TenantScopedModel):
     """Mirrors every other Sequence model in this codebase exactly."""
     id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1879,7 +1995,9 @@ class OpeningBalanceSession(TenantScopedModel):
                         f"preview/), lalu kirim ulang permintaan ini dengan "
                         f"konfirmasi eksplisit untuk melanjutkan."
                     )
-                plug_account = Account.resolve(self.organization, "3002")
+                plug_account = Account.resolve(
+                    self.organization, AccountRoleMapping.resolve(self.organization, AccountRole.OPENING_BALANCE_EQUITY),
+                )
                 if total_debit > total_credit:
                     lines.append({
                         "account": plug_account, "debit": None, "credit": variance,
