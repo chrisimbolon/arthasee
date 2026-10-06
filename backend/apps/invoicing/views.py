@@ -396,6 +396,7 @@ class InvoicePdfView(TenantScopedAPIView):
         # docstring in pdf.py for the full reasoning.
         pdf_bytes = build_invoice_pdf(
             invoice, org_name=invoice.organization.name, org_address=invoice.organization.address,
+            org_logo=invoice.organization.logo,
         )
 
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
