@@ -59,11 +59,13 @@ class RegisterView(APIView):
             # as one without an owner. Local imports, not module-
             # level — matches this codebase's own established
             # convention for cross-app dependencies.
-            from apps.accounting.coa import (seed_asset_categories,
+            from apps.accounting.coa import (seed_account_role_mappings,
+                                             seed_asset_categories,
                                              seed_chart_of_accounts)
             from apps.accounting.periods import ensure_current_month_period
             seed_chart_of_accounts(org)
             seed_asset_categories(org)
+            seed_account_role_mappings(org)
             ensure_current_month_period(org)
 
         refresh = RefreshToken.for_user(user)
