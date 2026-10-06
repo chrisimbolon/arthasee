@@ -3,7 +3,8 @@
 # =============================================================================
 from datetime import date
 
-from apps.accounting.coa import seed_asset_categories, seed_chart_of_accounts
+from apps.accounting.coa import (seed_account_role_mappings,
+                                 seed_asset_categories, seed_chart_of_accounts)
 from apps.accounting.models import OpeningBalanceSession
 from apps.accounting.periods import ensure_current_month_period
 from rest_framework import status
@@ -159,6 +160,7 @@ class OrganizationOnboardingCompleteView(APIView):
         # handlePost) is left completely untouched by this.
         seed_chart_of_accounts(org)
         seed_asset_categories(org)
+        seed_account_role_mappings(org)
         ensure_current_month_period(org)
         # 28 Sep 2026 — CORRECTION to the comment above: an existing session is
         # NOT always already POSTED. An empty DRAFT (started, then abandoned —
