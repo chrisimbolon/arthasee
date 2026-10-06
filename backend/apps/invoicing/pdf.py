@@ -107,10 +107,71 @@ printed PDF of the second-round fix itself:
      "verified, not assumed" discipline this module's own docstring
      has always claimed for its CSS.
 """
+import base64
 from decimal import Decimal
 from io import BytesIO
 
+from PIL import Image
 from xhtml2pdf import pisa
+
+# 6 Oct 2026, Fix 2 — real bug found via Chris's own real test:
+# Arya Motor's actual logo rendered HUGE in the real PDF, completely
+# ignoring the .org-logo CSS rule's own max-width/max-height —
+# xhtml2pdf's own documented <img> limitation (it treats an image's
+# real pixel dimensions as PDF points, not reliably bounded by CSS
+# max-width/max-height the way a browser would). Matches the CSS
+# box's own numbers, enforced here for real instead — this IS the fix,
+# the CSS rule is now just a harmless backstop.
+_LOGO_MAX_SIZE = (160, 70)
+
+
+def _logo_data_uri(logo_field):
+    """
+    Real, deliberate design choice, not a shortcut: reads the
+    uploaded logo's own bytes, shrinks it to fit a real 160x70 PIXEL
+    box server-side with Pillow (Image.thumbnail — preserves aspect
+    ratio, only ever shrinks, never upscales or distorts a logo
+    already smaller than the box), then embeds the result directly as
+    a base64 data: URI — rather than pointing xhtml2pdf at a /media/
+    URL or a raw filesystem path. xhtml2pdf has no built-in way to
+    resolve a relative media URL on its own — it would need a
+    link_callback wired to MEDIA_ROOT, a real extra moving part this
+    module has never needed before (see this module's own docstring:
+    xhtml2pdf has so far only ever rendered text/HTML here, never an
+    image). A data URI sidesteps that entirely — the bytes are already
+    inside the HTML string handed to pisa.CreatePDF, so PDF generation
+    never depends on whatever webserver routing exists in front of
+    /media/ in production.
+
+    Always re-encoded as PNG regardless of the uploaded format (PNG/
+    JPEG/WEBP, per OrganizationLogoView's own upload validation) —
+    simpler and more robust than juggling per-format quality settings
+    for what's a small header asset, and this also shrinks the PDF's
+    own file size versus embedding a shop's full-resolution original.
+
+    logo_field is the Organization.logo ImageField's own FieldFile —
+    falsy (via __bool__) when no logo has ever been uploaded, exactly
+    like org_address's own blank-safe handling above. Returns None in
+    that case, and also if the file can't actually be opened as an
+    image (e.g. deleted outside the app, or corrupted) — never raises,
+    since a logo is a cosmetic enhancement that must never take down
+    invoice PDF generation itself.
+    """
+    if not logo_field:
+        return None
+    try:
+        with logo_field.open("rb") as fh:
+            image = Image.open(fh)
+            image.load()
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA")
+            image.thumbnail(_LOGO_MAX_SIZE, Image.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 INDONESIAN_MONTHS = [
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -262,7 +323,7 @@ def _line_item_section(title, items):
     """
 
 
-def build_invoice_pdf(invoice, org_name, org_address=""):
+def build_invoice_pdf(invoice, org_name, org_address="", org_logo=None):
     """
     Returns raw PDF bytes. The caller (the view) is responsible for
     gating this to PAID invoices only and wrapping the result in an
@@ -274,6 +335,13 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
     hasn't filled in an address yet (still possible pre-onboarding-
     completion in principle) simply renders with no address line,
     rather than the caller needing to guard against None itself.
+
+    6 Oct 2026 — org_logo is the Organization.logo ImageField's own
+    FieldFile (or None) — same blank-safe treatment as org_address:
+    most real organizations have no logo yet, and that renders
+    exactly as this module always has, nothing new in the header. See
+    _logo_data_uri() above for why this embeds the logo's own bytes
+    rather than referencing a /media/ URL.
 
     Line items are now split into real Parts/Jasa sections (kind=
     "part"/"labor" on InvoiceLineItem), each with its own subtotal —
@@ -323,6 +391,8 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
         created_by_block = f'<p class="created-by">Dibuat oleh {invoice.created_by.full_name}</p>'
 
     org_address_block = f'<div class="org-address">{org_address}</div>' if org_address else ""
+    logo_data_uri = _logo_data_uri(org_logo)
+    org_logo_block = f'<img class="org-logo" src="{logo_data_uri}" />' if logo_data_uri else ""
 
     html = f"""
     <html>
@@ -332,6 +402,7 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
         body {{ font-family: Helvetica, Arial, sans-serif; font-size: 10pt; color: #17181a; }}
         .header-table {{ width: 100%; margin-bottom: 20px; }}
         .header-table td {{ vertical-align: top; }}
+        .org-logo {{ max-width: 160px; max-height: 70px; margin: 0 0 6px 0; padding: 0; }}
         .org-name {{ font-size: 16pt; font-weight: bold; margin: 0; padding: 0; }}
         .org-address {{ font-size: 9pt; color: #52514e; margin: 2px 0 0 0; padding: 0; }}
         .doc-title {{ font-size: 10pt; color: #6b6b6b; margin: 4px 0 0 0; padding: 0; }}
@@ -370,6 +441,7 @@ def build_invoice_pdf(invoice, org_name, org_address=""):
         <table class="header-table">
             <tr>
                 <td style="width: 55%;">
+                    {org_logo_block}
                     <div class="org-name">{org_name}</div>
                     {org_address_block}
                     <div class="doc-title">INVOICE</div>
