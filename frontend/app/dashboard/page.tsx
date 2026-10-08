@@ -6,13 +6,13 @@ import {
   accountingApi, DailyCashActivityResponse, DashboardFinancialSummaryResponse,
   OrganizationReadiness,
   organizationReadinessApi,
-  ProfitLossComparisonResponse, ReportDelta,
+  ProfitLossComparisonResponse, ReadinessBlock, ReportDelta,
 } from "@/lib/api/accounting";
 import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { ActiveJob, activeJobsApi, dashboardApi, DashboardSummary } from "@/lib/api/workorders";
 import { READINESS_ACTION_HREF, READINESS_ACTION_LABEL } from "@/lib/readiness";
 import {
-  AlertTriangle, ArrowLeftRight, Car, CheckCircle2, Clock, Landmark, Layers,
+  AlertTriangle, ArrowLeftRight, Car, CheckCircle2, Circle, Clock, Landmark, Layers,
   Loader2, TrendingDown, TrendingUp, Users, Wallet, Wrench,
 } from "lucide-react";
 import Link from "next/link";
@@ -69,6 +69,39 @@ function DeltaCaption({ delta }: { delta: ReportDelta }) {
 // so a destination added once appears in every place at the same moment.
 // (The 17 Sep note that used to sit here — no Opening Balance destination exists
 // yet, deliberately no placeholder href — moved there with the maps.)
+//
+// 8 Oct 2026 — Chris + Sansan's own "TenantReadiness" checklist idea: show
+// EVERY step toward READY, not just the ones currently failing, so a shop
+// mid-setup sees real progress (2 of 4 done) instead of only a flat list of
+// problems. Deliberately derived CLIENT-SIDE from the same blocks[] this
+// banner already fetched — no backend change, no new endpoint, no new
+// check codes invented. Four items, matching exactly what
+// check_organization_readiness() actually verifies today:
+//
+//   - business_setup: not a real backend check at all — this screen is
+//     architecturally unreachable before onboarding_completed (the
+//     mandatory first-login overlay gates it), so it is always true by
+//     construction the moment this component can render. Shown anyway so
+//     the checklist reads as a complete, honest picture of setup, not a
+//     mysterious 3-item list.
+//   - chart_of_accounts: COA_NOT_SEEDED / REQUIRED_ACCOUNTS_MISSING
+//   - period_configuration: NO_ACCOUNTING_PERIOD
+//   - opening_balances: OPENING_BALANCE_NOT_RESOLVED
+//
+// Deliberately NOT included as their own checklist rows: account_mapping
+// (AccountRoleMapping's own system defaults mean this can never actually
+// fail today — a checkmark for something that can't fail is theater, not
+// information) and reconciliation (Sansan's own notes list this as a
+// pre-posting gate, which doesn't hold up — reconciliation needs
+// transactions to already exist, so gating a brand-new org's FIRST
+// posting on it would be a deadlock; raised with Sansan directly rather
+// than silently invented here).
+const READINESS_CHECKLIST: { key: string; label: string; blockCodes: string[] }[] = [
+  { key: "business_setup", label: "Profil Bengkel", blockCodes: [] },
+  { key: "chart_of_accounts", label: "Daftar Akun", blockCodes: ["COA_NOT_SEEDED", "REQUIRED_ACCOUNTS_MISSING"] },
+  { key: "period_configuration", label: "Periode Akuntansi", blockCodes: ["NO_ACCOUNTING_PERIOD"] },
+  { key: "opening_balances", label: "Saldo Awal", blockCodes: ["OPENING_BALANCE_NOT_RESOLVED"] },
+];
 
 function WorkshopReadinessBanner() {
   const [readiness, setReadiness] = useState<OrganizationReadiness | null>(null);
@@ -79,6 +112,7 @@ function WorkshopReadinessBanner() {
 
   if (!readiness || readiness.ready) return null;
 
+  const blockByCode = new Map<string, ReadinessBlock>(readiness.blocks.map((b) => [b.code, b]));
   const uniqueActions = Array.from(new Set(readiness.blocks.map((b) => b.action)));
 
   return (
@@ -97,13 +131,28 @@ function WorkshopReadinessBanner() {
             Workshop belum siap untuk transaksi
           </span>
         </div>
-        <p style={{ fontSize: 13.5, color: "var(--ink)", marginBottom: 8 }}>
-          {readiness.blocks.length} hal perlu diselesaikan sebelum transaksi operasional dapat dijalankan.
+        <p style={{ fontSize: 13.5, color: "var(--ink)", marginBottom: 10 }}>
+          Lengkapi Periode Akuntansi dan Saldo Awal Anda terlebih dahulu agar transaksi dan
+          laporan keuangan tercatat dengan benar sejak hari pertama.
         </p>
-        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "var(--ink)" }}>
-          {readiness.blocks.map((block) => (
-            <li key={block.code}>{block.message}</li>
-          ))}
+        <ul style={{ margin: 0, marginBottom: 8, padding: 0, listStyle: "none", fontSize: 13, color: "var(--ink)" }}>
+          {READINESS_CHECKLIST.map((item) => {
+            const failingCode = item.blockCodes.find((code) => blockByCode.has(code));
+            const done = !failingCode;
+            return (
+              <li key={item.key} style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 4 }}>
+                {done
+                  ? <CheckCircle2 size={15} style={{ color: "var(--workshop)", flexShrink: 0, marginTop: 1 }} />
+                  : <Circle size={15} style={{ color: "var(--steel)", flexShrink: 0, marginTop: 1 }} />}
+                <span>
+                  <span style={{ fontWeight: done ? 400 : 600 }}>{item.label}</span>
+                  {!done && (
+                    <span style={{ color: "var(--steel)" }}> — {blockByCode.get(failingCode!)!.message}</span>
+                  )}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
