@@ -5,7 +5,8 @@ from django.urls import path
 
 from .views import (InternalCashMutationListCreateView,
                     InvoicePaymentListCreateView, InvoiceRefundView,
-                    OperatingExpenseListCreateView, SupplierInvoicePayView)
+                    OperatingExpenseListCreateView, SupplierInvoicePayView,
+                    TaxRemittanceListCreateView, TaxRemittanceSuggestedAmountView)
 
 urlpatterns = [
     path("invoices/<uuid:invoice_id>/payments/", InvoicePaymentListCreateView.as_view(), name="invoice-payments"),
@@ -16,4 +17,13 @@ urlpatterns = [
     # 1 Sep 2026 — Made's own confirmed real request, arrived at
     # while designing the Kas Harian dashboard.
     path("internal-cash-mutations/", InternalCashMutationListCreateView.as_view(), name="internal-cash-mutation-list-create"),
+    # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Suggested-amount
+    # route registered BEFORE the plain list/create route — both are
+    # static prefixes under the same resource, Django's own urls
+    # module doesn't care about order here since neither is a
+    # <uuid:...> capture, but keeping the more specific "suggested/"
+    # path first mirrors how every other more-specific-before-generic
+    # URL ordering already reads in this project's own urls.py files.
+    path("tax-remittances/suggested/", TaxRemittanceSuggestedAmountView.as_view(), name="tax-remittance-suggested"),
+    path("tax-remittances/", TaxRemittanceListCreateView.as_view(), name="tax-remittance-list-create"),
 ]
