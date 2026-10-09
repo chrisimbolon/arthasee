@@ -40,6 +40,7 @@ import { Organization, organizationsApi } from "@/lib/api/organizations";
 import { Supplier, suppliersApi } from "@/lib/api/purchasing";
 import { Customer, customersApi } from "@/lib/api/service";
 import { Loader2, Plus, Trash2 } from "lucide-react";
+import Link from "next/link";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 
 function toNumber(value: string | number): number {
@@ -1054,6 +1055,24 @@ export function OpeningBalanceStep({
         <div style={{ marginBottom: 20 }}>
           <label className="label">Tanggal Mulai Akuntansi</label>
           <input type="date" className="input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          {/* 8 Oct 2026 — Chris + Sansan's own clarifying copy: this date and
+              "how periods are cut" are two separate concepts (OpeningBalance
+              Session.start_date vs AccountingPeriod), and conflating them
+              here was the real source of confusion this addresses. Link only
+              when embedded (the standalone /dashboard/accounting/opening-
+              balance page, full dashboard chrome available) — inside the
+              first-login overlay there is no Settings nav to land on yet, so
+              plain text there instead of a dead-feeling link. */}
+          <p style={{ fontSize: 12, color: "var(--steel)", marginTop: 8, lineHeight: 1.5 }}>
+            Arthasee akan mulai mencatat riwayat keuangan Anda sejak tanggal ini.
+            {" "}Periode bulanan tetap mengikuti{" "}
+            {embedded ? (
+              <Link href="/dashboard/settings/accounting-period">pengaturan periode akuntansi</Link>
+            ) : (
+              "pengaturan periode akuntansi"
+            )}
+            {" "}Anda.
+          </p>
         </div>
 
         <button
