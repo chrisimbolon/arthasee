@@ -105,7 +105,8 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
     from apps.invoicing.events import InvoiceIssued
     from apps.payments.events import (InternalCashMutationRecorded,
                                       OperatingExpenseRecorded,
-                                      PaymentReceived, SupplierPaymentMade)
+                                      PaymentReceived, SupplierPaymentMade,
+                                      TaxRemittanceRecorded)
     from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
                                         QuickPurchaseRecorded,
                                         SupplierInvoiceReceived)
@@ -135,6 +136,14 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
         # 1 Sep 2026 — added proactively this time, not in response
         # to a real failure (see module docstring).
         "InternalCashMutationRecorded": InternalCashMutationRecorded,
+        # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Real gap found
+        # by EventRegistryCompletenessTests itself (Chris's own full
+        # test run) — posting_engine.py already imports/handles this
+        # event type; this registry had simply never been updated to
+        # match. Added here so a FAILED TaxRemittanceRecorded Outbox
+        # row can actually be replayed, same discipline every entry
+        # above already follows.
+        "TaxRemittanceRecorded": TaxRemittanceRecorded,
     }
     try:
         return registry[event_type]
