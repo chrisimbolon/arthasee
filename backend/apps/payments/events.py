@@ -66,6 +66,19 @@ class PaymentReceived(DomainEvent):
     method: str
     customer_name: str
     transaction_date: date
+    # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Set ONLY when the
+    # customer is an INSTITUTIONAL/badan customer who withheld PPh 23
+    # at the moment of payment (2% of the jasa portion) and issued a
+    # Bukti Potong — Pak Holan's own confirmed first mechanism. Zero
+    # (the default) for every cash payment, and for an INDIVIDUAL/OP
+    # customer who never withholds at all (that case is instead
+    # handled later, monthly, via TaxRemittance's own self-remit
+    # gross-up — see TaxRemittance.suggested_pph23_self_remit).
+    # Frozen here, not re-derived — Payment.record() is the one real
+    # place that validates and decides this value; this event just
+    # carries it through to posting_engine, same discipline every
+    # other frozen-payload field in this file already follows.
+    pph23_withheld_amount: Decimal = Decimal("0")
     event_type: str = field(init=False, default="PaymentReceived", kw_only=True)
 
 
@@ -199,3 +212,56 @@ class InternalCashMutationRecorded(DomainEvent):
     amount: Decimal
     transaction_date: date
     event_type: str = field(init=False, default="InternalCashMutationRecorded", kw_only=True)
+
+
+@dataclass(frozen=True)
+class TaxRemittanceRecorded(DomainEvent):
+    """
+    Fired when TaxRemittance.record() successfully records a real
+    monthly tax payment to the state (9 Oct 2026 — PPh 23 + PPh Final
+    UMKM patch, scoped and designed with Chris, grounded in Pak
+    Holan's real, confirmed answers). Two real cases, told apart by
+    tax_type:
+
+    - "pph23_self_remit": the bengkel's own gross-up self-remittance
+      of PPh 23 on behalf of an INDIVIDUAL/OP customer who never
+      withheld at payment (Pak Holan's own confirmed second
+      mechanism) — debits 1205 (PPh 23 Dibayar Dimuka), the exact
+      prepaid-tax asset this event's own counterpart,
+      PaymentReceived.pph23_withheld_amount, does NOT build up for
+      (that field only ever fires for the institutional/withheld
+      case). This IS a real, creditable tax credit against PPh
+      Badan at SPT Tahunan, never a lost cost — Pak Holan's own
+      verbatim confirmation, captured in the living doc.
+    - "pph_umkm_final": PPh Final UMKM (PP 55/2022), 0.5% of the
+      month's sparepart/parts revenue only (Chris's own confirmed
+      real invoice) — a genuine FINAL (non-creditable) expense,
+      debits 6006 (Beban Pajak Penghasilan Final).
+
+    account_code/account_name are frozen at TaxRemittance.record()
+    time, same "frozen event payload" discipline
+    OperatingExpenseRecorded's own account_code/account_name already
+    established — this event never re-derives which account a
+    tax_type maps to.
+
+    period_year/period_month identify which month's tax OBLIGATION
+    this remittance settles — not necessarily the same calendar
+    month as transaction_date (a late remittance, paid the month
+    after, is still correctly attributed to the month it was really
+    for).
+
+    Posting rule: Dr {account_code} (1205 or 6006) / Cr Cash/Bank
+    (1001/1101 depending on `method`) — reuses the same shared
+    cash_or_bank_account_code() mapping every other payments-domain
+    event in posting_engine.py already uses.
+    """
+    tax_remittance_id: uuid.UUID
+    tax_type: str
+    account_code: str
+    account_name: str
+    method: str
+    amount: Decimal
+    transaction_date: date
+    period_year: int
+    period_month: int
+    event_type: str = field(init=False, default="TaxRemittanceRecorded", kw_only=True)
