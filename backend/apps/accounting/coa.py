@@ -58,6 +58,7 @@ STANDARD_COA = [
     ("2001", "Accounts Payable",                    AccountType.LIABILITY, NormalBalance.CREDIT, AccountSubtype.UTANG_USAHA,       False, True),
     ("2010", "Accrued Inventory (Unbilled AP)",      AccountType.LIABILITY, NormalBalance.CREDIT, AccountSubtype.UTANG_LAINNYA,     False, False),
     ("2101", "Tax Payable",                         AccountType.LIABILITY, NormalBalance.CREDIT, AccountSubtype.UTANG_PAJAK,       False, False),
+    ("1205", "PPh 23 Dibayar Dimuka",             AccountType.ASSET,     NormalBalance.DEBIT,  AccountSubtype.PIUTANG_LAINNYA,   False, False),
     ("3001", "Owner Capital",                        AccountType.EQUITY,    NormalBalance.CREDIT, AccountSubtype.EKUITAS,           False, False),
     # 8 Sep 2026 — new. Ekuitas Saldo Awal — the real, dedicated
     # target for OpeningBalanceSession.post()'s own explicit variance
