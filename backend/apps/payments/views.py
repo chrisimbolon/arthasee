@@ -15,14 +15,15 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from .models import (InternalCashMutation, OperatingExpense, Payment, Refund,
-                     SupplierPayment)
+                     SupplierPayment, TaxRemittance)
 from .serializers import (InternalCashMutationRecordSerializer,
                           InternalCashMutationSerializer,
                           OperatingExpenseRecordSerializer,
                           OperatingExpenseSerializer, PaymentRecordSerializer,
                           PaymentSerializer, RefundRecordSerializer,
                           RefundSerializer, SupplierPaymentRecordSerializer,
-                          SupplierPaymentSerializer)
+                          SupplierPaymentSerializer, TaxRemittanceRecordSerializer,
+                          TaxRemittanceSerializer)
 
 
 class InvoicePaymentListCreateView(TenantScopedAPIView):
@@ -75,6 +76,10 @@ class InvoicePaymentListCreateView(TenantScopedAPIView):
                 reference=data.get("reference", ""),
                 notes=data.get("notes", ""),
                 received_by=request.user,
+                # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Payment.
+                # record() itself is where this is actually validated
+                # (<=amount, >=0) — this view is thin on purpose.
+                pph23_withheld_amount=data.get("pph23_withheld_amount"),
             )
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -265,6 +270,101 @@ class OperatingExpenseListCreateView(TenantScopedAPIView):
             {"success": True, "operating_expense": OperatingExpenseSerializer(expense).data},
             status=status.HTTP_201_CREATED,
         )
+
+
+class TaxRemittanceListCreateView(TenantScopedAPIView):
+    """
+    GET  /api/tax-remittances/  — every real tax remittance for this org
+    POST /api/tax-remittances/  — record a new one
+
+    9 Oct 2026 — PPh 23 + PPh Final UMKM patch. All real logic lives
+    in TaxRemittance.record() — this view is thin, same discipline
+    as OperatingExpenseListCreateView, which this view mirrors
+    exactly.
+    """
+    model = TaxRemittance
+
+    def get(self, request):
+        remittances = self.get_queryset().select_related("created_by")
+        return Response(
+            {"success": True, "tax_remittances": TaxRemittanceSerializer(remittances, many=True).data}
+        )
+
+    def post(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        input_serializer = TaxRemittanceRecordSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+
+        try:
+            remittance = TaxRemittance.record(
+                organization=organization,
+                tax_type=data["tax_type"],
+                period_year=data["period_year"],
+                period_month=data["period_month"],
+                amount=data["amount"],
+                method=data.get("method", "bank"),
+                paid_at=data.get("paid_at"),
+                reference=data.get("reference", ""),
+                notes=data.get("notes", ""),
+                created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"success": True, "tax_remittance": TaxRemittanceSerializer(remittance).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TaxRemittanceSuggestedAmountView(TenantScopedAPIView):
+    """
+    GET /api/tax-remittances/suggested/?tax_type=...&period_year=...&period_month=...
+
+    9 Oct 2026 — PPh 23 + PPh Final UMKM patch, Decision #2: the
+    owner/accountant sees a SUGGESTED amount here and explicitly
+    confirms before anything is recorded via
+    TaxRemittanceListCreateView.post() above — read-only, never
+    itself creates a TaxRemittance row.
+    """
+    model = TaxRemittance
+
+    def get(self, request):
+        organization = self.get_organization()
+        if organization is None:
+            return Response(
+                {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        tax_type = request.query_params.get("tax_type")
+        try:
+            period_year  = int(request.query_params.get("period_year"))
+            period_month = int(request.query_params.get("period_month"))
+        except (TypeError, ValueError):
+            return Response(
+                {"success": False, "message": "period_year dan period_month wajib diisi dengan angka."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if tax_type == "pph_umkm_final":
+            suggested = TaxRemittance.suggested_pph_umkm_final(organization, period_year, period_month)
+        elif tax_type == "pph23_self_remit":
+            suggested = TaxRemittance.suggested_pph23_self_remit(organization, period_year, period_month)
+        else:
+            return Response(
+                {"success": False, "message": f"Jenis pajak {tax_type!r} tidak dikenal."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({"success": True, "suggested_amount": str(suggested)})
 
 
 class InternalCashMutationListCreateView(TenantScopedAPIView):
