@@ -93,6 +93,7 @@ class Payment(TenantScopedModel):
     def record(
         cls, *, invoice, amount, method="cash", received_at=None,
         reference="", notes="", received_by=None,
+        pph23_withheld_amount=None,
     ):
         """
         The one real entry point for recording a payment — never
@@ -145,6 +146,25 @@ class Payment(TenantScopedModel):
         """
         if amount is None or amount <= Decimal("0"):
             raise ValueError("Jumlah pembayaran harus lebih dari nol.")
+
+        # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Only ever set for
+        # an INSTITUTIONAL/badan customer who withheld PPh 23 directly
+        # at the moment of this payment and issued a Bukti Potong —
+        # Pak Holan's own confirmed first mechanism. Must never exceed
+        # `amount`: the withheld portion is still part of the full
+        # settled value (the overpayment guard below already compares
+        # the FULL `amount` against balance_due, unchanged by this —
+        # the customer's invoice is settled for `amount` regardless of
+        # how much of it physically landed in cash/bank vs. was
+        # withheld at source).
+        withheld = pph23_withheld_amount if pph23_withheld_amount is not None else Decimal("0")
+        if withheld < Decimal("0"):
+            raise ValueError("Jumlah PPh 23 yang dipotong tidak boleh negatif.")
+        if withheld > amount:
+            raise ValueError(
+                f"Jumlah PPh 23 yang dipotong ({withheld}) tidak boleh melebihi "
+                f"jumlah pembayaran ({amount})."
+            )
 
         with transaction.atomic():
             from apps.invoicing.models import Invoice
@@ -219,6 +239,10 @@ class Payment(TenantScopedModel):
                 # payment happened on, not publish-time. See
                 # PaymentReceived.transaction_date's own docstring.
                 transaction_date=transaction_date,
+                # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. See the
+                # guard above and PaymentReceived.pph23_withheld_amount's
+                # own docstring.
+                pph23_withheld_amount=withheld,
             ))
 
             # locked_invoice.balance_due re-queries payments.all()
@@ -622,6 +646,265 @@ class OperatingExpense(TenantScopedModel):
             ))
 
         return expense
+
+
+class TaxRemittanceSequence(TenantScopedModel):
+    """Mirrors OperatingExpenseSequence exactly — same real numbering pattern."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    last_sequence = models.PositiveIntegerField(default=0, verbose_name="Nomor Urut Terakhir")
+
+    class Meta:
+        verbose_name        = "Tax Remittance Sequence"
+        verbose_name_plural  = "Tax Remittance Sequences"
+        unique_together      = [("organization",)]
+
+    def __str__(self):
+        return f"{self.organization}: {self.last_sequence}"
+
+    @classmethod
+    def next_number(cls, organization):
+        seq, _ = cls.objects.select_for_update().get_or_create(
+            organization=organization, defaults={"last_sequence": 0},
+        )
+        seq.last_sequence += 1
+        seq.save(update_fields=["last_sequence"])
+        return seq.last_sequence
+
+
+class TaxRemittance(TenantScopedModel):
+    """
+    One real monthly tax payment to the state — 9 Oct 2026, scoped
+    and designed with Chris, grounded in Pak Holan's real, confirmed
+    answers (see the "PPh23 Questions for Pak Holan" doc). Two real
+    cases, told apart by tax_type — see TaxRemittanceRecorded's own
+    docstring (apps/payments/events.py) for the full accounting
+    story of each.
+
+    Deliberately NOT automatic at period close (Decision #2, 9 Oct
+    2026) — the owner/accountant sees a SUGGESTED amount (see
+    suggested_pph_umkm_final/suggested_pph23_self_remit below) and
+    must explicitly confirm before anything is actually recorded,
+    same manual-gate discipline AccountingPeriod.close() itself
+    already requires for closing a period — Principle: closing a
+    period (or settling a tax obligation) is a deliberate owner
+    action, never a silent cron.
+
+    PPh Unifikasi (withholding on money the bengkel pays OUT — rent,
+    outside mechanics) is a separate, later, not-yet-scoped feature
+    area — deliberately NOT a third tax_type choice here.
+    """
+    TAX_TYPE_CHOICES = [
+        ("pph23_self_remit", "PPh 23 Disetor Sendiri"),
+        ("pph_umkm_final",   "PPh Final UMKM (PP 55/2022)"),
+    ]
+    # Frozen mapping, not a live lookup — same "decided once, never
+    # re-derived from something that could shift" discipline every
+    # other account_code in this file already follows.
+    ACCOUNT_CODE_BY_TAX_TYPE = {
+        "pph23_self_remit": "1205",
+        "pph_umkm_final":   "6006",
+    }
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number          = models.CharField(max_length=30, editable=False, verbose_name="Nomor")
+    sequence_number = models.PositiveIntegerField(editable=False, verbose_name="Nomor Urut")
+    tax_type     = models.CharField(max_length=20, choices=TAX_TYPE_CHOICES, verbose_name="Jenis Pajak")
+    period_year  = models.PositiveIntegerField(verbose_name="Tahun Periode")
+    period_month = models.PositiveIntegerField(verbose_name="Bulan Periode")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Jumlah")
+    method = models.CharField(
+        max_length=10, choices=[("cash", "Tunai"), ("bank", "Transfer Bank")],
+        default="bank", verbose_name="Metode Pembayaran",
+        # Real tax remittances are overwhelmingly bank transfers
+        # (billing-code/NTPN payment via bank or e-wallet) — "bank"
+        # default, not "cash" like OperatingExpense, reflecting that
+        # real-world difference; "cash" is still a valid choice.
+    )
+    paid_at = models.DateTimeField(verbose_name="Waktu Dibayar")
+    reference = models.CharField(
+        max_length=100, blank=True, verbose_name="Referensi",
+        help_text="Nomor NTPN/bukti setor, jika ada.",
+    )
+    notes = models.TextField(blank=True, verbose_name="Catatan")
+    created_by = models.ForeignKey(
+        "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = "Tax Remittance"
+        verbose_name_plural  = "Tax Remittances"
+        ordering             = ["-paid_at"]
+        unique_together      = [
+            ("organization", "number"),
+            # One real remittance per tax_type per month, per org —
+            # a second attempt for the same month is a correction to
+            # the first, never a silent duplicate posting.
+            ("organization", "tax_type", "period_year", "period_month"),
+        ]
+
+    def __str__(self):
+        return f"{self.number} — {self.get_tax_type_display()} ({self.amount})"
+
+    def save(self, *args, **kwargs):
+        creating = self._state.adding
+        if creating and not self.number:
+            self.sequence_number = TaxRemittanceSequence.next_number(self.organization)
+            self.number = f"TAX/{self.sequence_number:05d}"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def record(
+        cls, *, organization, tax_type, period_year, period_month, amount,
+        method="bank", paid_at=None, reference="", notes="", created_by=None,
+    ):
+        """
+        The one real entry point — never construct TaxRemittance
+        directly. Mirrors OperatingExpense.record()'s own shape:
+        validate, acquire the period-lock guard BEFORE creating
+        anything, create the row, publish the frozen event.
+        """
+        if tax_type not in dict(cls.TAX_TYPE_CHOICES):
+            raise ValueError(f"Jenis pajak {tax_type!r} tidak dikenal.")
+        if amount is None or amount <= Decimal("0"):
+            raise ValueError("Jumlah setoran pajak harus lebih dari nol.")
+
+        with transaction.atomic():
+            from apps.accounting.models import Account, AccountingPeriod
+            resolved_paid_at = paid_at or timezone.now()
+            if timezone.is_aware(resolved_paid_at):
+                transaction_date = timezone.localtime(resolved_paid_at).date()
+            else:
+                transaction_date = resolved_paid_at.date()
+            AccountingPeriod.assert_open_for_posting(organization, transaction_date)
+
+            account_code = cls.ACCOUNT_CODE_BY_TAX_TYPE[tax_type]
+            account = Account.resolve(organization, account_code)
+
+            remittance = cls.objects.create(
+                organization=organization, tax_type=tax_type,
+                period_year=period_year, period_month=period_month,
+                amount=amount, method=method, paid_at=resolved_paid_at,
+                reference=reference, notes=notes, created_by=created_by,
+            )
+
+            from apps.core.events.bus import default_bus
+            from apps.payments.events import TaxRemittanceRecorded
+            default_bus.publish(TaxRemittanceRecorded(
+                organization_id=organization.id,
+                tax_remittance_id=remittance.id,
+                tax_type=tax_type,
+                account_code=account.code,
+                account_name=account.name,
+                method=method,
+                amount=amount,
+                transaction_date=transaction_date,
+                period_year=period_year,
+                period_month=period_month,
+            ))
+
+        return remittance
+
+    @classmethod
+    def suggested_pph_umkm_final(cls, organization, year, month):
+        """
+        0.5% x this month's total sparepart/parts revenue — PPh
+        Final UMKM's own real, confirmed base (Chris, via a real
+        invoice: Rp300.000 parts -> Rp1.500 tax; jasa excluded).
+        Trigger confirmed by Pak Holan as month-end AGGREGATE,
+        unlike PPh23's per-payment trigger below — so this reads
+        InvoiceIssued events (not PaymentReceived), aggregated
+        over the whole calendar month, regardless of whether those
+        invoices have been paid yet.
+
+        Reads the real Outbox directly (apps.core.models.Outbox),
+        not recomputed from live Invoice/line-item state — same
+        "trust the real ledger" discipline InvoiceRefunded's own
+        docstring already established elsewhere in this codebase.
+        Every InvoiceIssued event's own frozen parts_amount is
+        exactly the figure that was actually posted (Cr Parts
+        Revenue, 4002) for that invoice.
+
+        Returns a plain Decimal, rounded to 2 places — a SUGGESTION
+        only, never auto-recorded (see class docstring).
+        """
+        from apps.core.models import Outbox
+
+        total_parts = Decimal("0")
+        qs = Outbox.objects.filter(organization=organization, event_type="InvoiceIssued")
+        for row in qs.iterator():
+            occurred = row.occurred_at
+            local = timezone.localtime(occurred) if timezone.is_aware(occurred) else occurred
+            if local.year == year and local.month == month:
+                total_parts += Decimal(str(row.payload.get("parts_amount", "0")))
+        return (total_parts * Decimal("0.005")).quantize(Decimal("0.01"))
+
+    @classmethod
+    def suggested_pph23_self_remit(cls, organization, year, month):
+        """
+        2% x the jasa-proportional share of this month's PAYMENTS
+        from INDIVIDUAL/OP customers that did NOT already have PPh
+        23 withheld at payment (pph23_withheld_amount == 0) — the
+        real gross-up case Pak Holan confirmed (an institutional
+        customer withholds directly, already captured on the
+        Payment itself via PaymentReceived.pph23_withheld_amount;
+        this function only ever covers the OTHER case). Trigger
+        confirmed by Chris as payment date (cash basis) — unlike
+        PPh UMKM above, this reads PaymentReceived events, not
+        InvoiceIssued ones.
+
+        The jasa proportion is a genuine, deliberate LIVE read of
+        each payment's own Invoice/Customer — not a replay of an
+        already-posted figure, so re-deriving live here is
+        correct, not a "trust the ledger" violation: this is a
+        forward-looking estimate for a tax not yet recorded, the
+        exact same role OperatingExpense's own suggested-amount
+        concept would play if one existed for it. Invoice has no
+        stored service/parts split of its own (only InvoiceIssued's
+        frozen event payload does, and that event's own total can
+        differ from any ONE later installment payment when an
+        invoice is paid across multiple payments) — so the ratio
+        is computed fresh from each invoice's own real line items.
+
+        Returns a plain Decimal, rounded to 2 places — a SUGGESTION
+        only, never auto-recorded (see class docstring).
+        """
+        from apps.core.models import Outbox
+        from apps.invoicing.models import Invoice
+
+        total_tax = Decimal("0")
+        qs = Outbox.objects.filter(organization=organization, event_type="PaymentReceived")
+        for row in qs.iterator():
+            occurred = row.occurred_at
+            local = timezone.localtime(occurred) if timezone.is_aware(occurred) else occurred
+            if local.year != year or local.month != month:
+                continue
+
+            payload = row.payload
+            withheld = Decimal(str(payload.get("pph23_withheld_amount") or "0"))
+            if withheld > Decimal("0"):
+                continue  # already withheld by an institutional customer.
+
+            invoice = Invoice.objects.filter(organization=organization, pk=payload["invoice_id"]).first()
+            if invoice is None:
+                continue
+            customer = invoice.service_record.vehicle.customer
+            if customer.customer_type != "INDIVIDUAL":
+                continue
+
+            invoice_total = invoice.total
+            if invoice_total <= Decimal("0"):
+                continue
+            service_subtotal = sum(
+                (li.subtotal for li in invoice.line_items.filter(kind="labor")),
+                Decimal("0"),
+            )
+            jasa_ratio = service_subtotal / invoice_total
+
+            payment_amount = Decimal(str(payload["amount"]))
+            base = payment_amount * jasa_ratio
+            total_tax += base * Decimal("0.02")
+        return total_tax.quantize(Decimal("0.01"))
 
 
 class InternalCashMutationSequence(TenantScopedModel):
