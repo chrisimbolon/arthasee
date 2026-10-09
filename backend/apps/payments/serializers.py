@@ -6,7 +6,7 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from .models import (InternalCashMutation, OperatingExpense, Payment, Refund,
-                     SupplierPayment)
+                     SupplierPayment, TaxRemittance)
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -26,12 +26,25 @@ class PaymentSerializer(serializers.ModelSerializer):
 class PaymentRecordSerializer(serializers.Serializer):
     """
     Write-only input validation for POST /api/invoices/<id>/payments/.
+
+    pph23_withheld_amount, added 9 Oct 2026 — PPh 23 + PPh Final UMKM
+    patch. Optional, defaults to 0 — only meaningful for an
+    INSTITUTIONAL/badan customer who withheld PPh 23 directly at this
+    payment and issued a Bukti Potong (Pak Holan's own confirmed
+    first mechanism); the view surfaces this field in the UI only for
+    that customer type, but validation itself (<= amount, >= 0) lives
+    in Payment.record(), not here — this serializer only checks it is
+    a non-negative decimal.
     """
     amount      = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
     method      = serializers.ChoiceField(choices=Payment.METHOD_CHOICES, default="cash")
     received_at = serializers.DateTimeField(required=False, allow_null=True)
     reference   = serializers.CharField(required=False, allow_blank=True, default="")
     notes       = serializers.CharField(required=False, allow_blank=True, default="")
+    pph23_withheld_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0"),
+        required=False, allow_null=True, default=None,
+    )
 
 
 class RefundSerializer(serializers.ModelSerializer):
@@ -162,3 +175,37 @@ class InternalCashMutationRecordSerializer(serializers.Serializer):
     amount            = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
     transaction_date  = serializers.DateField(required=False, allow_null=True)
     note              = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class TaxRemittanceSerializer(serializers.ModelSerializer):
+    """
+    9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Entirely read-only
+    from this serializer's own point of view — always created via
+    the real TaxRemittance.record(), never a generic
+    serializer.save(), same discipline as OperatingExpenseSerializer.
+    """
+    tax_type_display = serializers.CharField(source="get_tax_type_display", read_only=True)
+    created_by_name   = serializers.CharField(source="created_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = TaxRemittance
+        fields = [
+            "id", "number", "sequence_number", "tax_type", "tax_type_display",
+            "period_year", "period_month", "amount", "method", "paid_at",
+            "reference", "notes", "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class TaxRemittanceRecordSerializer(serializers.Serializer):
+    """
+    Write-only input for POST /api/tax-remittances/.
+    """
+    tax_type     = serializers.ChoiceField(choices=TaxRemittance.TAX_TYPE_CHOICES)
+    period_year  = serializers.IntegerField(min_value=2000, max_value=2100)
+    period_month = serializers.IntegerField(min_value=1, max_value=12)
+    amount       = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    method       = serializers.ChoiceField(choices=[("cash", "Tunai"), ("bank", "Transfer Bank")], default="bank")
+    paid_at      = serializers.DateTimeField(required=False, allow_null=True)
+    reference    = serializers.CharField(required=False, allow_blank=True, default="")
+    notes        = serializers.CharField(required=False, allow_blank=True, default="")
