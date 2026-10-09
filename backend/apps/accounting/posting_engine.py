@@ -39,11 +39,20 @@ from apps.inventory.events import PartConsumed, StockOpnameCompleted
 from apps.invoicing.events import InvoiceIssued
 from apps.payments.events import (InternalCashMutationRecorded,
                                   OperatingExpenseRecorded, PaymentReceived,
-                                  SupplierPaymentMade)
+                                  SupplierPaymentMade, TaxRemittanceRecorded)
 from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
                                     QuickPurchaseRecorded,
                                     SupplierInvoiceReceived)
 from apps.workorders.events import WorkOrderCompleted
+
+
+# 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. A real, literal
+# Account.code string, same discipline OperatingExpenseRecorded's
+# own dynamic account_code already follows — deliberately NOT an
+# AccountRole (see AccountRole's own docstring in accounting/
+# models.py: contextual "tax" roles are explicitly a separate,
+# later design layer, not yet folded into that enum).
+PPH23_PREPAID_ACCOUNT_CODE = "1205"
 
 
 def cash_or_bank_account_code(method: str) -> str:
@@ -157,13 +166,43 @@ def resolve(event) -> dict:
         }
 
     if isinstance(event, PaymentReceived):
+        # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. When an
+        # institutional/badan customer withheld PPh 23 at payment
+        # (Pak Holan's own confirmed first mechanism), only the NET
+        # cash/bank portion actually lands in Cash/Bank — the
+        # withheld portion lands instead in 1205 (PPh 23 Dibayar
+        # Dimuka), a real prepaid-tax asset later cleared by
+        # TaxRemittanceRecorded's own "pph23_self_remit" case... no —
+        # cleared at SPT Tahunan time, outside this system's own
+        # scope. Credit side is unchanged: AR is always cleared for
+        # the FULL settled amount, exactly as before this patch —
+        # withholding never changes what the customer owed.
+        withheld = getattr(event, "pph23_withheld_amount", None) or Decimal("0")
+        cash_bank_amount = event.amount - withheld
         return {
             # 2 Sep 2026 — real name, not event.payment_id. See
             # module docstring.
             "memo": f"Payment received — {event.customer_name}",
             "lines": _lines(
-                {"account_code": cash_or_bank_account_code(event.method), "side": "debit",  "amount": event.amount},
+                {"account_code": cash_or_bank_account_code(event.method), "side": "debit",  "amount": cash_bank_amount},
+                {"account_code": PPH23_PREPAID_ACCOUNT_CODE,               "side": "debit",  "amount": withheld},
                 {"account_code": AccountRole.AR,                           "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, TaxRemittanceRecorded):
+        # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. account_code is
+        # a real, literal, already-resolved Account.code string
+        # ("1205" or "6006"), frozen by TaxRemittance.record() — NOT
+        # an AccountRole, so journal_generator.post_for_event()'s own
+        # isinstance(..., AccountRole) check correctly routes this
+        # straight to Account.resolve(), same as
+        # OperatingExpenseRecorded.account_code already does.
+        return {
+            "memo": f"Tax remittance — {event.account_name}",
+            "lines": _lines(
+                {"account_code": event.account_code,                      "side": "debit",  "amount": event.amount},
+                {"account_code": cash_or_bank_account_code(event.method), "side": "credit", "amount": event.amount},
             ),
         }
 
