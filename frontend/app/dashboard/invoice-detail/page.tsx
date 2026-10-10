@@ -120,6 +120,11 @@ function InvoiceDetailContent() {
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
   const [paymentReference, setPaymentReference] = useState("");
+  // 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Optional, only ever
+  // shown/sent for an INSTITUTIONAL customer (see
+  // showPph23WithheldField below) — a badan customer who withholds
+  // PPh 23 directly at this payment and issues a Bukti Potong.
+  const [pph23WithheldAmount, setPph23WithheldAmount] = useState("");
   const [submittingPayment, setSubmittingPayment] = useState(false);
 
   const load = () =>
@@ -171,10 +176,19 @@ function InvoiceDetailContent() {
     setPaymentAmount(invoice.balance_due);
     setPaymentMethod("cash");
     setPaymentReference("");
+    setPph23WithheldAmount("");
     setError(null);
     setBlocked(null);
     setShowPaymentForm(true);
   };
+
+  // 9 Oct 2026 — PPh 23 + PPh Final UMKM patch, Decision #1: only
+  // ever meaningful for a badan/INSTITUTIONAL customer who
+  // withholds directly at payment and issues a Bukti Potong — an
+  // INDIVIDUAL/OP customer never withholds at all (that case is
+  // instead handled monthly, via the separate Setoran Pajak
+  // Bulanan page's own self-remit gross-up).
+  const showPph23WithheldField = invoice?.customer_type === "INSTITUTIONAL";
 
   const submitPayment = async () => {
     if (!invoice) return;
@@ -189,6 +203,12 @@ function InvoiceDetailContent() {
         amount: paymentAmount,
         method: paymentMethod,
         reference: paymentReference || undefined,
+        // 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Only ever sent
+        // when the field is actually shown and filled in — Payment.
+        // record() itself treats an absent/zero value as "nothing
+        // withheld," the correct default for every other customer.
+        pph23_withheld_amount:
+          showPph23WithheldField && pph23WithheldAmount ? pph23WithheldAmount : undefined,
       });
       setShowPaymentForm(false);
       const updated = await load(); // re-fetch -- status may now be PAID, and the new payment belongs in the history list
@@ -531,6 +551,25 @@ function InvoiceDetailContent() {
               style={{ width: "100%", padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 5, marginTop: 4, boxSizing: "border-box" }}
             />
           </div>
+          {/* 9 Oct 2026 — PPh 23 + PPh Final UMKM patch, Decision #1: only
+              ever shown for a badan/INSTITUTIONAL customer who withholds
+              directly at this payment and issues a Bukti Potong. */}
+          {showPph23WithheldField && (
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11.5, color: "var(--steel)", textTransform: "uppercase" }}>
+                PPh 23 Dipotong (opsional)
+              </label>
+              <input
+                type="number" min={0} step="0.01" value={pph23WithheldAmount}
+                onChange={(e) => setPph23WithheldAmount(e.target.value)}
+                placeholder="0"
+                style={{ width: "100%", padding: "8px 10px", border: "1px solid var(--line)", borderRadius: 5, marginTop: 4, boxSizing: "border-box" }}
+              />
+              <div style={{ fontSize: 11, color: "var(--steel)", marginTop: 4 }}>
+                Isi hanya jika pelanggan institusi memotong PPh 23 langsung dan menerbitkan Bukti Potong.
+              </div>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <button className="btn-ghost" disabled={submittingPayment} onClick={() => setShowPaymentForm(false)}>Batal</button>
             <button
