@@ -26,6 +26,11 @@ export interface RecordPaymentPayload {
   received_at?: string;
   reference?:  string;
   notes?:      string;
+  // 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Optional, only ever
+  // sent when the customer is INSTITUTIONAL and actually withheld
+  // PPh 23 at this payment (Decision #1) — Payment.record() itself
+  // validates it (<= amount, >= 0), this is just the wire shape.
+  pph23_withheld_amount?: number | string;
 }
 
 export const paymentsApi = {
@@ -173,5 +178,80 @@ export const internalCashMutationsApi = {
       const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
       return { success: false, message: message || "Gagal mencatat mutasi kas." };
     }
+  },
+};
+
+// ── 9 Oct 2026 — PPh 23 (self-remit gross-up) + PPh Final UMKM
+// (PP 55/2022) monthly tax remittances. Scoped and designed with
+// Chris, grounded in Pak Holan's real, confirmed answers — see the
+// "PPh23 Questions for Pak Holan" doc. Deliberately NOT automatic:
+// the owner/accountant sees a SUGGESTED amount (suggested() below)
+// and explicitly confirms before anything is recorded. ────────────
+
+export type TaxType = "pph23_self_remit" | "pph_umkm_final";
+export type TaxRemittanceMethod = "cash" | "bank";
+
+export interface TaxRemittance {
+  id:                string;
+  number:            string;
+  sequence_number:   number;
+  tax_type:          TaxType;
+  tax_type_display:  string;
+  period_year:       number;
+  period_month:      number;
+  amount:            string;
+  method:            TaxRemittanceMethod;
+  paid_at:           string;
+  reference:         string;
+  notes:             string;
+  created_by:        string | null;
+  created_by_name:   string | null;
+  created_at:        string;
+}
+
+export interface RecordTaxRemittancePayload {
+  tax_type:      TaxType;
+  period_year:   number;
+  period_month:  number;
+  amount:        number | string;
+  method?:       TaxRemittanceMethod;
+  paid_at?:      string;
+  reference?:    string;
+  notes?:        string;
+}
+
+export interface RecordTaxRemittanceResult {
+  success: boolean;
+  message?: string;
+  tax_remittance?: TaxRemittance;
+}
+
+export const taxRemittancesApi = {
+  async list(): Promise<TaxRemittance[]> {
+    const { data } = await api.get("/api/tax-remittances/");
+    return data.tax_remittances;
+  },
+  // Real WRITE action — same discipline as operatingExpensesApi.record()/
+  // internalCashMutationsApi.record() above: a failure must surface its
+  // real message (e.g. a duplicate for the same tax_type/period, or a
+  // closed period) to the user, not a generic fallback.
+  async record(payload: RecordTaxRemittancePayload): Promise<RecordTaxRemittanceResult> {
+    try {
+      const { data } = await api.post("/api/tax-remittances/", payload);
+      return data;
+    } catch (err) {
+      const message = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      return { success: false, message: message || "Gagal mencatat setoran pajak." };
+    }
+  },
+  // GET /api/tax-remittances/suggested/ — read-only, never itself
+  // creates a TaxRemittance row (Decision #2). Returns a plain
+  // decimal string, same shape every other money field in this file
+  // already uses.
+  async suggested(taxType: TaxType, periodYear: number, periodMonth: number): Promise<string> {
+    const { data } = await api.get("/api/tax-remittances/suggested/", {
+      params: { tax_type: taxType, period_year: periodYear, period_month: periodMonth },
+    });
+    return data.suggested_amount;
   },
 };
