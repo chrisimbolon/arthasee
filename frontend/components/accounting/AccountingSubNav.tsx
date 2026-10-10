@@ -36,6 +36,11 @@ const SUBNAV = [
   { href: "/dashboard/accounting/control-accounts", label: "Cek Akun Kontrol" },
   { href: "/dashboard/accounting/operating-expenses", label: "Beban Operasional" },
   { href: "/dashboard/accounting/assets", label: "Aset Tetap" },
+  // 9 Oct 2026 — /tax-remittances added: Setoran Pajak Bulanan, PPh
+  // 23 self-remit + PPh Final UMKM (PP 55/2022). Slotted right after
+  // Aset Tetap, matching this list's own convention of appending the
+  // newest tab last.
+  { href: "/dashboard/accounting/tax-remittances", label: "Pajak Bulanan" },
 ];
 
 export default function AccountingSubNav() {
