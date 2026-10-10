@@ -185,6 +185,22 @@ class Invoice(TenantScopedModel):
         return sum((p.amount for p in self.payments.all()), Decimal("0"))
 
     @property
+    def total_pph23_withheld(self):
+        """
+        10 Oct 2026 — PPh 23 + PPh Final UMKM patch, follow-up. Sum of
+        pph23_withheld_amount across every real Payment recorded
+        against this invoice — mirrors total_paid's own
+        computed-on-read discipline exactly, same reasoning (no
+        denormalized running total to let drift from the real Payment
+        rows). Deliberately NOT subtracted from balance_due above —
+        the withheld portion is still part of the full settled value
+        (see Payment.record()'s own docstring); this is purely a
+        reporting figure for the printed receipt/invoice PDF, never
+        used in any balance calculation.
+        """
+        return sum((p.pph23_withheld_amount for p in self.payments.all()), Decimal("0"))
+
+    @property
     def balance_due(self):
         return self.total - self.deposit_amount - self.total_paid
 

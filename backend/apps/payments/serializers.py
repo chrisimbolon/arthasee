@@ -18,9 +18,22 @@ class PaymentSerializer(serializers.ModelSerializer):
         model  = Payment
         fields = [
             "id", "invoice", "amount", "method", "received_at",
-            "reference", "notes", "received_by", "received_by_name", "created_at",
+            "reference", "notes", "pph23_withheld_amount",
+            "received_by", "received_by_name", "created_at",
         ]
-        read_only_fields = ["id", "invoice", "received_by", "received_by_name", "created_at"]
+        # 10 Oct 2026 — PPh 23 + PPh Final UMKM patch, follow-up:
+        # pph23_withheld_amount joins read_only_fields for the exact
+        # same reason "amount" itself isn't listed there — this
+        # serializer is only ever used for the RESPONSE representation
+        # (PaymentSerializer(payment).data); real writes always go
+        # through Payment.record()'s own validated
+        # pph23_withheld_amount parameter (see PaymentRecordSerializer
+        # for the actual write-side input), never through a generic
+        # .save() on this serializer.
+        read_only_fields = [
+            "id", "invoice", "pph23_withheld_amount",
+            "received_by", "received_by_name", "created_at",
+        ]
 
 
 class PaymentRecordSerializer(serializers.Serializer):

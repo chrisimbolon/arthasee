@@ -376,6 +376,22 @@ def build_invoice_pdf(invoice, org_name, org_address="", org_logo=None):
         paid_row = f"""
         <tr><td class="num">Sudah Dibayar</td><td class="num">− {_format_rupiah(paid_total)}</td></tr>"""
 
+    # 10 Oct 2026 — PPh 23 + PPh Final UMKM patch, follow-up. Pak
+    # Holan's own real ask (tax consultant, confirmed via WhatsApp):
+    # the withheld amount needs to be visible as a real line on the
+    # printed document, not just trusted to live correctly in the GL
+    # — so a customer's own finance team can reconcile this receipt
+    # against the physical Bukti Potong they hold. Deliberately
+    # informational only — already included inside "Sudah Dibayar"
+    # above (the invoice is settled for the FULL amount regardless of
+    # how much landed in cash/bank vs. was withheld at source, see
+    # Payment.record()'s own docstring), so this row is never
+    # subtracted a second time from the total.
+    pph23_row = ""
+    if invoice.total_pph23_withheld > 0:
+        pph23_row = f"""
+        <tr><td class="num pph23-note">PPh 23 Dipotong (termasuk di atas)</td><td class="num pph23-note">{_format_rupiah(invoice.total_pph23_withheld)}</td></tr>"""
+
     total_label = "Sisa Tagihan" if paid_total > 0 else "Total"
     # 9 Sep 2026 — real fix: was terbilang_rupiah(invoice.balance_due).
     # This builder only ever runs for a PAID invoice (balance_due is
@@ -427,6 +443,7 @@ def build_invoice_pdf(invoice, org_name, org_address="", org_logo=None):
         .subtotal-table {{ width: 100%; margin-top: 10px; }}
         .subtotal-table td {{ font-size: 10pt; padding: 4px 0; }}
         .total-value {{ font-weight: bold; }}
+        .pph23-note {{ font-size: 8.5pt; color: #6b6b6b; font-style: italic; }}
         .grand-total-table {{ width: 100%; margin-top: 12px; border-top: 1px solid #17181a; padding-top: 10px; }}
         .grand-total-table td {{ font-size: 13pt; font-weight: bold; }}
         .terbilang {{ font-size: 9pt; font-style: italic; color: #52514e; margin-top: 6px; }}
@@ -476,6 +493,7 @@ def build_invoice_pdf(invoice, org_name, org_address="", org_logo=None):
         <table class="subtotal-table">
             <tr><td class="num">Subtotal</td><td class="num total-value">{_format_rupiah(invoice.subtotal)}</td></tr>
             {paid_row}
+            {pph23_row}
         </table>
 
         <table class="grand-total-table">

@@ -72,6 +72,24 @@ class Payment(TenantScopedModel):
         help_text="Nomor transfer, ID transaksi QRIS, dll — opsional.",
     )
     notes = models.TextField(blank=True, verbose_name="Catatan")
+    # 10 Oct 2026 — PPh 23 + PPh Final UMKM patch, follow-up: was
+    # previously validated and frozen into the posted journal line +
+    # the PaymentReceived event payload (for the suggested-amount
+    # calc) but never actually stored on the Payment row itself — a
+    # real, flagged gap: it never showed up anywhere a human could
+    # see it again (payment history, a printed receipt), only in the
+    # GL. Pak Holan's own real ask, confirmed via WhatsApp: a
+    # customer's finance team needs to be able to look at the record
+    # of a payment and see the withheld amount called out, to
+    # reconcile against the physical Bukti Potong they hold. Default
+    # 0, not null — "not withheld" and "withheld nothing" are the
+    # same real fact, no reason for a nullable tri-state here (same
+    # discipline amount/deposit_amount elsewhere already follow).
+    pph23_withheld_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0"),
+        verbose_name="PPh 23 Dipotong",
+        help_text="Diisi hanya jika pelanggan institusi memotong PPh 23 langsung saat pembayaran ini.",
+    )
     received_by = models.ForeignKey(
         "authentication.CustomUser", on_delete=models.SET_NULL, null=True, blank=True,
         verbose_name="Diterima Oleh",
@@ -219,6 +237,13 @@ class Payment(TenantScopedModel):
                 received_at=received_at_resolved,
                 reference=reference,
                 notes=notes,
+                # 10 Oct 2026 — PPh 23 + PPh Final UMKM patch, follow-
+                # up. `withheld` is already the real, validated,
+                # non-null Decimal resolved above (defaults to 0) —
+                # the exact same value that goes into the
+                # PaymentReceived event below, now also actually
+                # stored on the row so it survives past the event bus.
+                pph23_withheld_amount=withheld,
                 received_by=received_by,
             )
 
