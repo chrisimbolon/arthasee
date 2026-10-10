@@ -43,12 +43,24 @@ class InvoiceSerializer(serializers.ModelSerializer):
     # — using service_record's own id there was the actual bug this
     # field exists to fix.
     vehicle_id = serializers.SerializerMethodField()
+    # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch, frontend half. The
+    # ONE thing the invoice payment modal genuinely needs to know to
+    # decide whether to show the optional PPh23-withheld field at all
+    # (Decision #1: only ever meaningful for an INSTITUTIONAL/badan
+    # customer who withholds directly at payment). Read-only, same
+    # traversal already proven in TaxRemittance.suggested_pph23_self_
+    # remit() (apps.payments.models) — Invoice has no direct customer
+    # FK of its own, only reachable via service_record.vehicle.customer.
+    customer_type = serializers.CharField(
+        source="service_record.vehicle.customer.customer_type", read_only=True,
+    )
 
     class Meta:
         model  = Invoice
         fields = [
             "id", "service_record", "vehicle_id", "number", "sequence_number", "year",
             "customer_name_snapshot", "license_plate_snapshot", "mechanic_name_snapshot",
+            "customer_type",
             "status", "deposit_amount", "due_date", "is_overdue", "line_items",
             "subtotal", "total", "balance_due",
             "created_by", "created_by_name", "created_at",
@@ -68,6 +80,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", "vehicle_id", "number", "sequence_number", "year",
             "customer_name_snapshot", "license_plate_snapshot", "mechanic_name_snapshot",
+            "customer_type",
             "due_date", "is_overdue", "line_items", "subtotal", "total", "balance_due",
             "created_by", "created_by_name", "created_at",
         ]
