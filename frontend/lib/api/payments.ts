@@ -15,6 +15,14 @@ export interface Payment {
   received_at:       string;
   reference:         string;
   notes:             string;
+  // 10 Oct 2026 — PPh 23 + PPh Final UMKM patch, follow-up: now
+  // actually stored on the Payment row (previously only reached the
+  // posted journal line + the event payload — a real, flagged gap,
+  // caught via Pak Holan's own feedback: a customer's finance team
+  // needs to see this on the payment record itself to reconcile
+  // against the physical Bukti Potong). Always present, "0" is the
+  // real, accurate value for "not withheld" — never null.
+  pph23_withheld_amount: string;
   received_by:       string | null;
   received_by_name:  string | null;
   created_at:        string;
@@ -29,7 +37,10 @@ export interface RecordPaymentPayload {
   // 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Optional, only ever
   // sent when the customer is INSTITUTIONAL and actually withheld
   // PPh 23 at this payment (Decision #1) — Payment.record() itself
-  // validates it (<= amount, >= 0), this is just the wire shape.
+  // validates it (<= amount, >= 0), this is just the wire shape. Now
+  // persisted on the Payment row itself (see pph23_withheld_amount
+  // on Payment above), so it shows back up in payment history after
+  // recording.
   pph23_withheld_amount?: number | string;
 }
 

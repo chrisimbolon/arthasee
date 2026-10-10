@@ -496,18 +496,36 @@ function InvoiceDetailContent() {
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "var(--steel)", textTransform: "uppercase" }}>
             Riwayat Pembayaran
           </div>
-          {payments.map((p) => (
-            <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center", fontSize: 13, padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
-              <span>
-                {PAYMENT_METHOD_LABEL[p.method]}
-                {p.reference && <span style={{ color: "var(--steel)" }}> — {p.reference}</span>}
-              </span>
-              <span className="mono" style={{ fontWeight: 600 }}>{money(p.amount)}</span>
-              <span style={{ color: "var(--steel)", fontSize: 11.5 }}>
-                {new Date(p.received_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}
-              </span>
-            </div>
-          ))}
+          {payments.map((p) => {
+            // 10 Oct 2026 — PPh 23 + PPh Final UMKM patch, follow-up.
+            // Pak Holan's own real ask, confirmed via WhatsApp: the
+            // withheld amount needs to be visible on the payment
+            // record itself, not just buried in the GL — so a
+            // customer's finance team can reconcile it against the
+            // physical Bukti Potong they hold. Only rendered when
+            // actually > 0 — most payments never touch this at all.
+            const withheld = Number(p.pph23_withheld_amount || 0);
+            return (
+              <div key={p.id} style={{ padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center", fontSize: 13 }}>
+                  <span>
+                    {PAYMENT_METHOD_LABEL[p.method]}
+                    {p.reference && <span style={{ color: "var(--steel)" }}> — {p.reference}</span>}
+                  </span>
+                  <span className="mono" style={{ fontWeight: 600 }}>{money(p.amount)}</span>
+                  <span style={{ color: "var(--steel)", fontSize: 11.5 }}>
+                    {new Date(p.received_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}
+                  </span>
+                </div>
+                {withheld > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--steel)", marginTop: 4 }}>
+                    <span>PPh 23 Dipotong (Bukti Potong)</span>
+                    <span className="mono">− {money(p.pph23_withheld_amount)}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
