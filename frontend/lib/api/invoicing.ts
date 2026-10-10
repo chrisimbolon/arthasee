@@ -2,6 +2,7 @@
 // === frontend/lib/api/invoicing.ts ===
 // =============================================================================
 import api from "@/lib/api";
+import { CustomerType } from "@/lib/api/service";
 
 export interface InvoiceLineItem {
   id:          string;
@@ -24,6 +25,12 @@ export interface Invoice {
   sequence_number:        number;
   year:                   number;
   customer_name_snapshot: string;
+  // 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. Read-only, sourced
+  // server-side from service_record.vehicle.customer.customer_type —
+  // the invoice payment form uses this to decide whether to show the
+  // optional PPh23-withheld field at all (only ever meaningful for an
+  // INSTITUTIONAL customer).
+  customer_type:          CustomerType;
   license_plate_snapshot: string;
   // Made's own explicit reason, confirmed 31 Jul: a specific
   // mechanic must be identifiable on every invoice, even for
