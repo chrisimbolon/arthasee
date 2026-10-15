@@ -304,6 +304,114 @@ class PaymentRecordingTests(PaymentsAPITestBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+
+class PaymentPPh23WithholdingTests(PaymentsAPITestBase):
+    """
+    15 Oct 2026 -- real regression coverage for Payment.record()'s own
+    pph23_withheld_amount split (9/10 Oct 2026, the PPh 23 + PPh Final
+    UMKM patch), closing the half of Roadmap Open Decision #43 scoped to
+    Payment itself. Zero tests existed for this before -- the model's
+    own validation and posting_engine.py's own GL split were both
+    shipped and never proven.
+
+    Reuses PaymentsAPITestBase's own fixture (a 250000, labor-only
+    invoice) exactly as PaymentRecordingTests/InvoiceRefundTests do --
+    the withholding split doesn't need a parts line to prove itself,
+    since it operates on the payment's own total `amount`, not on the
+    invoice's service/parts mix (that split is suggested_pph23_self_
+    remit()'s own concern, not Payment.record()'s -- deliberately out
+    of scope here, see this patch's own module docstring).
+    """
+
+    def test_withheld_amount_persists_on_payment_row(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self._pay(250000, pph23_withheld_amount="50000")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get(invoice_id=self.invoice_id)
+        self.assertEqual(payment.pph23_withheld_amount, Decimal("50000.00"))
+
+    def test_withheld_amount_defaults_to_zero_when_omitted(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(250000)
+        payment = Payment.objects.get(invoice_id=self.invoice_id)
+        self.assertEqual(payment.pph23_withheld_amount, Decimal("0.00"))
+
+    def test_negative_withheld_amount_rejected_over_the_real_api(self):
+        """
+        Real behavior, not the one you'd guess from Payment.record()'s
+        own docstring alone: PaymentRecordSerializer's own
+        min_value=Decimal("0") on this field rejects a negative value
+        BEFORE Payment.record() is ever called -- still a 400, but from
+        the serializer layer, not the model's own ValueError. See
+        test_negative_withheld_amount_rejected_at_model_layer below for
+        the model's own guard, which this path never actually reaches.
+        """
+        resp = self._pay(250000, pph23_withheld_amount="-1000")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+    def test_negative_withheld_amount_rejected_at_model_layer(self):
+        """
+        Payment.record()'s own `withheld < Decimal("0")` guard, called
+        directly -- the only way to actually exercise it, since the API
+        serializer's own min_value=0 constraint (confirmed above) means
+        no real HTTP request can ever reach this branch today. Still
+        worth proving in isolation: any future caller that skips the
+        serializer (a management command, a different endpoint) must
+        not be able to post a negative withholding straight to the
+        ledger.
+        """
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        with self.assertRaises(ValueError):
+            Payment.record(
+                invoice=invoice, amount=Decimal("250000"), method="cash",
+                pph23_withheld_amount=Decimal("-1000"),
+            )
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+    def test_withheld_amount_exceeding_payment_amount_rejected(self):
+        resp = self._pay(100000, pph23_withheld_amount="150000")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+    def test_withheld_amount_splits_gl_entry_cash_and_prepaid_pph23(self):
+        """
+        The real regression guard. Before this test existed, nothing
+        proved posting_engine.py's own PaymentReceived branch actually
+        splits the entry correctly: AR must still clear for the FULL
+        settled amount (withholding never changes what the customer
+        owed), only the NET lands in cash, and the withheld portion
+        becomes a real prepaid-tax asset (1205) rather than vanishing.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self._pay(250000, pph23_withheld_amount="50000")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        cash          = Account.objects.get(organization=self.org, code="1001")
+        prepaid_pph23 = Account.objects.get(organization=self.org, code="1205")
+        ar            = Account.objects.get(organization=self.org, code="1201")
+
+        self.assertEqual(ar.balance(), Decimal("0.00"))
+        self.assertEqual(cash.balance(), Decimal("200000.00"))
+        self.assertEqual(prepaid_pph23.balance(), Decimal("50000.00"))
+
+    def test_zero_withheld_posts_no_prepaid_pph23_line(self):
+        """
+        Regression anchor for the pre-9-Oct-2026 behavior: a payment
+        with no withholding posts exactly as it always did -- the full
+        amount straight to cash, nothing touching 1205 at all
+        (posting_engine._lines() drops the zero-amount withheld line).
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(250000)
+
+        cash          = Account.objects.get(organization=self.org, code="1001")
+        prepaid_pph23 = Account.objects.get(organization=self.org, code="1205")
+
+        self.assertEqual(cash.balance(), Decimal("250000.00"))
+        self.assertEqual(prepaid_pph23.balance(), Decimal("0.00"))
+
+
 class PartiallyPaidStatusTests(PaymentsAPITestBase):
     """
     15 Sep 2026 — real, dedicated coverage for the PARTIALLY_PAID
