@@ -57,6 +57,21 @@ class AccountingEventHandler(EventHandler):
         "GoodsReceived", "SupplierInvoiceReceived", "SupplierPaymentMade",
         "PurchaseReturned", "StockOpnameCompleted", "QuickPurchaseRecorded",
         "OperatingExpenseRecorded", "InternalCashMutationRecorded",
+        # 15 Oct 2026 -- real, live bug fix: TaxRemittanceRecorded
+        # (9 Oct 2026, the PPh 23 + PPh Final UMKM patch) was wired
+        # into events.py, posting_engine.py, and
+        # apps/core/events/registry.py, but never added HERE -- the
+        # fourth of the four real places a new event must be
+        # registered (see this module's own docstring), and the one
+        # EventRegistryCompletenessTests does not check. Confirmed
+        # live: an event with zero subscribed handlers is marked
+        # PROCESSED, not FAILED (apps/core/events/dispatcher.py's
+        # own _dispatch_now()) -- so every real TaxRemittance
+        # recorded before this fix silently posted NO journal entry,
+        # with no FAILED Outbox row for replay_failed_events to ever
+        # find. See TaxRemittanceTests.test_outbox_row_actually_posts_a_journal_entry
+        # in apps/payments/tests.py for the regression guard.
+        "TaxRemittanceRecorded",
     )
 
     def handle(self, event: DomainEvent) -> None:
