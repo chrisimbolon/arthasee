@@ -38,7 +38,7 @@ from apps.invoicing.events import InvoiceRefunded
 from apps.invoicing.models import Invoice, InvoiceLineItem
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.payments.models import (InternalCashMutation, OperatingExpense,
-                                  SupplierPayment)
+                                  SupplierPayment, TaxRemittance)
 from apps.purchasing.models import Supplier, SupplierInvoice
 from apps.service.models import Customer, ServiceRecord, Vehicle
 from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
@@ -1042,3 +1042,117 @@ class SupplierPaymentReadinessGateTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         invoice.refresh_from_db()
         self.assertEqual(invoice.status, "PAID")
+
+class TaxRemittanceTests(TestCase):
+    """
+    15 Oct 2026 -- real regression coverage for the TaxRemittanceRecorded
+    handler-registration bug (see patch_handlers_taxremittance_fix.py / the
+    Roadmap's own Phase 20 writeup for the full incident). Zero tests
+    existed for TaxRemittance before this -- the gap this fix closes is
+    exactly why the original bug shipped silently and was never caught by
+    the test suite first.
+
+    Mirrors OperatingExpenseTests' own fixture shape (Cheat Sheet SS6 --
+    one test class per real write path): a seeded org, no Invoice/WorkOrder
+    chain needed.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_record_creates_sequential_number(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            remittance = TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("150000.00"),
+            )
+        self.assertEqual(remittance.number, "TAX/00001")
+        self.assertEqual(remittance.sequence_number, 1)
+
+    def test_pph23_self_remit_posts_dr_1205_cr_bank(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("150000.00"),
+                method="bank",
+            )
+        prepaid_pph23 = Account.objects.get(organization=self.org, code="1205")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(prepaid_pph23.balance(), Decimal("150000.00"))
+        self.assertEqual(bank.balance(), Decimal("-150000.00"))
+
+    def test_pph_umkm_final_posts_dr_6006_cr_cash(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph_umkm_final",
+                period_year=2026, period_month=9, amount=Decimal("75000.00"),
+                method="cash",
+            )
+        pph_final = Account.objects.get(organization=self.org, code="6006")
+        cash = Account.objects.get(organization=self.org, code="1001")
+        self.assertEqual(pph_final.balance(), Decimal("75000.00"))
+        self.assertEqual(cash.balance(), Decimal("-75000.00"))
+
+    def test_outbox_row_actually_posts_a_journal_entry(self):
+        """
+        The real regression guard. Before the handlers.py fix, this test
+        would FAIL on its own last two asserts: the Outbox row ends up
+        PROCESSED (not FAILED -- an unregistered event is dispatched to
+        zero handlers, which dispatcher.py's own _dispatch_now() treats as
+        a normal, successful no-op), while zero JournalEntry rows exist --
+        the exact silent-no-post bug. A PROCESSED-looking success with no
+        real ledger effect is precisely what replay_failed_events can never
+        find, since it only ever looks at FAILED rows.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("150000.00"),
+            )
+        outbox_row = Outbox.objects.get(organization=self.org, event_type="TaxRemittanceRecorded")
+        self.assertEqual(outbox_row.status, Outbox.Status.PROCESSED)
+        self.assertTrue(
+            JournalEntry.objects.filter(
+                organization=self.org, event_type="TaxRemittanceRecorded",
+            ).exists(),
+            "TaxRemittanceRecorded was marked PROCESSED but posted no JournalEntry "
+            "-- the handler-registration regression is back.",
+        )
+
+    def test_posting_date_matches_paid_at_not_occurred_at(self):
+        yesterday = timezone.now() - timedelta(days=1)
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph_umkm_final",
+                period_year=2026, period_month=9, amount=Decimal("75000.00"),
+                paid_at=yesterday,
+            )
+        entry = JournalEntry.objects.get(organization=self.org, event_type="TaxRemittanceRecorded")
+        self.assertEqual(entry.posting_date, timezone.localtime(yesterday).date())
+
+    def test_zero_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("0"),
+            )
+
+    def test_unknown_tax_type_rejected(self):
+        with self.assertRaises(ValueError):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph_unifikasi",
+                period_year=2026, period_month=9, amount=Decimal("100000.00"),
+            )
+
+    def test_blocked_when_target_period_is_closed(self):
+        from apps.accounting.models import AccountingPeriod
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=1)
+        period.close(closed_by=None)
+
+        with self.assertRaises(ValueError):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=1, amount=Decimal("150000.00"),
+                paid_at=timezone.make_aware(dt(2026, 1, 15)),
+            )
