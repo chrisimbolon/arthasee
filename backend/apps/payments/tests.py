@@ -412,6 +412,245 @@ class PaymentPPh23WithholdingTests(PaymentsAPITestBase):
         self.assertEqual(prepaid_pph23.balance(), Decimal("0.00"))
 
 
+class TaxRemittanceSuggestedCalculationTests(PaymentsAPITestBase):
+    """
+    15 Oct 2026 -- real regression coverage for
+    TaxRemittance.suggested_pph_umkm_final()/suggested_pph23_self_remit()
+    (9 Oct 2026, the PPh 23 + PPh Final UMKM patch), closing the second
+    half of Roadmap Open Decision #43 -- patch_pph23_withholding_tests.py
+    already closed the first half (Payment.record() itself). Zero tests
+    existed for either calculation before this.
+
+    See this patch's own module docstring for the fixture strategy
+    (real invoices via the API, real OR synthetic Outbox rows depending
+    on what each test needs precise control over).
+    """
+
+    def _issue_invoice(self, *, labor_amount=Decimal("0"), parts_amount=Decimal("0"), customer_type="INDIVIDUAL"):
+        """
+        Issues a fresh, independent Invoice -- deliberately NOT
+        self.invoice_id, a genuinely separate one every time, since
+        both suggested_* functions aggregate across every real Outbox
+        row for the whole organization and several tests below need
+        more than one invoice in play without them bleeding into each
+        other's totals.
+
+        The labor line goes through the real invoice-creation endpoint
+        (so it posts a real InvoiceLineItem the normal way); the parts
+        line is added directly via the ORM afterward, BEFORE the
+        ISSUED transition -- skipping the real PartConsumed/PartUsage
+        pipeline is deliberate: both suggested_* functions only ever
+        read invoice.line_items / the frozen InvoiceIssued event
+        payload, never PartUsage itself, so replicating the full
+        consumption flow here would prove nothing these tests actually
+        depend on.
+        """
+        customer = Customer.objects.create(
+            organization=self.org, name="Pelanggan Uji", customer_type=customer_type,
+        )
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=customer,
+            plate_number=f"BP {uuid.uuid4().hex[:4].upper()} TT", manufacture_year=2022,
+            vehicle_type="Mobil", model="Test Model",
+        )
+        work_order = WorkOrder.objects.create(organization=self.org, vehicle=vehicle, assigned_to=self.mechanic)
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order,
+            description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        service_record = work_order.close(closed_by=self.owner)
+
+        labor_lines = (
+            [{"description": "Jasa", "quantity": 1, "unit_price": str(labor_amount)}]
+            if labor_amount else []
+        )
+        create = self.client.post(
+            f"/api/service-records/{service_record.id}/invoice/",
+            {"labor_lines": labor_lines}, format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+
+        if parts_amount:
+            InvoiceLineItem.objects.create(
+                invoice_id=invoice_id, kind="part",
+                description="Sparepart Uji", quantity=1, unit_price=parts_amount,
+            )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+
+        return invoice_id
+
+    def _craft_outbox(self, *, event_type, payload, occurred_at):
+        """
+        A synthetic Outbox row, built directly -- see this patch's own
+        module docstring for why that's the right tool for the
+        boundary/exclusion tests below, not a shortcut around building
+        a real fixture.
+        """
+        return Outbox.objects.create(
+            organization=self.org, event_id=uuid.uuid4(), event_type=event_type,
+            payload=payload, occurred_at=occurred_at, status=Outbox.Status.PROCESSED,
+        )
+
+    def _this_year_month(self):
+        now_local = timezone.localtime(timezone.now())
+        return now_local.year, now_local.month
+
+    def _prior_year_month(self):
+        year, month = self._this_year_month()
+        return (year - 1, 12) if month == 1 else (year, month - 1)
+
+    # ------------------------------------------------------------------
+    # suggested_pph_umkm_final -- 0.5% of the month's PARTS revenue only
+    # ------------------------------------------------------------------
+
+    def test_umkm_final_is_zero_when_only_labor_revenue_exists(self):
+        """
+        The base fixture invoice (self.invoice_id, issued in setUp()) is
+        labor-only -- jasa is explicitly excluded from this base (Chris's
+        own real example in the method's own docstring: parts only).
+        """
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph_umkm_final(self.org, year, month), Decimal("0.00"))
+
+    def test_umkm_final_sums_parts_revenue_across_multiple_invoices(self):
+        """
+        Hand-verified (Cheat Sheet SS5's own discipline): two invoices,
+        parts 300000 and 200000 this month -> (300000 + 200000) * 0.005
+        = 2500.00. 300000 -> 1500 is Chris's own real confirmed example
+        from the method's own docstring; this just adds a second
+        invoice to prove SUMMING across invoices, not just one.
+        """
+        self._issue_invoice(labor_amount=Decimal("100000"), parts_amount=Decimal("300000"))
+        self._issue_invoice(labor_amount=Decimal("50000"), parts_amount=Decimal("200000"))
+
+        year, month = self._this_year_month()
+        suggested = TaxRemittance.suggested_pph_umkm_final(self.org, year, month)
+        self.assertEqual(suggested, Decimal("2500.00"))
+
+    def test_umkm_final_excludes_invoices_outside_the_target_month(self):
+        """
+        A crafted Outbox row dated last month must show up when asked
+        about LAST month and not at all when asked about THIS month --
+        proves the real month/year filter, not just that the function
+        can sum numbers.
+        """
+        this_year, this_month = self._this_year_month()
+        prior_year, prior_month = self._prior_year_month()
+        prior_occurred_at = timezone.now().replace(year=prior_year, month=prior_month, day=1)
+
+        self._craft_outbox(
+            event_type="InvoiceIssued",
+            payload={"invoice_id": str(uuid.uuid4()), "service_amount": "0.00",
+                     "parts_amount": "500000.00", "total": "500000.00", "line_item_count": 1},
+            occurred_at=prior_occurred_at,
+        )
+
+        self.assertEqual(
+            TaxRemittance.suggested_pph_umkm_final(self.org, this_year, this_month), Decimal("0.00"),
+        )
+        self.assertEqual(
+            TaxRemittance.suggested_pph_umkm_final(self.org, prior_year, prior_month), Decimal("2500.00"),
+        )
+
+    # ------------------------------------------------------------------
+    # suggested_pph23_self_remit -- 2% of the jasa share of this
+    # month's payments from INDIVIDUAL customers not already withheld
+    # ------------------------------------------------------------------
+
+    def test_pph23_self_remit_is_zero_with_no_payments_this_month(self):
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph23_self_remit(self.org, year, month), Decimal("0.00"))
+
+    def test_pph23_self_remit_computes_jasa_proportional_share(self):
+        """
+        Hand-verified: labor 100000 + parts 200000 = 300000 total,
+        jasa_ratio = 100000/300000 = 1/3. Paid in full (300000), not
+        withheld at source. base = 300000 * 1/3 = 100000.
+        tax = 100000 * 0.02 = 2000.00.
+        """
+        invoice_id = self._issue_invoice(
+            labor_amount=Decimal("100000"), parts_amount=Decimal("200000"), customer_type="INDIVIDUAL",
+        )
+        invoice = Invoice.objects.get(id=invoice_id)
+        with self.captureOnCommitCallbacks(execute=True):
+            Payment.record(invoice=invoice, amount=Decimal("300000"), method="bank_transfer")
+
+        year, month = self._this_year_month()
+        suggested = TaxRemittance.suggested_pph23_self_remit(self.org, year, month)
+        self.assertEqual(suggested, Decimal("2000.00"))
+
+    def test_pph23_self_remit_excludes_institutional_customers(self):
+        """
+        Pak Holan's own confirmed split (TaxRemittance.record()'s own
+        class docstring): an INSTITUTIONAL customer withholds directly
+        at payment -- already captured on the Payment itself via
+        pph23_withheld_amount, never this function's concern. A fully
+        jasa INSTITUTIONAL payment with nothing withheld must still be
+        excluded purely on customer_type, proving the filter doesn't
+        silently fall through to "withheld == 0 is enough."
+        """
+        invoice_id = self._issue_invoice(labor_amount=Decimal("100000"), customer_type="INSTITUTIONAL")
+        invoice = Invoice.objects.get(id=invoice_id)
+        with self.captureOnCommitCallbacks(execute=True):
+            Payment.record(invoice=invoice, amount=Decimal("100000"), method="bank_transfer")
+
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph23_self_remit(self.org, year, month), Decimal("0.00"))
+
+    def test_pph23_self_remit_excludes_payments_already_withheld_at_source(self):
+        """
+        An INSTITUTIONAL customer who DID withhold PPh 23 directly at
+        this payment (pph23_withheld_amount > 0, the OTHER real case
+        TaxRemittance covers) must also be excluded here -- it was
+        already captured on the Payment itself, not this suggestion.
+        """
+        invoice_id = self._issue_invoice(labor_amount=Decimal("100000"), customer_type="INSTITUTIONAL")
+        invoice = Invoice.objects.get(id=invoice_id)
+        with self.captureOnCommitCallbacks(execute=True):
+            Payment.record(
+                invoice=invoice, amount=Decimal("100000"), method="bank_transfer",
+                pph23_withheld_amount=Decimal("2000"),
+            )
+
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph23_self_remit(self.org, year, month), Decimal("0.00"))
+
+    def test_pph23_self_remit_excludes_payments_outside_the_target_month(self):
+        """
+        Same month-boundary proof as test_umkm_final_excludes_invoices_
+        outside_the_target_month, for the OTHER suggestion calculation
+        -- a crafted PaymentReceived Outbox row pointed at a real,
+        fully-jasa INDIVIDUAL invoice, dated last month. base = 50000
+        (100% jasa) -> tax = 50000 * 0.02 = 1000.00.
+        """
+        invoice_id = self._issue_invoice(labor_amount=Decimal("50000"), customer_type="INDIVIDUAL")
+
+        this_year, this_month = self._this_year_month()
+        prior_year, prior_month = self._prior_year_month()
+        prior_occurred_at = timezone.now().replace(year=prior_year, month=prior_month, day=1)
+
+        self._craft_outbox(
+            event_type="PaymentReceived",
+            payload={"invoice_id": invoice_id, "payment_id": str(uuid.uuid4()),
+                     "amount": "50000.00", "method": "bank_transfer",
+                     "customer_name": "Pelanggan Uji", "pph23_withheld_amount": "0.00"},
+            occurred_at=prior_occurred_at,
+        )
+
+        self.assertEqual(
+            TaxRemittance.suggested_pph23_self_remit(self.org, this_year, this_month), Decimal("0.00"),
+        )
+        self.assertEqual(
+            TaxRemittance.suggested_pph23_self_remit(self.org, prior_year, prior_month), Decimal("1000.00"),
+        )
+
+
 class PartiallyPaidStatusTests(PaymentsAPITestBase):
     """
     15 Sep 2026 — real, dedicated coverage for the PARTIALLY_PAID
