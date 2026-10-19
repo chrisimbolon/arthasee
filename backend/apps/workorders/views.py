@@ -2,13 +2,12 @@
 # === backend/apps/workorders/views.py ===
 # =============================================================================
 from datetime import date, timedelta
-from decimal import Decimal
 
 from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
 from apps.inventory.models import StockAdjustment
 from django.db import transaction
-from django.db.models import Prefetch, Q
+from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -110,17 +109,11 @@ class WorkOrderMasterListView(TenantScopedAPIView):
     three real things front-desk staff would search by (Made's own
     "is my car ready?" framing from the original sprint review).
 
-    Real, deliberate Total logic, confirmed with Chris 16 Sep: a
-    WorkOrder's own job_lines (labor) carry NO price at all until a
-    real Invoice exists — labor pricing only enters the system at
-    invoice-creation time (see apps.invoicing views), never before.
-    So total_is_final is only ever True once a real Invoice object
-    exists for this WO's own ServiceRecord, regardless of that
-    Invoice's own status — even a DRAFT invoice has a real, frozen
-    total the moment it's created, well before it's ever issued to
-    the customer. Before any Invoice exists at all, total is a real,
-    honest materials-only running subtotal — never presented as if
-    it were the eventual final bill.
+    16 Oct 2026 (Phase 21, Task 21.1) -- no money on this list at all.
+    Made's rule (12 Sep note): "Di WO tidak boleh muncul harga!" The
+    old `total` / `total_is_final` fields (a materials-only running
+    subtotal, or the linked Invoice's total) are removed from the
+    response. Prices live on Estimates and Invoices only.
 
     payment_status mirrors the linked Invoice's own raw status value
     exactly (or None when no Invoice exists yet) — the frontend owns
@@ -140,15 +133,6 @@ class WorkOrderMasterListView(TenantScopedAPIView):
                 "vehicle", "vehicle__customer", "assigned_to",
                 "service_record", "service_record__invoice",
             )
-            # 24 Sep 2026 — select_related("part") added on the prefetch itself:
-            # _serialize() below now reads line.part.unit_price per material
-            # line, which without this would be one extra query per line,
-            # per work order, on this list endpoint — a real N+1 this fix
-            # would otherwise introduce while fixing the pricing bug.
-            .prefetch_related(Prefetch(
-                "material_lines",
-                queryset=WorkOrderMaterialLine.objects.select_related("part"),
-            ))
         )
 
         status_filter = request.query_params.get("status")
@@ -177,26 +161,6 @@ class WorkOrderMasterListView(TenantScopedAPIView):
         # `getattr(self.service_record, "work_order", None)`).
         invoice = getattr(wo.service_record, "invoice", None) if wo.service_record_id else None
 
-        if invoice is not None:
-            total = invoice.total
-            total_is_final = True
-        else:
-            # 24 Sep 2026 — real bug found live, same root cause as
-            # WorkOrder.close()'s own PartUsage.bulk_create() (see that
-            # fix's own comment for the full story): this summed
-            # line.unit_price_at_time, WorkOrderMaterialLine's own COST
-            # field, not the customer-facing selling price. A shop's own
-            # "jobs in progress" list was silently showing an at-cost
-            # running total. line.part.unit_price is today's real selling
-            # price — correct for a value already explicitly marked
-            # total_is_final=False (an in-progress estimate, not a frozen
-            # invoice line).
-            total = sum(
-                (line.quantity * line.part.unit_price for line in wo.material_lines.all()),
-                Decimal("0"),
-            )
-            total_is_final = False
-
         return {
             "id": str(wo.id),
             "number": wo.number,
@@ -207,8 +171,6 @@ class WorkOrderMasterListView(TenantScopedAPIView):
             "assigned_to_name": wo.assigned_to.name if wo.assigned_to else None,
             "status": wo.status,
             "payment_status": invoice.status if invoice else None,
-            "total": total,
-            "total_is_final": total_is_final,
         }
 
 class WorkOrderDetailView(TenantScopedAPIView):
