@@ -777,6 +777,18 @@ class WorkOrderJobLine(TenantScopedModel):
         WorkOrderStage, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="job_lines", verbose_name="Tahap",
     )
+    # 19 Oct 2026 (Phase 21, Task 21.2) -- which approved EstimateLineItem
+    # this job line came from, set once by Estimate.approve(). Since 21.1
+    # the WO carries no price at all, so this link is how the invoice
+    # finds the price the customer agreed to (Chris/Made, 16 Oct: the
+    # draft invoice uses the APPROVED ESTIMATE price). editable=False:
+    # never settable from the API or Django Admin. Null for job lines
+    # added on the WO itself, and for WOs approved before this field.
+    estimate_line_item = models.ForeignKey(
+        "estimates.EstimateLineItem", on_delete=models.SET_NULL, null=True, blank=True,
+        editable=False, related_name="work_order_job_lines",
+        verbose_name="Baris Estimasi Asal",
+    )
     description = models.CharField(max_length=255, verbose_name="Deskripsi Pekerjaan")
     started_at   = models.DateTimeField(null=True, blank=True, verbose_name="Mulai")
     completed_at = models.DateTimeField(null=True, blank=True, verbose_name="Selesai")
