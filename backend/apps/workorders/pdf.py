@@ -20,7 +20,9 @@ which shapes the layout below:
      (estimasi Rp 200.000)"). That suffix is stripped here before
      printing — see _strip_price_suffix() below — or it would leak
      straight onto the one document Made explicitly said must have
-     none.
+     none. 16 Oct 2026 (Phase 21): Estimate.approve() no longer writes
+     that suffix at all; stripping stays for WorkOrders approved before
+     then, and now also runs in the WO API serializer (apps.workorders.text).
   3. Timing: created/printed the moment "Mulai Dikerjakan" is
      clicked — i.e. only once work_started_at is actually set. The
      view enforces this as a real 409, not just a frontend-hidden
@@ -55,10 +57,17 @@ network access to install xhtml2pdf). Stays inside the same
 well-documented safe subset already proven for the quotation PDF,
 but still genuinely needs one real local render-and-open check.
 """
-import re
 from io import BytesIO
 
 from xhtml2pdf import pisa
+
+# 16 Oct 2026 (Phase 21, Task 21.1) -- the "(estimasi Rp ...)" stripping
+# moved to apps.workorders.text, so the WO API serializer and the
+# customer tracking payload share the one regex with this PDF. Re-exported
+# here under the old private names, so anything that imported them from
+# this module keeps working.
+from .text import PRICE_SUFFIX_RE as _PRICE_SUFFIX_RE  # noqa: F401
+from .text import strip_price_suffix as _strip_price_suffix
 
 INDONESIAN_MONTHS = [
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -73,18 +82,6 @@ STATUS_COLOR = {
     "OPEN": "#4a6d94", "IN_PROGRESS": "#b5502f", "QC": "#b5860b",
     "DONE": "#2e7d4f", "CANCELLED": "#c0392b",
 }
-
-# Matches the exact suffix Estimate.approve() appends to a labor
-# line's description — "(estimasi Rp 200.000)", "(estimasi Rp
-# 1.500.000)", etc. Matched loosely on the "(estimasi Rp ...)" shape
-# rather than hardcoding a specific number format, so it still
-# strips correctly even if that formatting ever changes slightly.
-_PRICE_SUFFIX_RE = re.compile(r"\s*\(estimasi\s+Rp[^)]*\)\s*$", re.IGNORECASE)
-
-
-def _strip_price_suffix(description):
-    return _PRICE_SUFFIX_RE.sub("", description).strip()
-
 
 def _format_date_id(dt):
     """Same dependency-free lookup already proven in
