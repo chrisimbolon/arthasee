@@ -150,11 +150,13 @@ class Estimate(TenantScopedModel):
         Promotes this Estimate into a real WorkOrder. Every part-kind
         line becomes a genuine WorkOrderMaterialLine — the exact
         moment stock actually moves, never before this call. Labor
-        lines have nowhere priced to go on WorkOrder (it only tracks
-        free-text job descriptions), so the quoted price is folded
-        into the description text itself, visible to whoever works
-        the job, rather than inventing a new priced-line concept on a
-        model that's already proven and shouldn't be touched.
+        lines become plain WorkOrderJobLine descriptions with NO price.
+
+        16 Oct 2026 (Phase 21, Task 21.1) -- this used to fold the
+        quoted price into the description ("Tune-up (estimasi Rp
+        350.000)"). Made's rule, 12 Sep note: "Di WO tidak boleh muncul
+        harga!" The quoted price stays on the EstimateLineItem itself,
+        which is where the invoice will read it from.
         """
         # Local import, same cross-app reasoning as every other
         # local import in this project (e.g. WorkOrder.close()'s own
@@ -184,10 +186,9 @@ class Estimate(TenantScopedModel):
             )
             for line in self.line_items.all():
                 if line.kind == "labor":
-                    price_text = f"{line.unit_price:,.0f}".replace(",", ".")
-                    label = f"{line.description} (estimasi Rp {price_text})"
                     WorkOrderJobLine.objects.create(
-                        organization=self.organization, work_order=work_order, description=label,
+                        organization=self.organization, work_order=work_order,
+                        description=line.description,
                     )
                 elif line.kind == "part" and line.part_id:
                     WorkOrderMaterialLine.objects.create(
