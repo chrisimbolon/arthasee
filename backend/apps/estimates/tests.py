@@ -305,11 +305,20 @@ class EstimateApprovalTests(EstimateAPITestBase):
         self.assertEqual(work_order.vehicle, self.vehicle)
         self.assertEqual(WorkOrder.objects.filter(vehicle=self.vehicle).count(), 1)
 
-    def test_labor_line_becomes_a_job_line_with_price_folded_into_description(self):
+    def test_labor_line_becomes_a_job_line_with_no_price(self):
+        """
+        16 Oct 2026 (Phase 21, Task 21.1) -- replaces the old
+        "price folded into description" test. Made's rule (12 Sep note):
+        "Di WO tidak boleh muncul harga!" The job line gets the plain
+        description; the quoted price stays on the EstimateLineItem.
+        """
         work_order = self.estimate.approve(approved_by=self.owner)
         job_line = WorkOrderJobLine.objects.get(work_order=work_order)
-        self.assertIn("Ganti kampas rem", job_line.description)
-        self.assertIn("150.000", job_line.description)
+        self.assertEqual(job_line.description, "Ganti kampas rem")
+        self.assertNotIn("150.000", job_line.description)
+        self.assertNotIn("Rp", job_line.description)
+        labor = self.estimate.line_items.get(kind="labor")
+        self.assertEqual(labor.unit_price, Decimal("150000.00"))
 
     def test_part_line_becomes_a_real_material_line(self):
         work_order = self.estimate.approve(approved_by=self.owner)
