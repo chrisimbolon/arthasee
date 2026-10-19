@@ -189,6 +189,9 @@ class Estimate(TenantScopedModel):
                     WorkOrderJobLine.objects.create(
                         organization=self.organization, work_order=work_order,
                         description=line.description,
+                        # 19 Oct 2026 (Phase 21, Task 21.2) -- the link the
+                        # invoice uses to find this line's agreed price.
+                        estimate_line_item=line,
                     )
                 elif line.kind == "part" and line.part_id:
                     WorkOrderMaterialLine.objects.create(
