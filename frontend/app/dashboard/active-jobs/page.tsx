@@ -21,6 +21,10 @@
 // full historical roster spanning Selesai/Dibatalkan makes "how long
 // has this been running" far less meaningful than it was on a
 // strictly-active-only view.
+//
+// 16 Oct 2026 (Phase 21, Task 21.1) -- the Total column is gone. Made's
+// rule (12 Sep note): "Di WO tidak boleh muncul harga!" The backend no
+// longer sends total/total_is_final either.
 import { InvoiceStatus } from "@/lib/api/invoicing";
 import { WorkOrderMasterListRow, WorkOrderStatus, workOrderMasterListApi } from "@/lib/api/workorders";
 import { Loader2, Search, Wrench } from "lucide-react";
@@ -57,12 +61,6 @@ const PAYMENT_STATUS_COLOR: Record<string, string> = {
 
 function paymentStatusKey(status: InvoiceStatus | null): string {
   return status ?? "DRAFT";
-}
-
-function formatRupiah(value: string | number): string {
-  return new Intl.NumberFormat("id-ID", {
-    style: "currency", currency: "IDR", maximumFractionDigits: 0,
-  }).format(Number(value));
 }
 
 function formatDate(value: string): string {
@@ -144,7 +142,6 @@ export default function ActiveJobsPage() {
               <tr>
                 <th>WO #</th><th>Tanggal</th><th>Pelanggan</th><th>Plat / Kendaraan</th>
                 <th>Mekanik</th><th>Status Pekerjaan</th><th>Status Pembayaran</th>
-                <th style={{ textAlign: "right" }}>Total</th>
               </tr>
             </thead>
             <tbody>
@@ -173,23 +170,6 @@ export default function ActiveJobsPage() {
                       <span style={{ fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 20, color: "#fff", background: PAYMENT_STATUS_COLOR[paymentKey], whiteSpace: "nowrap" }}>
                         {PAYMENT_STATUS_LABEL[paymentKey]}
                       </span>
-                    </td>
-                    <td className="mono" style={{ textAlign: "right" }}>
-                      {wo.total_is_final ? (
-                        formatRupiah(wo.total)
-                      ) : (
-                        <span style={{ color: "var(--steel)" }}>
-                          {formatRupiah(wo.total)}{" "}
-                          {/* 24 Sep 2026 — the asterisk used to point at no explanation
-                              anywhere on this page. A real tooltip instead of a dangling "*". */}
-                          <span
-                            title="Total sementara: hanya suku cadang, dihitung dari harga jual saat ini. Belum termasuk jasa, dan belum final sampai invoice dibuat."
-                            style={{ fontSize: 11, textDecoration: "underline dotted", cursor: "help" }}
-                          >
-                            (Suku Cadang)*
-                          </span>
-                        </span>
-                      )}
                     </td>
                   </tr>
                 );
