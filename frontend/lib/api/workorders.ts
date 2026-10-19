@@ -43,8 +43,8 @@ export interface WorkOrderMaterialLine {
   part_name:          string;
   unit:               string;
   quantity:           string;
-  unit_price_at_time: string;
-  subtotal:           string;
+  // 16 Oct 2026 (Phase 21, Task 21.1) -- unit_price_at_time/subtotal
+  // removed: no price on a Work Order (Made, 12 Sep note).
   created_at:         string;
 }
 
@@ -372,13 +372,8 @@ export interface WorkOrderMasterListRow {
   // yet -- DRAFT/ISSUED/PARTIALLY_PAID/PAID/CANCELLED, the same real
   // values InvoiceStatus already covers elsewhere in this app.
   payment_status:    InvoiceStatus | null;
-  // A real, honest materials-only running subtotal whenever
-  // total_is_final is false (no Invoice exists yet -- labor pricing
-  // genuinely doesn't exist before that point) -- never the eventual
-  // final bill. Becomes the real, frozen Invoice.total the moment
-  // ANY Invoice object exists, even a DRAFT one not yet issued.
-  total:             string;
-  total_is_final:    boolean;
+  // 16 Oct 2026 (Phase 21, Task 21.1) -- total/total_is_final removed:
+  // no price on a Work Order (Made, 12 Sep note).
 }
 
 export const workOrderMasterListApi = {
