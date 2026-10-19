@@ -73,12 +73,27 @@ export interface LaborLinePayload {
   unit_price:  number;
 }
 
+// 19 Oct 2026 (Phase 21, Task 21.2) -- one suggested jasa line for the
+// "Buat Invoice" form. source "estimate" = priced from the approved
+// estimate; "work_order" = added on the WO, no agreed price (unit_price null).
+export interface SuggestedLaborLine {
+  description: string;
+  quantity:    string;
+  unit_price:  string | null;
+  source:      "estimate" | "work_order";
+}
+
 export const invoicesApi = {
   async create(serviceRecordId: string, laborLines: LaborLinePayload[]): Promise<Invoice> {
     const { data } = await api.post(`/api/service-records/${serviceRecordId}/invoice/`, {
       labor_lines: laborLines,
     });
     return data.invoice;
+  },
+  // 19 Oct 2026 (Phase 21, Task 21.2) -- read-only suggestions; creates nothing.
+  async suggestedLaborLines(serviceRecordId: string): Promise<SuggestedLaborLine[]> {
+    const { data } = await api.get(`/api/service-records/${serviceRecordId}/invoice/suggested-lines/`);
+    return data.labor_lines;
   },
   // 15 Sep 2026 -- real, previously-missing global invoice list.
   // Server-side filtering (status/overdue/search) -- no client-side
