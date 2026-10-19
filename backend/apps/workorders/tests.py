@@ -2474,19 +2474,24 @@ class WorkOrderMasterListAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["count"], 0)
 
-    def test_work_order_with_no_invoice_shows_materials_only_non_final_total(self):
+    # 16 Oct 2026 (Phase 21, Task 21.1) -- the two tests below replace
+    # the old "materials-only non-final total" / "final total" pair. Made's
+    # rule (12 Sep note): "Di WO tidak boleh muncul harga!" -- the list no
+    # longer sends total/total_is_final at all; payment_status stays.
+    def test_work_order_with_no_invoice_has_no_total_and_no_payment_status(self):
         wo = self._work_order("BP 6011 AA", status="IN_PROGRESS")
         resp = self.client.get("/api/work-orders/")
         row = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
-        self.assertFalse(row["total_is_final"])
+        self.assertNotIn("total", row)
+        self.assertNotIn("total_is_final", row)
         self.assertIsNone(row["payment_status"])
-        self.assertEqual(Decimal(row["total"]), Decimal("0"))
 
-    def test_work_order_with_invoice_shows_final_total_and_real_payment_status(self):
+    def test_work_order_with_invoice_has_no_total_but_real_payment_status(self):
         wo, invoice = self._invoiced_work_order("BP 6012 AA")
         resp = self.client.get("/api/work-orders/")
         row = next(r for r in resp.data["results"] if r["id"] == str(wo.id))
-        self.assertTrue(row["total_is_final"])
+        self.assertNotIn("total", row)
+        self.assertNotIn("total_is_final", row)
         # DRAFT is the real, correct status immediately after
         # Invoice.objects.create() — never issued/paid yet at this
         # point, matching Invoice's own real default.
