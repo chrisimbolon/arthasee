@@ -74,6 +74,8 @@ interface LaborLine {
   description: string;
   quantity:    string;
   unit_price:  string;
+  // 19 Oct 2026 (Phase 21, Task 21.2) -- where a pre-filled line came from.
+  source?:     "estimate" | "work_order";
 }
 
 function PartUsageDisplay({ record }: { record: ServiceRecord }) {
@@ -98,6 +100,31 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
   ]);
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState<string | null>(null);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(true);
+
+  // 19 Oct 2026 (Phase 21, Task 21.2) -- since 21.1 the WO carries no
+  // price, so the jasa lines are pre-filled from the server: priced from
+  // the approved estimate where one exists (Chris/Made, 16 Oct), blank for
+  // jasa added on the WO. Everything stays editable; nothing is saved
+  // until "Buat Invoice". If the call fails, the form simply starts empty
+  // as before.
+  useEffect(() => {
+    let cancelled = false;
+    invoicesApi.suggestedLaborLines(record.id)
+      .then((lines) => {
+        if (cancelled || lines.length === 0) return;
+        setLaborLines(lines.map((l) => ({
+          key: crypto.randomUUID(),
+          description: l.description,
+          quantity: String(Number(l.quantity) || 1),
+          unit_price: l.unit_price === null ? "" : String(Math.round(Number(l.unit_price))),
+          source: l.source,
+        })));
+      })
+      .catch(() => { /* keep the empty starting row */ })
+      .finally(() => { if (!cancelled) setLoadingSuggestions(false); });
+    return () => { cancelled = true; };
+  }, [record.id]);
 
   const addLine = () => setLaborLines((prev) => [...prev, { key: crypto.randomUUID(), description: "", quantity: "1", unit_price: "" }]);
   const removeLine = (key: string) => setLaborLines((prev) => prev.filter((l) => l.key !== key));
@@ -106,6 +133,14 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // 19 Oct 2026 (Phase 21, Task 21.2) -- a jasa line with a name but no
+    // price used to be dropped silently. Now that lines arrive pre-filled
+    // from the WO, that would quietly leave real work off the bill.
+    const unpriced = laborLines.filter((l) => l.description.trim() && l.unit_price === "");
+    if (unpriced.length > 0) {
+      setError(`Isi harga untuk: ${unpriced.map((l) => l.description).join(", ")} — atau hapus barisnya (isi 0 jika gratis).`);
+      return;
+    }
     setSaving(true); setError(null);
     const payload: LaborLinePayload[] = laborLines
       .filter((l) => l.description && l.unit_price)
@@ -154,15 +189,26 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
 
         <form onSubmit={handleSubmit}>
           <div className="label" style={{ marginBottom: 6 }}>Jasa</div>
+          {loadingSuggestions && (
+            <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 8 }}>Memuat jasa dari work order…</p>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
             {laborLines.map((line) => (
-              <div key={line.key} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div key={line.key}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <input className="input" style={{ flex: 2 }} placeholder="Jasa Servis Rem" value={line.description} onChange={(e) => updateLine(line.key, "description", e.target.value)} />
                 <input className="input" style={{ width: 60 }} type="number" min={1} value={line.quantity} onChange={(e) => updateLine(line.key, "quantity", e.target.value)} />
                 <input className="input" style={{ flex: 1 }} type="number" min={0} placeholder="Harga" value={line.unit_price} onChange={(e) => updateLine(line.key, "unit_price", e.target.value)} />
                 <button type="button" onClick={() => removeLine(line.key)} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}>
                   <Trash2 size={15} />
                 </button>
+              </div>
+              {line.source === "estimate" && (
+                <div style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 3 }}>Harga dari estimasi yang disetujui pelanggan</div>
+              )}
+              {line.source === "work_order" && line.unit_price === "" && (
+                <div style={{ fontSize: 11.5, color: "var(--hazard-dark)", marginTop: 3 }}>Ditambahkan di work order — isi harga, atau hapus jika tidak ditagih</div>
+              )}
               </div>
             ))}
           </div>
