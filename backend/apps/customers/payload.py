@@ -36,8 +36,14 @@ def _three_state_status(entity):
 
 
 def _serialize_job_line(line):
+    # 16 Oct 2026 (Phase 21, Task 21.1) -- WorkOrders approved from an
+    # Estimate before this date carry "(estimasi Rp ...)" in the stored
+    # description. A progress tracker is not a price list; stripped here
+    # so old and new WorkOrders read the same. Local import, same
+    # cross-app convention as elsewhere in this project.
+    from apps.workorders.text import strip_price_suffix
     return {
-        "description": line.description,
+        "description": strip_price_suffix(line.description),
         "status": _three_state_status(line),
         "started_at": line.started_at,
         "completed_at": line.completed_at,
