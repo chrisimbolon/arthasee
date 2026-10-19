@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from .models import (Mechanic, WorkOrder, WorkOrderJobLine,
                      WorkOrderMaterialLine, WorkOrderStage)
+from .text import strip_price_suffix
 
 
 def _user_org_ids(request):
@@ -40,6 +41,17 @@ class WorkOrderJobLineSerializer(serializers.ModelSerializer):
         fields = ["id", "work_order", "stage", "description", "is_done", "started_at", "completed_at", "is_locked", "created_at"]
         read_only_fields = ["id", "is_done", "started_at", "completed_at", "is_locked", "created_at"]
 
+    def to_representation(self, instance):
+        # 16 Oct 2026 (Phase 21, Task 21.1) -- Made's rule, 12 Sep note:
+        # "Di WO tidak boleh muncul harga!" WorkOrders approved from an
+        # Estimate before this date carry "(estimasi Rp ...)" inside the
+        # stored description. Stripped on the way out, never rewritten in
+        # the database -- the same regex the job ticket PDF already uses.
+        data = super().to_representation(instance)
+        if data.get("description"):
+            data["description"] = strip_price_suffix(data["description"])
+        return data
+
     def validate_stage(self, stage):
         """
         A job line's stage must belong to the SAME WorkOrder it's
@@ -62,18 +74,20 @@ class WorkOrderJobLineSerializer(serializers.ModelSerializer):
 class WorkOrderMaterialLineSerializer(serializers.ModelSerializer):
     part_name = serializers.CharField(source="part.name", read_only=True)
     unit      = serializers.CharField(source="part.unit", read_only=True)
-    subtotal  = serializers.SerializerMethodField()
 
+    # 16 Oct 2026 (Phase 21, Task 21.1) -- unit_price_at_time and subtotal
+    # removed from the API, not just hidden in the UI. Made's rule (12 Sep
+    # note): no price anywhere on a Work Order. unit_price_at_time is also
+    # the part's COST price (since the 24 Aug 2026 ledger fix), so this was
+    # showing the shop's purchase cost on the WO screen. The model field
+    # itself is unchanged -- PartConsumed/WorkOrderCompleted still read it.
     class Meta:
         model  = WorkOrderMaterialLine
         fields = [
             "id", "work_order", "part", "part_name", "unit",
-            "quantity", "unit_price_at_time", "subtotal", "created_at",
+            "quantity", "created_at",
         ]
-        read_only_fields = ["id", "part_name", "unit", "unit_price_at_time", "subtotal", "created_at"]
-
-    def get_subtotal(self, obj):
-        return obj.quantity * obj.unit_price_at_time
+        read_only_fields = ["id", "part_name", "unit", "created_at"]
 
     def validate_part(self, part):
         request = self.context.get("request")
