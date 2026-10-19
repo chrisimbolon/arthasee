@@ -878,8 +878,9 @@ function MaterialLinesSection({ wo, catalog, onUpdated }: { wo: WorkOrder; catal
         {wo.material_lines.map((line) => (
           <div key={line.id} className="mono" style={{ fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>{line.part_name} × {line.quantity} {line.unit}</span>
+            {/* 16 Oct 2026 (Phase 21, Task 21.1) -- no price on a Work Order
+                (Made, 12 Sep note). The Rp column showed the part's COST. */}
             <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              Rp {Number(line.subtotal).toLocaleString("id-ID")}
               {editable && (
                 <button onClick={() => removeLine(line.id)} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}>
                   <Trash2 size={14} />
