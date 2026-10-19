@@ -176,6 +176,40 @@ class InvoiceCreateView(TenantScopedAPIView):
         return qs.filter(pk=service_record_id).select_related("vehicle__customer").first()
 
 
+class InvoiceSuggestedLaborLinesView(TenantScopedAPIView):
+    """
+    GET /api/service-records/<service_record_id>/invoice/suggested-lines/
+
+    19 Oct 2026 (Phase 21, Task 21.2). Read-only: suggests the jasa
+    lines for the "Buat Invoice" form, priced from the approved
+    Estimate (Chris/Made, 16 Oct). Writes nothing -- the form shows
+    them editable, and only InvoiceCreateView's POST creates anything.
+    Same "suggested, never automatic" shape as Cheat Sheet section 15.
+    See apps.invoicing.suggestions for the matching rules.
+    """
+    model = Invoice
+
+    def get(self, request, service_record_id):
+        # Same tenant-scoped lookup as InvoiceCreateView -- reused, not copied.
+        service_record = InvoiceCreateView._get_service_record(self, request, service_record_id)
+        if service_record is None:
+            return Response(
+                {"success": False, "message": "Catatan servis tidak ditemukan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        from .suggestions import suggested_labor_lines
+        lines = [
+            {
+                **line,
+                # Strings, never floats, for money on the wire (Cheat Sheet section 5).
+                "quantity": str(line["quantity"]),
+                "unit_price": None if line["unit_price"] is None else str(line["unit_price"]),
+            }
+            for line in suggested_labor_lines(service_record)
+        ]
+        return Response({"success": True, "labor_lines": lines})
+
+
 class InvoiceDetailView(TenantScopedAPIView):
     """
     GET /api/invoices/<id>/ — read-only. Invoices are frozen
