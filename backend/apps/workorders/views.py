@@ -5,7 +5,6 @@ from datetime import date, timedelta
 
 from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
-from apps.inventory.models import StockAdjustment
 from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse
@@ -813,13 +812,19 @@ class WorkOrderMaterialLineDetailView(TenantScopedAPIView):
         reason = request.data.get("reason")
         if reason not in ("correction", "customer_cancelled_part"):
             reason = "correction"
-        with transaction.atomic():
-            StockAdjustment.objects.create(
-                organization=line.organization, part=line.part,
-                quantity_change=line.quantity, reason=reason,
-                notes=f"Baris material dihapus dari WO {line.work_order.number}",
-            )
-            line.delete()
+        # 20 Oct 2026 (Phase 21, Task 21.2b) -- return_to_stock() puts the
+        # stock back AND reverses the line's PartConsumed posting (finding
+        # F6). A closed period raises ValueError before anything is
+        # written; shown to the user as a 409, same as the other WO checks.
+        try:
+            with transaction.atomic():
+                line.return_to_stock(
+                    reason=reason,
+                    notes=f"Baris material dihapus dari WO {line.work_order.number}",
+                )
+                line.delete()
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_409_CONFLICT)
         return Response({"success": True, "message": "Baris material dihapus, stok dikembalikan."})
 
 
