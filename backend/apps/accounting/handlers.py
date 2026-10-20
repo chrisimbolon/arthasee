@@ -72,6 +72,11 @@ class AccountingEventHandler(EventHandler):
         # find. See TaxRemittanceTests.test_outbox_row_actually_posts_a_journal_entry
         # in apps/payments/tests.py for the regression guard.
         "TaxRemittanceRecorded",
+        # 20 Oct 2026 (Phase 21, Task 21.2b) -- place #3 of 4, added in
+        # the same commit as the event itself. HandlerRegistration
+        # CompletenessTests (apps/core/tests.py) now fails the suite if a
+        # posting_engine event is ever missing from this tuple again.
+        "MaterialLineReversed",
     )
 
     def handle(self, event: DomainEvent) -> None:
