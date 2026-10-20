@@ -43,7 +43,7 @@ from apps.payments.events import (InternalCashMutationRecorded,
 from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
                                     QuickPurchaseRecorded,
                                     SupplierInvoiceReceived)
-from apps.workorders.events import WorkOrderCompleted
+from apps.workorders.events import MaterialLineReversed, WorkOrderCompleted
 
 
 # 9 Oct 2026 — PPh 23 + PPh Final UMKM patch. A real, literal
@@ -152,6 +152,18 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": AccountRole.MATERIAL_COGS, "side": "debit",  "amount": event.amount},
                 {"account_code": AccountRole.WIP,           "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, MaterialLineReversed):
+        # 20 Oct 2026 (Phase 21, Task 21.2b) -- the exact mirror of
+        # PartConsumed above, same amount (quantity x cost), so the pair
+        # nets to zero. See MaterialLineReversed's own docstring (F6).
+        return {
+            "memo": f"Part returned to stock ({event.reason}) — material line {event.material_line_id}",
+            "lines": _lines(
+                {"account_code": AccountRole.INVENTORY, "side": "debit",  "amount": event.amount},
+                {"account_code": AccountRole.WIP,       "side": "credit", "amount": event.amount},
             ),
         }
 
