@@ -555,16 +555,19 @@ class WorkOrder(TenantScopedModel):
         with its own reason ("work_order_cancelled") so the audit
         trail honestly shows why stock moved back, rather than
         looking like an unexplained manual correction.
+
+        20 Oct 2026 (Phase 21, Task 21.2b) -- each line now goes through
+        WorkOrderMaterialLine.return_to_stock(), which ALSO reverses the
+        line's PartConsumed posting (Dr Inventory / Cr WIP). Before
+        this, cancelling left the parts' cost stuck in WIP (finding F6).
+        The lines themselves stay, as history of what was on the job.
         """
         if self.status in ("DONE", "CANCELLED"):
             raise ValueError("Work order ini tidak bisa dibatalkan.")
 
         with transaction.atomic():
             for line in self.material_lines.select_related("part").all():
-                StockAdjustment.objects.create(
-                    organization=self.organization,
-                    part=line.part,
-                    quantity_change=line.quantity,
+                line.return_to_stock(
                     reason="work_order_cancelled",
                     notes=f"Pembatalan Work Order {self.number}",
                 )
@@ -980,4 +983,51 @@ class WorkOrderMaterialLine(TenantScopedModel):
                 quantity=self.quantity,
                 unit_price_at_time=self.unit_price_at_time,
                 amount=self.quantity * self.unit_price_at_time,
+            ))
+
+    def return_to_stock(self, *, reason, notes):
+        """
+        20 Oct 2026 (Phase 21, Task 21.2b) -- the ONE way a material
+        line's part goes back to stock while its WorkOrder is open.
+        Used by WorkOrder.cancel() and WorkOrderMaterialLineDetailView.
+        delete(). Does two things, together or not at all:
+
+          1. puts the stock back -- the same StockAdjustment as before;
+          2. publishes MaterialLineReversed, which posts Dr Inventory
+             (1301) / Cr WIP (1302) at this line's own
+             unit_price_at_time -- exactly undoing its PartConsumed.
+
+        Does NOT delete the line: cancel() keeps lines as history; the
+        delete view deletes it right after this, in the same
+        transaction. Raises ValueError (writing nothing) if today's
+        accounting period is closed -- same synchronous period check
+        the line's own creation already runs.
+
+        Deliberately NOT behind the readiness gate (Cheat Sheet section
+        13, decided explicitly): this only undoes a posting that
+        already happened, and blocking a correction would be worse than
+        allowing it.
+        """
+        from apps.accounting.models import AccountingPeriod
+        from apps.accounting.periods import safe_local_date
+        from apps.core.events.bus import default_bus
+        from apps.workorders.events import MaterialLineReversed
+
+        today = safe_local_date(timezone.now())
+        with transaction.atomic():
+            AccountingPeriod.assert_open_for_posting(self.organization, today)
+            StockAdjustment.objects.create(
+                organization=self.organization, part=self.part,
+                quantity_change=self.quantity, reason=reason, notes=notes,
+            )
+            default_bus.publish(MaterialLineReversed(
+                organization_id=self.organization_id,
+                part_id=self.part_id,
+                work_order_id=self.work_order_id,
+                material_line_id=self.id,
+                quantity=self.quantity,
+                unit_price_at_time=self.unit_price_at_time,
+                amount=self.quantity * self.unit_price_at_time,
+                reason=reason,
+                transaction_date=today,
             ))
