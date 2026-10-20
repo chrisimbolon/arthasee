@@ -393,3 +393,43 @@ class EventRegistryCompletenessTests(TestCase):
             f"Outbox row for any of these could never be replayed. Add each one to "
             f"that registry's own dict: {missing}",
         )
+
+
+class HandlerRegistrationCompletenessTests(TestCase):
+    """
+    20 Oct 2026 (Phase 21, Task 21.2b) -- closes the one gap
+    EventRegistryCompletenessTests above leaves open: place #3 of the
+    four (Cheat Sheet section 4), AccountingEventHandler.handles.
+
+    Real incident it guards against: TaxRemittanceRecorded (Phase 20,
+    9 Oct 2026) was in events.py, posting_engine.py and registry.py but
+    NOT in this tuple. With zero subscribers the dispatcher marks the
+    Outbox row PROCESSED, not FAILED -- so it posted nothing, silently,
+    for six days. Same discovery method as the test above: every
+    DomainEvent subclass posting_engine.py imports must be in the
+    handler's tuple, or the suite fails.
+    """
+
+    def test_every_event_type_posting_engine_handles_has_a_live_handler(self):
+        from apps.accounting import posting_engine
+        from apps.accounting.handlers import AccountingEventHandler
+
+        event_classes = [
+            obj for _, obj in vars(posting_engine).items()
+            if inspect.isclass(obj) and issubclass(obj, DomainEvent) and obj is not DomainEvent
+        ]
+        self.assertGreater(len(event_classes), 0, "Found zero DomainEvent subclasses in posting_engine.py.")
+
+        missing = []
+        for event_cls in event_classes:
+            event_type_value = next(f for f in dataclasses.fields(event_cls) if f.name == "event_type").default
+            if event_type_value not in AccountingEventHandler.handles:
+                missing.append(event_type_value)
+
+        self.assertEqual(
+            missing, [],
+            f"posting_engine.py has a posting rule for these event type(s), but "
+            f"AccountingEventHandler.handles (apps/accounting/handlers.py) does not "
+            f"list them -- they would be marked PROCESSED and post NOTHING, silently. "
+            f"Add each one to that tuple: {missing}",
+        )
