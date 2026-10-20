@@ -12,6 +12,7 @@ elsewhere.
 """
 import uuid
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 from apps.core.events.interfaces import DomainEvent
@@ -50,3 +51,40 @@ class WorkOrderCompleted(DomainEvent):
     amount: Decimal
     material_line_count: int
     event_type: str = field(init=False, default="WorkOrderCompleted", kw_only=True)
+
+
+@dataclass(frozen=True)
+class MaterialLineReversed(DomainEvent):
+    """
+    20 Oct 2026 (Phase 21, Task 21.2b) -- the exact mirror of
+    PartConsumed. Fired when a WorkOrderMaterialLine's part goes back to
+    stock while its WorkOrder is still open: the line is deleted
+    (WorkOrderMaterialLineDetailView.delete()) or the whole WorkOrder is
+    cancelled (WorkOrder.cancel()). Both go through
+    WorkOrderMaterialLine.return_to_stock().
+
+    Posting rule: Dr Inventory (1301) / Cr WIP (1302), both for
+    `amount` -- the SAME quantity x unit_price_at_time (cost) the
+    original PartConsumed posted, so the two cancel out exactly.
+
+    Why it exists (finding F6, 16 Oct 2026): before this, both paths put
+    the stock back with a StockAdjustment, which posts nothing. The
+    original PartConsumed (Dr WIP / Cr Inventory) was never reversed, so
+    every removed part left WIP overstated and Inventory understated.
+    Read-only production audit, 19 Oct 2026: never triggered yet at any
+    shop, so no data correction was needed -- code fix only.
+
+    transaction_date: frozen at creation (Cheat Sheet section 4), the
+    shop's local calendar day of the removal.
+    reason: the StockAdjustment reason that went with it --
+    "correction", "customer_cancelled_part" or "work_order_cancelled".
+    """
+    part_id: uuid.UUID
+    work_order_id: uuid.UUID
+    material_line_id: uuid.UUID
+    quantity: Decimal
+    unit_price_at_time: Decimal
+    amount: Decimal
+    reason: str
+    transaction_date: date
+    event_type: str = field(init=False, default="MaterialLineReversed", kw_only=True)
