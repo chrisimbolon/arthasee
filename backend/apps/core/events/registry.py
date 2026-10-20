@@ -110,7 +110,7 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
     from apps.purchasing.events import (GoodsReceived, PurchaseReturned,
                                         QuickPurchaseRecorded,
                                         SupplierInvoiceReceived)
-    from apps.workorders.events import WorkOrderCompleted
+    from apps.workorders.events import MaterialLineReversed, WorkOrderCompleted
 
     registry: dict[str, type[DomainEvent]] = {
         "PartConsumed": PartConsumed,
@@ -144,6 +144,9 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
         # row can actually be replayed, same discipline every entry
         # above already follows.
         "TaxRemittanceRecorded": TaxRemittanceRecorded,
+        # 20 Oct 2026 (Phase 21, Task 21.2b) -- place #4 of 4, added with
+        # the event itself, before it has ever failed.
+        "MaterialLineReversed": MaterialLineReversed,
     }
     try:
         return registry[event_type]
