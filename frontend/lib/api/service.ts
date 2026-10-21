@@ -486,6 +486,10 @@ export interface ServiceItem {
   is_active:     boolean;
   // Only the classes with their own price; a missing class uses default_price.
   class_prices:  Partial<Record<VehicleClass, string>>;
+  // 21 Oct 2026 (Phase 21, Task 21.4) — only when listed for one vehicle
+  // (serviceItemsApi.list({ vehicleId })): this jasa's price for it.
+  price_for_vehicle?: string | null;
+  price_source?:      "class" | "default" | null;
   created_at:    string;
   updated_at:    string;
 }
@@ -508,11 +512,18 @@ export interface ServiceItemPayload {
 }
 
 export const serviceItemsApi = {
-  async list(opts?: { includeInactive?: boolean }): Promise<{ results: ServiceItem[]; can_edit: boolean }> {
+  // vehicleId (21 Oct 2026, Task 21.4): also returns each jasa's price for
+  // that vehicle, and the vehicle's class ("" when it has none).
+  async list(opts?: { includeInactive?: boolean; vehicleId?: string }): Promise<{
+    results: ServiceItem[]; can_edit: boolean; vehicle_class: string | null;
+  }> {
     const { data } = await api.get("/api/service-items/", {
-      params: { include_inactive: opts?.includeInactive ? "true" : undefined },
+      params: {
+        include_inactive: opts?.includeInactive ? "true" : undefined,
+        vehicle: opts?.vehicleId || undefined,
+      },
     });
-    return { results: data.results, can_edit: data.can_edit };
+    return { results: data.results, can_edit: data.can_edit, vehicle_class: data.vehicle_class ?? null };
   },
   async create(payload: ServiceItemPayload): Promise<ServiceItem> {
     const { data } = await api.post("/api/service-items/", payload);

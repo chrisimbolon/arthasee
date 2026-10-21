@@ -16,6 +16,8 @@ export interface EstimateLineItem {
   unit_price:  string;
   part:        string | null;
   part_name:   string | null;
+  // 21 Oct 2026 (Phase 21, Task 21.4) — the Daftar Jasa item, if picked from it.
+  service_item: string | null;
   subtotal:    string;
   created_at:  string;
 }
@@ -101,6 +103,7 @@ export const estimatesApi = {
 export const estimateLineItemsApi = {
   async create(estimateId: string, payload: {
     kind: EstimateLineKind; description: string; quantity?: number; unit_price: number; part?: string;
+    service_item?: string;
   }): Promise<EstimateLineItem> {
     const { data } = await api.post(`/api/estimates/${estimateId}/line-items/`, payload);
     return data.line_item;

@@ -80,7 +80,11 @@ export interface SuggestedLaborLine {
   description: string;
   quantity:    string;
   unit_price:  string | null;
-  source:      "estimate" | "work_order";
+  // 21 Oct 2026 (Task 21.4): "price_list" = added on the WO from Daftar Jasa,
+  // priced for the vehicle's class (price_source "class") or the default.
+  source:      "estimate" | "work_order" | "price_list";
+  price_source?:  "class" | "default";
+  vehicle_class?: string;
 }
 
 export const invoicesApi = {

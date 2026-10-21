@@ -15,6 +15,8 @@ export interface WorkOrderJobLine {
   // repairs never use stages at all). See WorkOrderStage below.
   stage:       string | null;
   description: string;
+  // 21 Oct 2026 (Phase 21, Task 21.4) — the Daftar Jasa item, if picked from it.
+  service_item?: string | null;
   // Made's own confirmed handwritten note, 4 Aug: "Pekerjaan
   // bertahap: jam mulai – jam selesai" — real per-step timing now,
   // mirroring WorkOrderStage's own exact shape. is_done is a
@@ -234,9 +236,10 @@ export const workOrdersApi = {
 export const workOrderJobLinesApi = {
   // stageId is optional — omit it entirely for a routine, unstaged
   // job line, exactly as this already worked before stages existed.
-  async create(workOrderId: string, description: string, stageId?: string): Promise<WorkOrderJobLine> {
+  async create(workOrderId: string, description: string, stageId?: string, serviceItemId?: string): Promise<WorkOrderJobLine> {
     const { data } = await api.post(`/api/work-orders/${workOrderId}/job-lines/`, {
       description, ...(stageId ? { stage: stageId } : {}),
+      ...(serviceItemId ? { service_item: serviceItemId } : {}),
     });
     return data.job_line;
   },
