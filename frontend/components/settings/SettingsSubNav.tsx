@@ -13,6 +13,8 @@ import { usePathname } from "next/navigation";
 const SUBNAV = [
   { href: "/dashboard/settings/organization", label: "Profil Bengkel" },
   { href: "/dashboard/settings/accounting-period", label: "Periode Akuntansi" },
+  // 20 Oct 2026 (Phase 21, Task 21.3) — Made's per-class jasa prices.
+  { href: "/dashboard/settings/service-items", label: "Daftar Jasa" },
 ];
 
 export default function SettingsSubNav() {
