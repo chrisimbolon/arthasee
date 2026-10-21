@@ -2,7 +2,7 @@
 // =============================================================================
 // === frontend/app/dashboard/vehicles/page.tsx ===
 // =============================================================================
-import { Customer, customersApi, Vehicle, vehiclesApi } from "@/lib/api/service";
+import { Customer, customersApi, VEHICLE_CLASSES, Vehicle, vehiclesApi } from "@/lib/api/service";
 import { formatDateShortID } from "@/lib/format";
 import { AlertTriangle, Calendar, Check, ChevronDown, Loader2, Plus, Search, X } from "lucide-react";
 import Link from "next/link";
@@ -239,8 +239,13 @@ function AddVehicleModal({ customers, onClose, onCreated }: {
             <>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
                 <div>
-                  <label className="label">Jenis/Model</label>
-                  <input className="input" value={form.body_style} onChange={(e) => setForm({ ...form, body_style: e.target.value })} placeholder="Sedan, SUV, MPV" />
+                  {/* 20 Oct 2026 (Phase 21, Task 21.3) — body_style is the price
+                      class for Daftar Jasa, so it's a fixed list now. */}
+                  <label className="label">Jenis Bodi (kelas harga jasa)</label>
+                  <select className="input" value={form.body_style} onChange={(e) => setForm({ ...form, body_style: e.target.value })}>
+                    <option value="">— Pilih kelas —</option>
+                    {VEHICLE_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
                 </div>
                 <div>
                   <label className="label">Warna</label>
