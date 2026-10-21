@@ -1,7 +1,8 @@
 from django.contrib import admin
 
-from .models import (Customer, CustomerFieldChange, ServiceRecord, Vehicle,
-                     VehicleFieldChange)
+from .models import (Customer, CustomerFieldChange, ServiceItem,
+                     ServiceItemChange, ServiceItemPrice, ServiceRecord,
+                     Vehicle, VehicleFieldChange)
 
 
 @admin.register(Customer)
@@ -74,3 +75,51 @@ class VehicleFieldChangeAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False    
+
+
+# 20 Oct 2026 (Phase 21, Task 21.3) — Daftar Jasa is read-only in Admin
+# (Cheat Sheet section 11, both questions): every price change must go
+# through ServiceItem.record()/apply_edit(), which write the change
+# history — an Admin edit would silently skip it.
+class ServiceItemPriceInline(admin.TabularInline):
+    model = ServiceItemPrice
+    extra = 0
+    can_delete = False
+    readonly_fields = ("body_style", "price")
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ServiceItem)
+class ServiceItemAdmin(admin.ModelAdmin):
+    list_display  = ("name", "organization", "default_price", "is_active", "updated_at")
+    list_filter   = ("is_active", "organization")
+    search_fields = ("name",)
+    inlines       = (ServiceItemPriceInline,)
+    readonly_fields = (
+        "organization", "name", "default_price", "is_active", "created_by", "created_at", "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ServiceItemChange)
+class ServiceItemChangeAdmin(admin.ModelAdmin):
+    list_display  = ("service_item", "field_label", "old_value", "new_value", "changed_by", "changed_at")
+    list_filter   = ("organization",)
+    search_fields = ("service_item__name", "field_label")
+    ordering      = ("-changed_at",)
+    readonly_fields = (
+        "organization", "service_item", "field_label", "old_value", "new_value", "changed_by", "changed_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
