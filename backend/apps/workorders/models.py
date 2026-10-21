@@ -792,6 +792,15 @@ class WorkOrderJobLine(TenantScopedModel):
         editable=False, related_name="work_order_job_lines",
         verbose_name="Baris Estimasi Asal",
     )
+    # 21 Oct 2026 (Phase 21, Task 21.4) -- the Daftar Jasa item this job line
+    # is, if it was picked from the list (on the WO, or carried from the
+    # estimate by approve()). No price is ever stored or shown on the WO;
+    # the invoice uses this to price a jasa that has no estimate price
+    # (apps.invoicing.suggestions, rule 4).
+    service_item = models.ForeignKey(
+        "service.ServiceItem", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="work_order_job_lines", verbose_name="Jasa (Daftar Jasa)",
+    )
     description = models.CharField(max_length=255, verbose_name="Deskripsi Pekerjaan")
     started_at   = models.DateTimeField(null=True, blank=True, verbose_name="Mulai")
     completed_at = models.DateTimeField(null=True, blank=True, verbose_name="Selesai")

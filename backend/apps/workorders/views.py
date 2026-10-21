@@ -395,7 +395,11 @@ class WorkOrderJobLineListView(TenantScopedAPIView):
             )
         payload = dict(request.data)
         payload["work_order"] = work_order_id
-        serializer = WorkOrderJobLineSerializer(data=payload)
+        # 21 Oct 2026 (Phase 21, Task 21.4b) -- request context added: without
+        # it the serializer's tenant checks (validate_service_item) skip
+        # themselves, so a job line could be linked to ANOTHER shop's Daftar
+        # Jasa item. Caught by test_job_line_from_another_shops_jasa_is_rejected.
+        serializer = WorkOrderJobLineSerializer(data=payload, context={"request": request})
         if serializer.is_valid():
             line = serializer.save()
             return Response(

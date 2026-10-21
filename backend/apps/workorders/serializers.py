@@ -38,7 +38,7 @@ class WorkOrderJobLineSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = WorkOrderJobLine
-        fields = ["id", "work_order", "stage", "description", "is_done", "started_at", "completed_at", "is_locked", "created_at"]
+        fields = ["id", "work_order", "stage", "description", "service_item", "is_done", "started_at", "completed_at", "is_locked", "created_at"]
         read_only_fields = ["id", "is_done", "started_at", "completed_at", "is_locked", "created_at"]
 
     def to_representation(self, instance):
@@ -51,6 +51,18 @@ class WorkOrderJobLineSerializer(serializers.ModelSerializer):
         if data.get("description"):
             data["description"] = strip_price_suffix(data["description"])
         return data
+
+    def validate_service_item(self, service_item):
+        # 21 Oct 2026 (Phase 21, Task 21.4) -- a jasa from another shop's
+        # Daftar Jasa is "not found", same as every other tenant check here.
+        if service_item is None:
+            return service_item
+        request = self.context.get("request")
+        if request is None or request.user.role == "super_admin":
+            return service_item
+        if service_item.organization_id not in _user_org_ids(request):
+            raise serializers.ValidationError("Jasa tidak ditemukan di Daftar Jasa.")
+        return service_item
 
     def validate_stage(self, stage):
         """
