@@ -5,8 +5,9 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from .models import (Customer, CustomerFieldChange, ServiceRecord, Vehicle,
-                     VehicleFieldChange)
+from .models import (VEHICLE_CLASSES, Customer, CustomerFieldChange,
+                     ServiceItem, ServiceItemChange, ServiceRecord, Vehicle,
+                     VehicleFieldChange, normalise_vehicle_class)
 
 
 def _user_org_ids(request):
@@ -232,7 +233,56 @@ class VehicleSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Pelanggan tidak ditemukan.")
         return customer
 
+    def validate_body_style(self, value):
+        """
+        20 Oct 2026 (Phase 21, Task 21.3) — body_style is now the vehicle's
+        price class for Daftar Jasa, so it must be one of VEHICLE_CLASSES
+        (or blank). Spelling is normalised ("suv" -> "SUV").
+
+        Old free-text values already in production ("Compact", "edan" —
+        19 Oct audit) are tolerated ONLY when sent back unchanged, so
+        editing such a vehicle's colour or KM never fails because of its
+        old class. Picking a class from the dropdown replaces it.
+        """
+        value = (value or "").strip()
+        if not value:
+            return ""
+        canonical = normalise_vehicle_class(value)
+        if canonical:
+            return canonical
+        if self.instance is not None and value == self.instance.body_style:
+            return value
+        raise serializers.ValidationError(
+            f"Pilih salah satu kelas: {', '.join(VEHICLE_CLASSES)} — atau kosongkan."
+        )
+
 
 class VehicleListSerializer(VehicleSerializer):
     class Meta(VehicleSerializer.Meta):
         fields = [f for f in VehicleSerializer.Meta.fields if f != "service_records"]
+
+
+# ── Daftar Jasa — Phase 21, Task 21.3 (20 Oct 2026) ─────────────────────
+# Read-only shapes. Writes go through ServiceItem.record()/apply_edit()
+# in ServiceItemListView/ServiceItemDetailView, never through a serializer
+# save(), so the change history can't be skipped.
+class ServiceItemSerializer(serializers.ModelSerializer):
+    # {"SUV": "400000.00", ...} — only classes that have their own price.
+    class_prices = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = ServiceItem
+        fields = ["id", "name", "default_price", "is_active", "class_prices", "created_at", "updated_at"]
+        read_only_fields = fields
+
+    def get_class_prices(self, obj):
+        return {row.body_style: str(row.price) for row in obj.class_prices.all()}
+
+
+class ServiceItemChangeSerializer(serializers.ModelSerializer):
+    changed_by_name = serializers.CharField(source="changed_by.full_name", read_only=True, default=None)
+
+    class Meta:
+        model  = ServiceItemChange
+        fields = ["id", "field_label", "old_value", "new_value", "changed_by_name", "changed_at"]
+        read_only_fields = fields
