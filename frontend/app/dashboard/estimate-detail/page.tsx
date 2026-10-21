@@ -10,7 +10,8 @@ import {
   Estimate, EstimateLineKind, EstimateRejectionReason, estimateLineItemsApi, estimatesApi,
 } from "@/lib/api/estimates";
 import { organizationsApi } from "@/lib/api/organizations";
-import { Part, partsApi } from "@/lib/api/service";
+import JasaSearchInput, { priceLabel } from "@/components/service/JasaSearchInput";
+import { Part, ServiceItem, partsApi, serviceItemsApi } from "@/lib/api/service";
 import { ReadinessBlockedError, readinessBlockFromError } from "@/lib/readiness";
 import { ArrowLeft, Download, Loader2, Plus, Printer, Trash2 } from "lucide-react";
 import Link from "next/link";
@@ -297,10 +298,17 @@ const DiagnosisCard = forwardRef<FieldCardHandle, { estimate: Estimate; onUpdate
   );
 });
 
-function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate; catalog: Part[]; onUpdated: () => void }) {
+function LineItemsSection({ estimate, catalog, serviceItems, vehicleClass, onUpdated }: {
+  estimate: Estimate; catalog: Part[]; serviceItems: ServiceItem[]; vehicleClass: string; onUpdated: () => void;
+}) {
   const editable = estimate.status === "PENDING";
   const [kind, setKind] = useState<EstimateLineKind>("labor");
   const [description, setDescription] = useState("");
+  // 21 Oct 2026 (Phase 21, Task 21.4) — the Daftar Jasa item picked in the
+  // jasa search box, if any. Cleared as soon as the text no longer matches
+  // its name (then it's a free-text jasa again). The price it pre-fills
+  // stays editable (Chris, 21 Oct: don't lock).
+  const [serviceItem, setServiceItem] = useState<ServiceItem | null>(null);
   const [partId, setPartId] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [unitPrice, setUnitPrice] = useState("");
@@ -345,7 +353,18 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
   // unrelated part's price was showing a moment ago.
   const handleKindChange = (newKind: EstimateLineKind) => {
     setKind(newKind);
-    setPartId(""); setDescription(""); setUnitPrice(""); setSelectedCostPrice(null);
+    setPartId(""); setDescription(""); setUnitPrice(""); setSelectedCostPrice(null); setServiceItem(null);
+  };
+
+  const handleJasaTyped = (text: string) => {
+    setDescription(text);
+    if (serviceItem && text !== serviceItem.name) setServiceItem(null);
+  };
+
+  const handleJasaPicked = (item: ServiceItem) => {
+    setDescription(item.name);
+    setServiceItem(item);
+    setUnitPrice(String(Math.round(Number(item.price_for_vehicle ?? item.default_price))));
   };
 
   const addLine = async () => {
@@ -356,8 +375,9 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
       await estimateLineItemsApi.create(estimate.id, {
         kind, description: kind === "part" ? (catalog.find((p) => p.id === partId)?.name ?? description) : description,
         quantity: Number(quantity) || 1, unit_price: Number(unitPrice), part: kind === "part" ? partId : undefined,
+        service_item: kind === "labor" && serviceItem ? serviceItem.id : undefined,
       });
-      setDescription(""); setPartId(""); setQuantity("1"); setUnitPrice("");
+      setDescription(""); setPartId(""); setQuantity("1"); setUnitPrice(""); setServiceItem(null);
       onUpdated();
     } finally {
       setSaving(false);
@@ -401,7 +421,11 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
               {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.current_stock} {p.unit})</option>)}
             </select>
           ) : (
-            <input className="input" style={{ flex: 1, minWidth: 160 }} placeholder="Deskripsi jasa" value={description} onChange={(e) => setDescription(e.target.value)} />
+            <JasaSearchInput
+              style={{ flex: 1, minWidth: 160 }} placeholder="Ketik jasa, mis. Ganti Oli"
+              value={description} onChange={handleJasaTyped} onPick={handleJasaPicked}
+              items={serviceItems} showPrices vehicleClass={vehicleClass}
+            />
           )}
           <input className="input" style={{ width: 60 }} type="number" min={1} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
           <input
@@ -432,6 +456,13 @@ function LineItemsSection({ estimate, catalog, onUpdated }: { estimate: Estimate
           accounting-integrity guardrail — a warranty replacement or a
           deliberate goodwill price is a real, legitimate reason to override
           this, and only the person entering the line can make that call. */}
+      {/* 21 Oct 2026 (Phase 21, Task 21.4) — where the pre-filled jasa price came from. */}
+      {editable && kind === "labor" && serviceItem && (
+        <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 6 }}>
+          Dari Daftar Jasa: {priceLabel(serviceItem, vehicleClass)} — harga boleh diubah.
+        </div>
+      )}
+
       {editable && kind === "part" && selectedCostPrice !== null && unitPrice !== "" && Number(unitPrice) <= selectedCostPrice && (
         <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 6 }}>
           Harga di bawah atau sama dengan HPP ({money(String(selectedCostPrice))}) — bengkel tidak akan untung dari part ini.
@@ -467,6 +498,17 @@ function EstimateDetailContent() {
   const load = () => estimatesApi.get(estimateId).then(setEstimate).finally(() => setLoading(false));
   useEffect(() => { if (estimateId) load(); }, [estimateId]);
   useEffect(() => { partsApi.list().then(setCatalog); }, []);
+  // 21 Oct 2026 (Phase 21, Task 21.4) — Daftar Jasa, priced for THIS vehicle.
+  // A failure just leaves the jasa box as plain free text, as before.
+  const [serviceItems, setServiceItems] = useState<ServiceItem[]>([]);
+  const [vehicleClass, setVehicleClass] = useState("");
+  const vehicleId = estimate?.vehicle;
+  useEffect(() => {
+    if (!vehicleId) return;
+    serviceItemsApi.list({ vehicleId })
+      .then((res) => { setServiceItems(res.results); setVehicleClass(res.vehicle_class ?? ""); })
+      .catch(() => setServiceItems([]));
+  }, [vehicleId]);
   useEffect(() => {
     organizationsApi.mine().then((res) => {
       if (res) { setOrgName(res.organization.name); setOrgAddress(res.organization.address); }
@@ -635,7 +677,7 @@ function EstimateDetailContent() {
       <div className="no-print">
         <OdometerCard ref={odometerRef} estimate={estimate} onUpdated={load} />
         <DiagnosisCard ref={diagnosisRef} estimate={estimate} onUpdated={load} />
-        <LineItemsSection estimate={estimate} catalog={catalog} onUpdated={load} />
+        <LineItemsSection estimate={estimate} catalog={catalog} serviceItems={serviceItems} vehicleClass={vehicleClass} onUpdated={load} />
 
         {estimate.status === "APPROVED" && estimate.work_order && (
           <div className="card" style={{ textAlign: "center", padding: 24 }}>

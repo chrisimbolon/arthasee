@@ -5,7 +5,8 @@
 // export needs every route's HTML identical regardless of ?id= value.
 // =============================================================================
 import ReadinessBlockNotice from "@/components/readiness/ReadinessBlockNotice";
-import { Part, partsApi } from "@/lib/api/service";
+import JasaSearchInput from "@/components/service/JasaSearchInput";
+import { Part, ServiceItem, partsApi, serviceItemsApi } from "@/lib/api/service";
 import { TrackingLink, trackingLinksApi } from "@/lib/api/tracking";
 import {
   Mechanic,
@@ -763,7 +764,7 @@ function StagesSection({ wo, mechanics, onUpdated }: { wo: WorkOrder; mechanics:
   );
 }
 
-function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => void }) {
+function JobLinesSection({ wo, serviceItems, onUpdated }: { wo: WorkOrder; serviceItems: ServiceItem[]; onUpdated: () => void }) {
   const editable = OPEN_STATUSES.includes(wo.status);
   // Chris's own catch, 2 Aug — caught live from a real screenshot
   // (WO #22, "Bongkar kaburator" struck through while still OPEN,
@@ -775,6 +776,10 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
   const canToggle = wo.status !== "OPEN";
   const [desc, setDesc] = useState("");
   const [saving, setSaving] = useState(false);
+  // 21 Oct 2026 (Phase 21, Task 21.4) — the Daftar Jasa item picked, if any.
+  // No price is ever shown here (Made, 12 Sep: no prices on the WO).
+  const [serviceItemId, setServiceItemId] = useState<string | null>(null);
+  const [serviceItemName, setServiceItemName] = useState("");
 
   // Only the unstaged lines — anything grouped into a stage already
   // renders inside its own StageCard above, and showing it twice
@@ -785,8 +790,8 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
     if (!desc.trim()) return;
     setSaving(true);
     try {
-      await workOrderJobLinesApi.create(wo.id, desc.trim());
-      setDesc("");
+      await workOrderJobLinesApi.create(wo.id, desc.trim(), undefined, serviceItemId ?? undefined);
+      setDesc(""); setServiceItemId(null); setServiceItemName("");
       onUpdated();
     } finally {
       setSaving(false);
@@ -811,7 +816,16 @@ function JobLinesSection({ wo, onUpdated }: { wo: WorkOrder; onUpdated: () => vo
       </div>
       {editable && (
         <div style={{ display: "flex", gap: 8 }}>
-          <input className="input" style={{ flex: 1 }} placeholder="Deskripsi pekerjaan" value={desc} onChange={(e) => setDesc(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addLine()} />
+          <JasaSearchInput
+            style={{ flex: 1 }} placeholder="Deskripsi pekerjaan — ketik untuk cari di Daftar Jasa"
+            value={desc} items={serviceItems} showPrices={false}
+            onChange={(text) => {
+              setDesc(text);
+              if (serviceItemId && text !== serviceItemName) { setServiceItemId(null); setServiceItemName(""); }
+            }}
+            onPick={(item) => { setDesc(item.name); setServiceItemId(item.id); setServiceItemName(item.name); }}
+            onEnter={addLine}
+          />
           <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={addLine} disabled={saving}>
             <Plus size={13} /> Tambah
           </button>
@@ -926,6 +940,9 @@ function WorkOrderDetailContent() {
   const load = () => workOrdersApi.get(workOrderId).then(setWo).finally(() => setLoading(false));
   useEffect(() => { if (workOrderId) load(); }, [workOrderId]);
   useEffect(() => { partsApi.list().then(setCatalog); }, []);
+  // 21 Oct 2026 (Phase 21, Task 21.4) — names only are shown on the WO.
+  const [serviceItems, setServiceItems] = useState<ServiceItem[]>([]);
+  useEffect(() => { serviceItemsApi.list().then((res) => setServiceItems(res.results)).catch(() => setServiceItems([])); }, []);
   // Fetched once at this level, not per-StageCard — every stage on
   // this WO shares the same roster, so this avoids N duplicate calls
   // for N stage cards. Includes inactive mechanics deliberately: an
@@ -1122,7 +1139,7 @@ function WorkOrderDetailContent() {
 
       <IntakeCard wo={wo} mechanics={mechanics} onUpdated={load} />
       <StagesSection wo={wo} mechanics={mechanics} onUpdated={load} />
-      <JobLinesSection wo={wo} onUpdated={load} />
+      <JobLinesSection wo={wo} serviceItems={serviceItems} onUpdated={load} />
       <MaterialLinesSection wo={wo} catalog={catalog} onUpdated={load} />
 
       {wo.status === "DONE" && (

@@ -75,7 +75,9 @@ interface LaborLine {
   quantity:    string;
   unit_price:  string;
   // 19 Oct 2026 (Phase 21, Task 21.2) -- where a pre-filled line came from.
-  source?:     "estimate" | "work_order";
+  source?:     "estimate" | "work_order" | "price_list";
+  // 21 Oct 2026 (Task 21.4) -- shown under a "price_list" line.
+  priceNote?:  string;
 }
 
 function PartUsageDisplay({ record }: { record: ServiceRecord }) {
@@ -119,6 +121,11 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
           quantity: String(Number(l.quantity) || 1),
           unit_price: l.unit_price === null ? "" : String(Math.round(Number(l.unit_price))),
           source: l.source,
+          priceNote: l.source === "price_list"
+            ? (l.price_source === "class" && l.vehicle_class
+                ? `Harga ${l.vehicle_class} dari Daftar Jasa`
+                : "Harga default dari Daftar Jasa (Jenis Bodi belum diisi)")
+            : undefined,
         })));
       })
       .catch(() => { /* keep the empty starting row */ })
@@ -205,6 +212,9 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
               </div>
               {line.source === "estimate" && (
                 <div style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 3 }}>Harga dari estimasi yang disetujui pelanggan</div>
+              )}
+              {line.source === "price_list" && line.priceNote && (
+                <div style={{ fontSize: 11.5, color: "var(--steel)", marginTop: 3 }}>{line.priceNote}</div>
               )}
               {line.source === "work_order" && line.unit_price === "" && (
                 <div style={{ fontSize: 11.5, color: "var(--hazard-dark)", marginTop: 3 }}>Ditambahkan di work order — isi harga, atau hapus jika tidak ditagih</div>
