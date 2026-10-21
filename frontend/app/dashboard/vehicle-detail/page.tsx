@@ -61,7 +61,7 @@
 import { EstimateStatus, EstimateSummary, estimatesApi } from "@/lib/api/estimates";
 import { LaborLinePayload, invoicesApi } from "@/lib/api/invoicing";
 import { IncomingLetter, lettersApi } from "@/lib/api/letters";
-import { ServiceRecord, Vehicle, VehicleEditPayload, VehicleFieldChange, vehiclesApi } from "@/lib/api/service";
+import { ServiceRecord, VEHICLE_CLASSES, Vehicle, VehicleEditPayload, VehicleFieldChange, isVehicleClass, vehiclesApi } from "@/lib/api/service";
 import { WorkOrderStatus, WorkOrderSummary, workOrdersApi } from "@/lib/api/workorders";
 import { formatDateID } from "@/lib/format";
 import { AlertTriangle, ArrowLeft, Calendar, ChevronDown, ChevronRight, ClipboardList, FileSearch, FileText, Inbox, Loader2, Pencil, Plus, Receipt, Trash2, Wrench } from "lucide-react";
@@ -355,8 +355,17 @@ function VehicleEditCard({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () =
           <input className="input" type="number" value={form.manufacture_year} onChange={(e) => setForm({ ...form, manufacture_year: Number(e.target.value) })} />
         </div>
         <div>
-          <label className="label">Jenis Bodi</label>
-          <input className="input" value={form.body_style} onChange={(e) => setForm({ ...form, body_style: e.target.value })} />
+          {/* 20 Oct 2026 (Phase 21, Task 21.3) — the price class for Daftar
+              Jasa. An old free-text value (e.g. "Compact") stays selectable
+              until a real class is picked; the backend accepts it unchanged. */}
+          <label className="label">Jenis Bodi (kelas harga jasa)</label>
+          <select className="input" value={form.body_style} onChange={(e) => setForm({ ...form, body_style: e.target.value })}>
+            <option value="">— Belum diisi —</option>
+            {VEHICLE_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
+            {form.body_style && !isVehicleClass(form.body_style) && (
+              <option value={form.body_style}>{form.body_style} (lama — pilih kelas baru)</option>
+            )}
+          </select>
         </div>
         <div>
           <label className="label">Warna</label>
