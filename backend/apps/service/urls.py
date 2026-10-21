@@ -4,8 +4,9 @@
 from django.urls import path
 
 from .views import (CustomerDetailView, CustomerHistoryView, CustomerListView,
-                    ServiceRecordListView, VehicleDetailView,
-                    VehicleHistoryView, VehicleListView)
+                    ServiceItemDetailView, ServiceItemHistoryView,
+                    ServiceItemListView, ServiceRecordListView,
+                    VehicleDetailView, VehicleHistoryView, VehicleListView)
 
 urlpatterns = [
     path("customers/",            CustomerListView.as_view(),   name="customer-list"),
@@ -18,4 +19,9 @@ urlpatterns = [
 
     path("vehicles/<uuid:vehicle_id>/service-records/",
          ServiceRecordListView.as_view(), name="service-record-list"),
+
+    # 20 Oct 2026 (Phase 21, Task 21.3) — Daftar Jasa.
+    path("service-items/",                    ServiceItemListView.as_view(),    name="service-item-list"),
+    path("service-items/<uuid:pk>/",          ServiceItemDetailView.as_view(),  name="service-item-detail"),
+    path("service-items/<uuid:pk>/history/",  ServiceItemHistoryView.as_view(), name="service-item-history"),
 ]
