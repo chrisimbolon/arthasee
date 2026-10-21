@@ -6,9 +6,10 @@ from django.db.models import ProtectedError
 from rest_framework import status
 from rest_framework.response import Response
 
-from .models import (Customer, CustomerFieldChange, ServiceRecord, Vehicle,
-                     VehicleFieldChange)
+from .models import (VEHICLE_CLASSES, Customer, CustomerFieldChange,
+                     ServiceItem, ServiceRecord, Vehicle, VehicleFieldChange)
 from .serializers import (CustomerFieldChangeSerializer, CustomerSerializer,
+                          ServiceItemChangeSerializer, ServiceItemSerializer,
                           ServiceRecordSerializer,
                           VehicleFieldChangeSerializer, VehicleListSerializer,
                           VehicleSerializer)
@@ -238,3 +239,114 @@ class ServiceRecordListView(TenantScopedAPIView):
                 status=status.HTTP_201_CREATED,
             )
         return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ── Daftar Jasa — Phase 21, Task 21.3 (20 Oct 2026) ─────────────────────
+# Reading the list: any active member of the shop. Changing it: the shop
+# OWNER only (Chris/Made, 16 Oct: "Owner / Admin ONLY") — the same
+# membership.role == "owner" check apps.organizations.views uses for shop
+# settings. A model ValueError (bad price, duplicate name) is a 400 with
+# the message shown as-is.
+def _acting_membership(request):
+    return (
+        request.user.memberships.filter(is_active=True)
+        .select_related("organization").order_by("id").first()
+    )
+
+
+def _owner_only(membership):
+    if membership is None:
+        return Response(
+            {"success": False, "message": "Anda belum tergabung dalam bengkel manapun."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    if membership.role != "owner":
+        return Response(
+            {"success": False, "message": "Hanya pemilik bengkel yang bisa mengubah Daftar Jasa."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return None
+
+
+def _edit_kwargs(data):
+    """Only the keys actually sent — an absent key stays _UNSET (untouched)."""
+    return {k: data[k] for k in ("name", "default_price", "is_active", "class_prices") if k in data}
+
+
+class ServiceItemListView(TenantScopedAPIView):
+    """
+    GET  /api/service-items/?include_inactive=true
+    POST /api/service-items/   (owner only)
+         {"name": "Tune-up", "default_price": 300000,
+          "class_prices": {"SUV": 400000, "MPV": 350000}}
+    """
+    model = ServiceItem
+
+    def get(self, request):
+        items = self.get_queryset().prefetch_related("class_prices").order_by("name")
+        if request.query_params.get("include_inactive") != "true":
+            items = items.filter(is_active=True)
+        membership = _acting_membership(request)
+        return Response({
+            "success": True,
+            "count": items.count(),
+            "results": ServiceItemSerializer(items, many=True).data,
+            "vehicle_classes": VEHICLE_CLASSES,
+            "can_edit": bool(membership and membership.role == "owner"),
+        })
+
+    def post(self, request):
+        membership = _acting_membership(request)
+        blocked = _owner_only(membership)
+        if blocked is not None:
+            return blocked
+        try:
+            item = ServiceItem.record(
+                organization=membership.organization,
+                name=request.data.get("name"),
+                default_price=request.data.get("default_price"),
+                class_prices=request.data.get("class_prices") or {},
+                created_by=request.user,
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"success": True, "service_item": ServiceItemSerializer(item).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ServiceItemDetailView(TenantScopedAPIView):
+    """
+    GET   /api/service-items/<id>/
+    PATCH /api/service-items/<id>/   (owner only) — send only what changes;
+          in class_prices, null removes that class's own price.
+    No DELETE on purpose: retire a jasa with {"is_active": false}.
+    """
+    model = ServiceItem
+
+    def get(self, request, pk):
+        item = self.get_object(pk)
+        return Response({"success": True, "service_item": ServiceItemSerializer(item).data})
+
+    def patch(self, request, pk):
+        item = self.get_object(pk)
+        blocked = _owner_only(_acting_membership(request))
+        if blocked is not None:
+            return blocked
+        try:
+            item.apply_edit(changed_by=request.user, **_edit_kwargs(request.data))
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        item.refresh_from_db()
+        return Response({"success": True, "service_item": ServiceItemSerializer(item).data})
+
+
+class ServiceItemHistoryView(TenantScopedAPIView):
+    """GET /api/service-items/<id>/history/ — read-only change log."""
+    model = ServiceItem
+
+    def get(self, request, pk):
+        item = self.get_object(pk)
+        changes = item.changes.select_related("changed_by")
+        return Response({"success": True, "changes": ServiceItemChangeSerializer(changes, many=True).data})
