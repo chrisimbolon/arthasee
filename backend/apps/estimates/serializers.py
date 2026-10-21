@@ -27,7 +27,7 @@ class EstimateLineItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = EstimateLineItem
-        fields = ["id", "estimate", "kind", "description", "quantity", "unit_price", "part", "part_name", "subtotal", "created_at"]
+        fields = ["id", "estimate", "kind", "description", "quantity", "unit_price", "part", "part_name", "service_item", "subtotal", "created_at"]
         read_only_fields = ["id", "part_name", "subtotal", "created_at"]
 
     def validate_part(self, part):
@@ -39,6 +39,22 @@ class EstimateLineItemSerializer(serializers.ModelSerializer):
         if part.organization_id not in _user_org_ids(request):
             raise serializers.ValidationError("Part tidak ditemukan.")
         return part
+
+    def validate_service_item(self, service_item):
+        # 21 Oct 2026 (Phase 21, Task 21.4) — same tenant check as part above.
+        if service_item is None:
+            return service_item
+        request = self.context.get("request")
+        if request is None or request.user.role == "super_admin":
+            return service_item
+        if service_item.organization_id not in _user_org_ids(request):
+            raise serializers.ValidationError("Jasa tidak ditemukan di Daftar Jasa.")
+        return service_item
+
+    def validate(self, attrs):
+        if attrs.get("service_item") is not None and attrs.get("kind") != "labor":
+            raise serializers.ValidationError({"service_item": "Hanya baris Jasa yang bisa diambil dari Daftar Jasa."})
+        return attrs
 
 
 class EstimateSerializer(serializers.ModelSerializer):

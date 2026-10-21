@@ -192,6 +192,9 @@ class Estimate(TenantScopedModel):
                         # 19 Oct 2026 (Phase 21, Task 21.2) -- the link the
                         # invoice uses to find this line's agreed price.
                         estimate_line_item=line,
+                        # 21 Oct 2026 (Phase 21, Task 21.4) -- which Daftar
+                        # Jasa item it is, if it was picked from the list.
+                        service_item_id=line.service_item_id,
                     )
                 elif line.kind == "part" and line.part_id:
                     WorkOrderMaterialLine.objects.create(
@@ -254,6 +257,15 @@ class EstimateLineItem(TenantScopedModel):
     part = models.ForeignKey(
         Part, on_delete=models.PROTECT, null=True, blank=True,
         related_name="estimate_line_items", verbose_name="Part",
+    )
+    # 21 Oct 2026 (Phase 21, Task 21.4) — the Daftar Jasa item a jasa line
+    # was picked from, if any (free-text jasa stays allowed — Chris, 21 Oct).
+    # The PRICE is never read from here: unit_price above is what was quoted
+    # and stays frozen (Principle #15). Carried onto the WO job line by
+    # approve(). SET_NULL: a jasa is normally retired, never deleted.
+    service_item = models.ForeignKey(
+        "service.ServiceItem", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="estimate_line_items", verbose_name="Jasa (Daftar Jasa)",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
