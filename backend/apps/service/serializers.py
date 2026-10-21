@@ -269,14 +269,35 @@ class VehicleListSerializer(VehicleSerializer):
 class ServiceItemSerializer(serializers.ModelSerializer):
     # {"SUV": "400000.00", ...} — only classes that have their own price.
     class_prices = serializers.SerializerMethodField()
+    # 21 Oct 2026 (Phase 21, Task 21.4) — filled only when the list was
+    # asked for one vehicle (?vehicle=<id>, passed in as context["vehicle"]):
+    # this jasa's price for that vehicle, and whether it is the vehicle
+    # class's own price ("class") or the default ("default"). Null otherwise.
+    price_for_vehicle = serializers.SerializerMethodField()
+    price_source      = serializers.SerializerMethodField()
 
     class Meta:
         model  = ServiceItem
-        fields = ["id", "name", "default_price", "is_active", "class_prices", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "default_price", "is_active", "class_prices",
+            "price_for_vehicle", "price_source", "created_at", "updated_at",
+        ]
         read_only_fields = fields
 
     def get_class_prices(self, obj):
         return {row.body_style: str(row.price) for row in obj.class_prices.all()}
+
+    def _vehicle_price(self, obj):
+        vehicle = self.context.get("vehicle")
+        return None if vehicle is None else obj.price_for(vehicle)
+
+    def get_price_for_vehicle(self, obj):
+        result = self._vehicle_price(obj)
+        return None if result is None else str(result[0])
+
+    def get_price_source(self, obj):
+        result = self._vehicle_price(obj)
+        return None if result is None else result[1]
 
 
 class ServiceItemChangeSerializer(serializers.ModelSerializer):
