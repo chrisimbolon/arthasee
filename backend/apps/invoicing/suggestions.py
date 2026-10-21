@@ -30,6 +30,7 @@ job line was deleted on the WO is not suggested: that work was not done.
 import re
 from decimal import Decimal, InvalidOperation
 
+from apps.service.models import normalise_vehicle_class
 from apps.workorders.text import strip_price_suffix
 
 _LEGACY_PRICE_RE = re.compile(r"\(estimasi\s+Rp\s*([\d.]+)\)\s*$", re.IGNORECASE)
@@ -102,8 +103,19 @@ def suggested_labor_lines(service_record):
                 "description": description, "quantity": est.quantity,
                 "unit_price": est.unit_price, "source": "estimate",
             })
+        elif line.service_item_id:
+            # 4. 21 Oct 2026 (Phase 21, Task 21.4) -- added on the WO from
+            # Daftar Jasa: priced from the list for this vehicle's class
+            # (or the default). Still only a suggestion; staff can edit it.
+            price, price_source = line.service_item.price_for(work_order.vehicle)
+            suggestions.append({
+                "description": description, "quantity": Decimal("1"),
+                "unit_price": price, "source": "price_list",
+                "price_source": price_source,
+                "vehicle_class": normalise_vehicle_class(work_order.vehicle.body_style),
+            })
         else:
-            # 4. Added on the WO -- no agreed price.
+            # 5. Added on the WO as free text -- no agreed price.
             suggestions.append({
                 "description": description, "quantity": Decimal("1"),
                 "unit_price": None, "source": "work_order",
