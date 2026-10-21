@@ -467,3 +467,63 @@ export const stockOpnameApi = {
     return data.session;
   },
 };
+
+// ── Daftar Jasa — Phase 21, Task 21.3 (20 Oct 2026) ─────────────────────
+// Must match VEHICLE_CLASSES in backend/apps/service/models.py — the backend
+// test ServiceItemVehicleClassSyncTests reads this exact line and fails if
+// the two lists ever differ. Keep it on one line, double-quoted.
+export const VEHICLE_CLASSES = ["Sedan", "Hatchback", "MPV", "SUV", "Pick-up", "Truck"] as const;
+export type VehicleClass = (typeof VEHICLE_CLASSES)[number];
+
+export function isVehicleClass(value: string): value is VehicleClass {
+  return (VEHICLE_CLASSES as readonly string[]).includes(value);
+}
+
+export interface ServiceItem {
+  id:            string;
+  name:          string;
+  default_price: string;
+  is_active:     boolean;
+  // Only the classes with their own price; a missing class uses default_price.
+  class_prices:  Partial<Record<VehicleClass, string>>;
+  created_at:    string;
+  updated_at:    string;
+}
+
+export interface ServiceItemChange {
+  id:              string;
+  field_label:     string;
+  old_value:       string;
+  new_value:       string;
+  changed_by_name: string | null;
+  changed_at:      string;
+}
+
+// Send only what changes. In class_prices, null removes that class's own price.
+export interface ServiceItemPayload {
+  name?:          string;
+  default_price?: number;
+  is_active?:     boolean;
+  class_prices?:  Partial<Record<VehicleClass, number | null>>;
+}
+
+export const serviceItemsApi = {
+  async list(opts?: { includeInactive?: boolean }): Promise<{ results: ServiceItem[]; can_edit: boolean }> {
+    const { data } = await api.get("/api/service-items/", {
+      params: { include_inactive: opts?.includeInactive ? "true" : undefined },
+    });
+    return { results: data.results, can_edit: data.can_edit };
+  },
+  async create(payload: ServiceItemPayload): Promise<ServiceItem> {
+    const { data } = await api.post("/api/service-items/", payload);
+    return data.service_item;
+  },
+  async update(id: string, payload: ServiceItemPayload): Promise<ServiceItem> {
+    const { data } = await api.patch(`/api/service-items/${id}/`, payload);
+    return data.service_item;
+  },
+  async history(id: string): Promise<ServiceItemChange[]> {
+    const { data } = await api.get(`/api/service-items/${id}/history/`);
+    return data.changes;
+  },
+};
