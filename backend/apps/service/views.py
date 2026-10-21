@@ -6,8 +6,11 @@ from django.db.models import ProtectedError
 from rest_framework import status
 from rest_framework.response import Response
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+
 from .models import (VEHICLE_CLASSES, Customer, CustomerFieldChange,
-                     ServiceItem, ServiceRecord, Vehicle, VehicleFieldChange)
+                     ServiceItem, ServiceRecord, Vehicle, VehicleFieldChange,
+                     normalise_vehicle_class)
 from .serializers import (CustomerFieldChangeSerializer, CustomerSerializer,
                           ServiceItemChangeSerializer, ServiceItemSerializer,
                           ServiceRecordSerializer,
@@ -286,12 +289,36 @@ class ServiceItemListView(TenantScopedAPIView):
         items = self.get_queryset().prefetch_related("class_prices").order_by("name")
         if request.query_params.get("include_inactive") != "true":
             items = items.filter(is_active=True)
+
+        # 21 Oct 2026 (Phase 21, Task 21.4) — ?vehicle=<id>: also return each
+        # jasa's price for THAT vehicle's class, for the Estimate's jasa
+        # search box. Same tenant scoping as every other lookup here: a
+        # vehicle from another shop is simply "not found".
+        vehicle = None
+        vehicle_id = request.query_params.get("vehicle")
+        if vehicle_id:
+            if request.user.role == "super_admin":
+                vehicles = Vehicle.objects.all()
+            else:
+                org_ids = request.user.memberships.filter(is_active=True).values_list("organization_id", flat=True)
+                vehicles = Vehicle.objects.filter(organization_id__in=org_ids)
+            try:
+                vehicle = vehicles.filter(pk=vehicle_id).first()
+            except (DjangoValidationError, ValueError):
+                vehicle = None
+            if vehicle is None:
+                return Response(
+                    {"success": False, "message": "Kendaraan tidak ditemukan."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
         membership = _acting_membership(request)
         return Response({
             "success": True,
             "count": items.count(),
-            "results": ServiceItemSerializer(items, many=True).data,
+            "results": ServiceItemSerializer(items, many=True, context={"vehicle": vehicle}).data,
             "vehicle_classes": VEHICLE_CLASSES,
+            "vehicle_class": normalise_vehicle_class(vehicle.body_style) if vehicle else None,
             "can_edit": bool(membership and membership.role == "owner"),
         })
 
