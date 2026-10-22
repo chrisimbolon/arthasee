@@ -455,6 +455,8 @@ class StockAdjustment(TenantScopedModel):
         ("customer_cancelled_part", "Part Dibatalkan Pelanggan"),
         ("purchase_return", "Retur Pembelian"),
         ("opening_balance", "Saldo Awal"),
+        # 22 Oct 2026 (Phase 21, Task C2) -- "Dikembalikan ke stok" on a draft invoice.
+        ("invoice_part_returned", "Retur dari Invoice Draf"),
     ]
 
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
