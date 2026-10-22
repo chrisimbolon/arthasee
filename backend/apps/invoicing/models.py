@@ -351,7 +351,9 @@ class Invoice(TenantScopedModel):
     # the WorkOrder is already closed and its parts' cost already sits in
     # COGS, so changes here go straight between Inventory and COGS through
     # InvoicePartAdjusted (see its docstring). Agreed 22 Oct with Chris:
-    #   - removing is whole-line only (no partial returns);
+    #   - removing was whole-line only at first; since 23 Oct 2026 spare
+    #     parts can be returned partly (1 of 2 busi) — fluids stay
+    #     whole-line only — and "Tidak ditagih" can split a line;
     #   - "Dikembalikan ke stok" = stock back + Dr 1301 / Cr 5001 at the
     #     line's own frozen cost; the line leaves the invoice;
     #   - "Tidak ditagih" = no stock or ledger movement; the line STAYS at
@@ -424,55 +426,113 @@ class Invoice(TenantScopedModel):
             ))
         return line
 
-    def return_part_line(self, line):
-        """"Dikembalikan ke stok": the whole line goes back to stock, its
-        cost back from COGS to Inventory at the cost it was booked at, and
-        the line leaves the invoice (and the vehicle's service history)."""
+    def _clean_part_quantity(self, quantity, line_quantity):
+        """None/"" = the whole line. Otherwise a number above 0 and no more
+        than what is on the line (checked again under the lock)."""
+        if quantity in (None, ""):
+            return line_quantity
+        try:
+            qty = Decimal(str(quantity))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError("Jumlah harus berupa angka.")
+        if not qty.is_finite() or qty <= 0:
+            raise ValueError("Jumlah harus lebih dari 0.")
+        qty = qty.quantize(Decimal("0.01"))
+        if qty > line_quantity:
+            raise ValueError(f"Jumlah melebihi yang ada di invoice ({line_quantity.normalize():f}).")
+        return qty
+
+    def _relock_part_line(self, line):
+        """Under the invoice lock: re-read the line, so two staff acting on
+        the same line can't both return the same units."""
+        fresh = InvoiceLineItem.objects.filter(pk=line.pk, invoice_id=self.pk).select_related("part").first()
+        if fresh is None:
+            raise ValueError("Baris part ini sudah tidak ada di invoice — muat ulang halaman.")
+        return fresh
+
+    def return_part_line(self, line, quantity=None):
+        """"Dikembalikan ke stok": all of the line, or — for spare parts —
+        just some of it (23 Oct 2026, e.g. 1 of 2 busi). Stock goes back,
+        the cost goes back from COGS to Inventory at the cost the line was
+        booked at, and the line shrinks (or leaves the invoice when all of
+        it is returned). Fluids (oli, dll.) are whole-line only — an opened
+        container can't go back on the shelf (Chris, 23 Oct 2026)."""
         from apps.accounting.models import AccountingPeriod
         from apps.core.events.bus import default_bus
-        from apps.inventory.models import PartUsage, StockAdjustment
+        from apps.inventory.models import Part, PartUsage, StockAdjustment
         from .events import InvoicePartAdjusted
 
         self._own_part_line(line)
-        unit_cost = (
-            line.unit_cost
-            or self._work_order_unit_cost(line.part_id)
-            or self._current_unit_cost(line.part)
-        )
         today = self._today()
 
         with transaction.atomic():
             self._lock_draft()
+            line = self._relock_part_line(line)
+            qty = self._clean_part_quantity(quantity, line.quantity)
+            if qty < line.quantity and line.part.item_type == Part.ItemType.FLUID:
+                raise ValueError(
+                    "Fluida (oli, dll.) hanya bisa dikembalikan seluruhnya — "
+                    "kemasan yang sudah dibuka tidak bisa kembali ke stok."
+                )
+            unit_cost = (
+                line.unit_cost
+                or self._work_order_unit_cost(line.part_id)
+                or self._current_unit_cost(line.part)
+            )
             AccountingPeriod.assert_open_for_posting(self.organization, today)
             StockAdjustment.objects.create(
-                organization=self.organization, part=line.part, quantity_change=line.quantity,
+                organization=self.organization, part=line.part, quantity_change=qty,
                 reason="invoice_part_returned", notes=f"Dikembalikan dari invoice {self.number}",
             )
-            usage = (PartUsage.objects
-                     .filter(service_record=self.service_record, part=line.part, quantity=line.quantity)
-                     .order_by("-created_at").first())
+            # Vehicle service history only — the StockAdjustment above already
+            # moved the stock (PartUsage changes stock on create, never on edit).
+            usages = PartUsage.objects.filter(service_record=self.service_record, part=line.part)
+            usage = (usages.filter(quantity=line.quantity).order_by("-created_at").first()
+                     or usages.filter(quantity__gte=qty).order_by("-created_at").first())
             if usage is not None:
-                usage.delete()  # history only — the StockAdjustment above already moved the stock
+                if usage.quantity == qty:
+                    usage.delete()
+                else:
+                    usage.quantity = usage.quantity - qty
+                    usage.save(update_fields=["quantity"])
             default_bus.publish(InvoicePartAdjusted(
                 organization_id=self.organization_id, invoice_id=self.id, part_id=line.part_id,
-                direction="returned", quantity=line.quantity, unit_cost=unit_cost,
-                amount=(line.quantity * unit_cost).quantize(Decimal("0.01")), transaction_date=today,
+                direction="returned", quantity=qty, unit_cost=unit_cost,
+                amount=(qty * unit_cost).quantize(Decimal("0.01")), transaction_date=today,
             ))
-            line.delete()
+            if qty == line.quantity:
+                line.delete()
+                return None
+            line.quantity = line.quantity - qty
+            line.save(update_fields=["quantity"])
+            return line
 
-    def mark_part_not_charged(self, line):
+    def mark_part_not_charged(self, line, quantity=None):
         """"Tidak ditagih": the part was used and stays on the invoice at
         Rp 0, marked so the customer can see it was given free. No stock or
-        ledger movement — its cost correctly stays in COGS."""
+        ledger movement — its cost correctly stays in COGS. With a quantity
+        smaller than the line (23 Oct 2026), the line is split: the rest
+        stays charged, the free units get their own Rp 0 line (same frozen
+        cost, so it can still be returned to stock later)."""
         self._own_part_line(line)
         with transaction.atomic():
             self._lock_draft()
-            if not line.description.endswith(self.NOT_CHARGED_SUFFIX):
-                line.description = line.description[: 255 - len(self.NOT_CHARGED_SUFFIX)] + self.NOT_CHARGED_SUFFIX
-            line.unit_price = Decimal("0.00")
-            line.save(update_fields=["description", "unit_price"])
-        return line
-
+            line = self._relock_part_line(line)
+            if line.description.endswith(self.NOT_CHARGED_SUFFIX):
+                return line
+            qty = self._clean_part_quantity(quantity, line.quantity)
+            free_description = line.description[: 255 - len(self.NOT_CHARGED_SUFFIX)] + self.NOT_CHARGED_SUFFIX
+            if qty == line.quantity:
+                line.description = free_description
+                line.unit_price = Decimal("0.00")
+                line.save(update_fields=["description", "unit_price"])
+                return line
+            line.quantity = line.quantity - qty
+            line.save(update_fields=["quantity"])
+            return InvoiceLineItem.objects.create(
+                invoice=self, kind="part", description=free_description, quantity=qty,
+                unit_price=Decimal("0.00"), part=line.part, unit_cost=line.unit_cost,
+            )
 
 class InvoiceLineItem(TenantScopedModel):
     """
