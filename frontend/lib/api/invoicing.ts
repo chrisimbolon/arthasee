@@ -136,4 +136,18 @@ export const invoicesApi = {
     const { data } = await api.get(`/api/invoices/${id}/receipt.pdf`, { responseType: "blob" });
     return data;
   },
+  // 22 Oct 2026 (Phase 21, Task C1) -- jasa lines on a DRAFT invoice. Each
+  // returns the whole updated invoice. Refused (409) once issued/cancelled.
+  async addLaborLine(invoiceId: string, payload: LaborLinePayload): Promise<Invoice> {
+    const { data } = await api.post(`/api/invoices/${invoiceId}/line-items/`, payload);
+    return data.invoice;
+  },
+  async updateLaborLine(lineId: string, payload: LaborLinePayload): Promise<Invoice> {
+    const { data } = await api.patch(`/api/invoices/line-items/${lineId}/`, payload);
+    return data.invoice;
+  },
+  async removeLaborLine(lineId: string): Promise<Invoice> {
+    const { data } = await api.delete(`/api/invoices/line-items/${lineId}/`);
+    return data.invoice;
+  },
 };
