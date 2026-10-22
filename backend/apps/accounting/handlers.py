@@ -77,6 +77,8 @@ class AccountingEventHandler(EventHandler):
         # CompletenessTests (apps/core/tests.py) now fails the suite if a
         # posting_engine event is ever missing from this tuple again.
         "MaterialLineReversed",
+        # 22 Oct 2026 (Phase 21, Task C2) -- place #3 of 4.
+        "InvoicePartAdjusted",
     )
 
     def handle(self, event: DomainEvent) -> None:

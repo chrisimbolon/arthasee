@@ -36,7 +36,7 @@ from decimal import Decimal
 
 from apps.accounting.models import AccountRole
 from apps.inventory.events import PartConsumed, StockOpnameCompleted
-from apps.invoicing.events import InvoiceIssued
+from apps.invoicing.events import InvoiceIssued, InvoicePartAdjusted
 from apps.payments.events import (InternalCashMutationRecorded,
                                   OperatingExpenseRecorded, PaymentReceived,
                                   SupplierPaymentMade, TaxRemittanceRecorded)
@@ -164,6 +164,25 @@ def resolve(event) -> dict:
             "lines": _lines(
                 {"account_code": AccountRole.INVENTORY, "side": "debit",  "amount": event.amount},
                 {"account_code": AccountRole.WIP,       "side": "credit", "amount": event.amount},
+            ),
+        }
+
+    if isinstance(event, InvoicePartAdjusted):
+        # 22 Oct 2026 (Phase 21, Task C2) -- a part added to / returned from
+        # a DRAFT invoice. The WO is already closed (its WIP already moved
+        # to COGS), so this goes straight between COGS and Inventory, at
+        # COST. See InvoicePartAdjusted's own docstring.
+        if event.direction == "added":
+            debit, credit = AccountRole.MATERIAL_COGS, AccountRole.INVENTORY
+        elif event.direction == "returned":
+            debit, credit = AccountRole.INVENTORY, AccountRole.MATERIAL_COGS
+        else:
+            raise ValueError(f"InvoicePartAdjusted: unknown direction {event.direction!r}.")
+        return {
+            "memo": f"Invoice draft part {event.direction} — invoice {event.invoice_id}",
+            "lines": _lines(
+                {"account_code": debit,  "side": "debit",  "amount": event.amount},
+                {"account_code": credit, "side": "credit", "amount": event.amount},
             ),
         }
 

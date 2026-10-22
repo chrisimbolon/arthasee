@@ -102,7 +102,7 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
     the same way every entry below was.
     """
     from apps.inventory.events import PartConsumed, StockOpnameCompleted
-    from apps.invoicing.events import InvoiceIssued
+    from apps.invoicing.events import InvoiceIssued, InvoicePartAdjusted
     from apps.payments.events import (InternalCashMutationRecorded,
                                       OperatingExpenseRecorded,
                                       PaymentReceived, SupplierPaymentMade,
@@ -147,6 +147,8 @@ def event_class_for(event_type: str) -> type[DomainEvent]:
         # 20 Oct 2026 (Phase 21, Task 21.2b) -- place #4 of 4, added with
         # the event itself, before it has ever failed.
         "MaterialLineReversed": MaterialLineReversed,
+        # 22 Oct 2026 (Phase 21, Task C2) -- place #4 of 4.
+        "InvoicePartAdjusted": InvoicePartAdjusted,
     }
     try:
         return registry[event_type]
