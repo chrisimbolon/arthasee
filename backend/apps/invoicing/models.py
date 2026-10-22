@@ -41,10 +41,10 @@ balance_due actually reaches zero.
 """
 import uuid
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from apps.core.models import TenantScopedModel
-from django.db import models
+from django.db import models, transaction
 
 
 class InvoiceSequence(TenantScopedModel):
@@ -276,6 +276,72 @@ class Invoice(TenantScopedModel):
         # below, via the same _resolve_organization() called above —
         # no need to duplicate that assignment here.
         super().save(*args, **kwargs)
+
+    # ── 22 Oct 2026 (Phase 21, Task C1) — editing JASA on a DRAFT invoice ──
+    # Made's note, 12 Sep 2026: "Waktu invoice di posisi draft, masih bisa
+    # tambah & kurang barang / jasa." This covers jasa only: a jasa line has
+    # no stock or ledger effect until the invoice is issued, and
+    # InvoiceIssued reads the line items at that moment, so whatever is
+    # here when "Terbitkan" is clicked is exactly what gets posted. Parts
+    # are Task C2 (they need their own stock + COGS posting).
+    #
+    # Every change locks this invoice's row first and re-checks DRAFT under
+    # the lock — InvoiceStatusUpdateView takes the same lock before issuing
+    # — so a jasa can never be added in the instant between "total
+    # computed" and "status = ISSUED".
+    _MAX_LABOR_QTY   = Decimal("99999999")
+    _MAX_LABOR_PRICE = Decimal("9999999999")
+
+    def _lock_draft(self):
+        locked = Invoice.objects.select_for_update().get(pk=self.pk)
+        if locked.status != "DRAFT":
+            raise ValueError("Invoice sudah diterbitkan atau dibatalkan — jasa tidak bisa diubah lagi.")
+        return locked
+
+    @classmethod
+    def _clean_labor(cls, description, quantity, unit_price):
+        description = (description or "").strip()
+        if not description:
+            raise ValueError("Deskripsi jasa wajib diisi.")
+        try:
+            qty = Decimal(str(quantity))
+            price = Decimal(str(unit_price))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError("Jumlah dan harga harus berupa angka.")
+        if not qty.is_finite() or qty <= 0 or qty > cls._MAX_LABOR_QTY:
+            raise ValueError("Jumlah harus lebih dari 0.")
+        if not price.is_finite() or price < 0 or price > cls._MAX_LABOR_PRICE:
+            raise ValueError("Harga jasa tidak boleh negatif.")
+        return description[:255], qty.quantize(Decimal("0.01")), price.quantize(Decimal("0.01"))
+
+    def _own_labor_line(self, line):
+        if line.invoice_id != self.pk:
+            raise ValueError("Baris ini bukan milik invoice ini.")
+        if line.kind != "labor":
+            raise ValueError("Hanya baris jasa yang bisa diubah di sini.")
+
+    def add_labor_line(self, *, description, quantity=1, unit_price):
+        description, qty, price = self._clean_labor(description, quantity, unit_price)
+        with transaction.atomic():
+            self._lock_draft()
+            return InvoiceLineItem.objects.create(
+                invoice=self, kind="labor", description=description, quantity=qty, unit_price=price,
+            )
+
+    def update_labor_line(self, line, *, description, quantity, unit_price):
+        self._own_labor_line(line)
+        description, qty, price = self._clean_labor(description, quantity, unit_price)
+        with transaction.atomic():
+            self._lock_draft()
+            line.description, line.quantity, line.unit_price = description, qty, price
+            line.save(update_fields=["description", "quantity", "unit_price"])
+        return line
+
+    def remove_labor_line(self, line):
+        self._own_labor_line(line)
+        with transaction.atomic():
+            self._lock_draft()
+            line.delete()
 
 
 class InvoiceLineItem(TenantScopedModel):
