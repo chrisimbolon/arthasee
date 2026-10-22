@@ -16,11 +16,13 @@
 // single overwritable field.
 // =============================================================================
 import ReadinessBlockNotice from "@/components/readiness/ReadinessBlockNotice";
+import JasaSearchInput, { priceLabel } from "@/components/service/JasaSearchInput";
 import { Invoice, InvoiceStatus, invoicesApi } from "@/lib/api/invoicing";
 import { organizationsApi } from "@/lib/api/organizations";
 import { Payment, PaymentMethod, paymentsApi } from "@/lib/api/payments";
+import { ServiceItem, serviceItemsApi } from "@/lib/api/service";
 import { ReadinessBlockedError, readinessBlockFromError } from "@/lib/readiness";
-import { ArrowLeft, Download, Loader2, Printer } from "lucide-react";
+import { ArrowLeft, Check, Download, Loader2, Pencil, Plus, Printer, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
@@ -90,6 +92,148 @@ function terbilangRupiah(value: string | number): string {
   if (n === 0) return "Nol Rupiah";
   const words = terbilangWords(n).split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
   return `${words} Rupiah`;
+}
+
+// 22 Oct 2026 (Phase 21, Task C1) — Made's note, 12 Sep 2026: "Waktu invoice
+// di posisi draft, masih bisa tambah & kurang barang / jasa." While the
+// invoice is DRAFT, jasa lines can be added (with the same Daftar Jasa
+// search box as the estimate, priced for this vehicle), edited and removed.
+// Nothing is posted to the books until "Terbitkan Invoice" — the backend
+// reads the lines at that moment. Parts are changed on the work order for
+// now (Task C2 will add them here). Staff-only card: hidden when printing.
+function DraftJasaEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: () => void }) {
+  const laborItems = invoice.line_items.filter((li) => li.kind === "labor");
+  const [serviceItems, setServiceItems] = useState<ServiceItem[]>([]);
+  const [vehicleClass, setVehicleClass] = useState("");
+  const [desc, setDesc] = useState("");
+  const [qty, setQty] = useState("1");
+  const [price, setPrice] = useState("");
+  const [picked, setPicked] = useState<ServiceItem | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [edit, setEdit] = useState({ description: "", quantity: "1", unit_price: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    serviceItemsApi.list({ vehicleId: invoice.vehicle_id })
+      .then((res) => { setServiceItems(res.results); setVehicleClass(res.vehicle_class ?? ""); })
+      .catch(() => setServiceItems([]));
+  }, [invoice.vehicle_id]);
+
+  const run = async (action: () => Promise<unknown>, fallback: string): Promise<boolean> => {
+    setBusy(true); setError(null);
+    try {
+      await action();
+      onUpdated();
+      return true;
+    } catch (err) {
+      const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setError(apiMessage || fallback);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addLine = async () => {
+    if (!desc.trim() || price === "") { setError("Isi nama jasa dan harganya."); return; }
+    const ok = await run(
+      () => invoicesApi.addLaborLine(invoice.id, { description: desc.trim(), quantity: Number(qty) || 1, unit_price: Number(price) }),
+      "Gagal menambah jasa.",
+    );
+    if (ok) { setDesc(""); setQty("1"); setPrice(""); setPicked(null); }
+  };
+
+  const saveEdit = async (lineId: string) => {
+    if (!edit.description.trim() || edit.unit_price === "") { setError("Isi nama jasa dan harganya."); return; }
+    const ok = await run(
+      () => invoicesApi.updateLaborLine(lineId, {
+        description: edit.description.trim(), quantity: Number(edit.quantity) || 1, unit_price: Number(edit.unit_price),
+      }),
+      "Gagal menyimpan perubahan.",
+    );
+    if (ok) setEditingId(null);
+  };
+
+  const removeLine = async (lineId: string, description: string) => {
+    if (!window.confirm(`Hapus jasa "${description}" dari invoice ini?`)) return;
+    await run(() => invoicesApi.removeLaborLine(lineId), "Gagal menghapus jasa.");
+  };
+
+  const digitsOnly = (v: string) => v.replace(/[^0-9]/g, "");
+
+  return (
+    <div className="no-print card" style={{ maxWidth: 720, margin: "18px auto 0", padding: 20 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Ubah Jasa (Draf)</h3>
+      <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 14 }}>
+        Selama invoice masih Draf, jasa bisa ditambah, diubah, atau dihapus. Setelah diterbitkan, invoice terkunci.
+        Untuk part, ubah lewat work order.
+      </p>
+      {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+        {laborItems.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13 }}>Belum ada jasa.</p>}
+        {laborItems.map((li) => editingId === li.id ? (
+          <div key={li.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input className="input" style={{ flex: 1, minWidth: 160 }} value={edit.description}
+              onChange={(e) => setEdit({ ...edit, description: e.target.value })} />
+            <input className="input" style={{ width: 60 }} type="number" min={1} value={edit.quantity}
+              onChange={(e) => setEdit({ ...edit, quantity: e.target.value })} />
+            <input className="input mono" style={{ width: 120 }} inputMode="numeric" placeholder="Harga" value={edit.unit_price}
+              onChange={(e) => setEdit({ ...edit, unit_price: digitsOnly(e.target.value) })} />
+            <button className="btn-rust" style={{ fontSize: 12.5, padding: "6px 10px" }} disabled={busy} onClick={() => saveEdit(li.id)}>
+              <Check size={13} />
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 10px" }} disabled={busy} onClick={() => setEditingId(null)}>
+              <X size={13} />
+            </button>
+          </div>
+        ) : (
+          <div key={li.id} className="mono" style={{ fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <span>{li.description} × {Number(li.quantity)}</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {money(li.subtotal)}
+              <button title="Ubah" disabled={busy} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}
+                onClick={() => {
+                  setEditingId(li.id); setError(null);
+                  setEdit({ description: li.description, quantity: String(Number(li.quantity)), unit_price: String(Math.round(Number(li.unit_price))) });
+                }}>
+                <Pencil size={14} />
+              </button>
+              <button title="Hapus" disabled={busy} style={{ background: "none", border: "none", display: "flex", color: "var(--steel)" }}
+                onClick={() => removeLine(li.id, li.description)}>
+                <Trash2 size={14} />
+              </button>
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <JasaSearchInput
+          style={{ flex: 1, minWidth: 180 }} placeholder="Tambah jasa — ketik, mis. Spooring"
+          value={desc} items={serviceItems} showPrices vehicleClass={vehicleClass}
+          onChange={(text) => { setDesc(text); if (picked && text !== picked.name) setPicked(null); }}
+          onPick={(item) => {
+            setDesc(item.name); setPicked(item);
+            setPrice(String(Math.round(Number(item.price_for_vehicle ?? item.default_price))));
+          }}
+          onEnter={addLine}
+        />
+        <input className="input" style={{ width: 60 }} type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} />
+        <input className="input mono" style={{ width: 120 }} inputMode="numeric" placeholder="Harga" value={price}
+          onChange={(e) => setPrice(digitsOnly(e.target.value))} />
+        <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} disabled={busy} onClick={addLine}>
+          {busy ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Plus size={13} />} Tambah
+        </button>
+      </div>
+      {picked && (
+        <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 6 }}>
+          Dari Daftar Jasa: {priceLabel(picked, vehicleClass)} — harga boleh diubah.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function InvoiceDetailContent() {
@@ -600,6 +744,8 @@ function InvoiceDetailContent() {
           </div>
         </div>
       )}
+
+      {invoice.status === "DRAFT" && <DraftJasaEditor invoice={invoice} onUpdated={load} />}
 
       <div className="no-print" style={{ maxWidth: 720, margin: "18px auto 0", display: "flex", gap: 10, justifyContent: "center" }}>
         {invoice.status === "DRAFT" && (
