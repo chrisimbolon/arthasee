@@ -227,7 +227,8 @@ function CreateInvoiceModal({ record, onClose, onCreated }: {
           </button>
 
           <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 16 }}>
-            Invoice tidak bisa diedit setelah dibuat — periksa dulu sebelum menyimpan.
+            {/* 22 Oct 2026 (Phase 21, Task C1) — jasa stay editable while DRAFT. */}
+            Invoice dibuat sebagai Draf — jasa masih bisa diubah di halaman invoice sampai diterbitkan.
           </p>
 
           <div style={{ display: "flex", gap: 10 }}>
