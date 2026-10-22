@@ -150,4 +150,19 @@ export const invoicesApi = {
     const { data } = await api.delete(`/api/invoices/line-items/${lineId}/`);
     return data.invoice;
   },
+  // 22 Oct 2026 (Phase 21, Task C2) -- parts on a DRAFT invoice. Adding and
+  // returning post to the books and can be stopped by the readiness gate
+  // (409 with "blocks"); "not charged" moves nothing.
+  async addPartLine(invoiceId: string, payload: { part: string; quantity: number; unit_price?: number }): Promise<Invoice> {
+    const { data } = await api.post(`/api/invoices/${invoiceId}/part-lines/`, payload);
+    return data.invoice;
+  },
+  async returnPartLine(lineId: string): Promise<Invoice> {
+    const { data } = await api.post(`/api/invoices/part-lines/${lineId}/return/`);
+    return data.invoice;
+  },
+  async markPartNotCharged(lineId: string): Promise<Invoice> {
+    const { data } = await api.post(`/api/invoices/part-lines/${lineId}/not-charged/`);
+    return data.invoice;
+  },
 };

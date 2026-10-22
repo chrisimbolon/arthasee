@@ -20,7 +20,7 @@ import JasaSearchInput, { priceLabel } from "@/components/service/JasaSearchInpu
 import { Invoice, InvoiceStatus, invoicesApi } from "@/lib/api/invoicing";
 import { organizationsApi } from "@/lib/api/organizations";
 import { Payment, PaymentMethod, paymentsApi } from "@/lib/api/payments";
-import { ServiceItem, serviceItemsApi } from "@/lib/api/service";
+import { Part, ServiceItem, partsApi, serviceItemsApi } from "@/lib/api/service";
 import { ReadinessBlockedError, readinessBlockFromError } from "@/lib/readiness";
 import { ArrowLeft, Check, Download, Loader2, Pencil, Plus, Printer, Trash2, X } from "lucide-react";
 import Link from "next/link";
@@ -167,7 +167,7 @@ function DraftJasaEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
       <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Ubah Jasa (Draf)</h3>
       <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 14 }}>
         Selama invoice masih Draf, jasa bisa ditambah, diubah, atau dihapus. Setelah diterbitkan, invoice terkunci.
-        Untuk part, ubah lewat work order.
+        Part diubah di kartu &quot;Ubah Part (Draf)&quot; di bawah.
       </p>
       {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
@@ -230,6 +230,132 @@ function DraftJasaEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
       {picked && (
         <div style={{ fontSize: 12, color: "var(--steel)", marginTop: 6 }}>
           Dari Daftar Jasa: {priceLabel(picked, vehicleClass)} — harga boleh diubah.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 22 Oct 2026 (Phase 21, Task C2) — parts on a DRAFT invoice (Made's note,
+// 12 Sep: "masih bisa tambah & kurang barang"). Unlike jasa, these move
+// stock and post to the books right away (COGS <-> Inventory):
+//   - Tambah: stock goes down, billed at the selling price (editable).
+//   - Kembalikan ke stok: stock goes back, the cost is reversed, the line
+//     leaves the invoice. Whole line only (agreed 22 Oct).
+//   - Tidak ditagih: the part was used; the line stays at Rp 0 marked
+//     "(tidak ditagih)" so the customer sees it was free. Nothing moves.
+// Both posting actions can be stopped by the readiness gate; the shared
+// notice explains why. Staff-only card: hidden when printing.
+function DraftPartEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: () => void }) {
+  const partItems = invoice.line_items.filter((li) => li.kind === "part");
+  const [catalog, setCatalog] = useState<Part[]>([]);
+  const [partId, setPartId] = useState("");
+  const [qty, setQty] = useState("1");
+  const [price, setPrice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<ReadinessBlockedError | null>(null);
+
+  useEffect(() => { partsApi.list().then(setCatalog).catch(() => setCatalog([])); }, []);
+
+  const selected = catalog.find((p) => p.id === partId) ?? null;
+  const selectedCost = selected && Number(selected.cost_price) > 0 ? Number(selected.cost_price) : null;
+
+  const run = async (action: () => Promise<unknown>, fallback: string): Promise<boolean> => {
+    setBusy(true); setError(null); setBlocked(null);
+    try {
+      await action();
+      onUpdated();
+      return true;
+    } catch (err) {
+      const gate = readinessBlockFromError(err, "Part belum dapat diubah.");
+      if (gate) {
+        setBlocked(gate);
+      } else {
+        const apiMessage = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+        setError(apiMessage || fallback);
+      }
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const choosePart = (id: string) => {
+    setPartId(id);
+    const p = catalog.find((c) => c.id === id);
+    setPrice(p ? String(Math.round(Number(p.unit_price))) : "");
+  };
+
+  const addPart = async () => {
+    if (!partId || price === "") { setError("Pilih part dan isi harganya."); return; }
+    const ok = await run(
+      () => invoicesApi.addPartLine(invoice.id, { part: partId, quantity: Number(qty) || 1, unit_price: Number(price) }),
+      "Gagal menambah part.",
+    );
+    if (ok) { setPartId(""); setQty("1"); setPrice(""); }
+  };
+
+  const returnPart = async (lineId: string, description: string, quantity: string) => {
+    if (!window.confirm(`Kembalikan "${description}" × ${Number(quantity)} ke stok?\n\nStok bertambah dan baris ini dihapus dari invoice.`)) return;
+    await run(() => invoicesApi.returnPartLine(lineId), "Gagal mengembalikan part.");
+  };
+
+  const notCharged = async (lineId: string, description: string) => {
+    if (!window.confirm(`Tandai "${description}" tidak ditagih?\n\nPart tetap tercatat terpakai, tampil di invoice dengan harga Rp 0.`)) return;
+    await run(() => invoicesApi.markPartNotCharged(lineId), "Gagal mengubah part.");
+  };
+
+  return (
+    <div className="no-print card" style={{ maxWidth: 720, margin: "18px auto 0", padding: 20 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Ubah Part (Draf)</h3>
+      <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 14 }}>
+        Menambah atau mengembalikan part langsung mengubah stok dan pembukuan. &quot;Tidak ditagih&quot; = part
+        dipakai tapi gratis untuk pelanggan (tampil Rp 0).
+      </p>
+      {blocked && <ReadinessBlockNotice blocked={blocked} />}
+      {error && <div style={{ background: "var(--danger-light)", color: "var(--danger)", padding: "9px 12px", borderRadius: 5, fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+        {partItems.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13 }}>Belum ada part.</p>}
+        {partItems.map((li) => {
+          const free = li.description.endsWith("(tidak ditagih)");
+          return (
+            <div key={li.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span className="mono" style={{ fontSize: 13 }}>{li.description} × {Number(li.quantity)}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="mono" style={{ fontSize: 13 }}>{money(li.subtotal)}</span>
+                <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 8px" }} disabled={busy}
+                  onClick={() => returnPart(li.id, li.description, li.quantity)}>
+                  Kembalikan ke stok
+                </button>
+                {!free && (
+                  <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 8px" }} disabled={busy}
+                    onClick={() => notCharged(li.id, li.description)}>
+                    Tidak ditagih
+                  </button>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select className="input" style={{ flex: 1, minWidth: 180 }} value={partId} onChange={(e) => choosePart(e.target.value)}>
+          <option value="">— Tambah part —</option>
+          {catalog.map((p) => <option key={p.id} value={p.id}>{p.name} ({Number(p.current_stock)} {p.unit})</option>)}
+        </select>
+        <input className="input" style={{ width: 60 }} type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} />
+        <input className="input mono" style={{ width: 120 }} inputMode="numeric" placeholder="Harga" value={price}
+          onChange={(e) => setPrice(e.target.value.replace(/[^0-9]/g, ""))} />
+        <button className="btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} disabled={busy} onClick={addPart}>
+          {busy ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Plus size={13} />} Tambah
+        </button>
+      </div>
+      {selectedCost !== null && price !== "" && Number(price) <= selectedCost && (
+        <div style={{ fontSize: 12, color: "var(--danger)", marginTop: 6 }}>
+          Harga di bawah atau sama dengan HPP ({money(selectedCost)}) — bengkel tidak akan untung dari part ini.
         </div>
       )}
     </div>
@@ -746,6 +872,7 @@ function InvoiceDetailContent() {
       )}
 
       {invoice.status === "DRAFT" && <DraftJasaEditor invoice={invoice} onUpdated={load} />}
+      {invoice.status === "DRAFT" && <DraftPartEditor invoice={invoice} onUpdated={load} />}
 
       <div className="no-print" style={{ maxWidth: 720, margin: "18px auto 0", display: "flex", gap: 10, justifyContent: "center" }}>
         {invoice.status === "DRAFT" && (
