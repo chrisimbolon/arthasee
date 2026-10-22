@@ -1,0 +1,1242 @@
+# =============================================================================
+# === backend/apps/invoicing/tests.py ===
+# =============================================================================
+import uuid
+from datetime import date, timedelta
+from decimal import Decimal
+
+from apps.accounting import cancellations
+from apps.accounting.models import Account, JournalEntry, OpeningBalanceSession
+from apps.authentication.models import CustomUser
+from apps.core.models import Outbox
+from apps.inventory.models import Part, PartUsage, StockAdjustment
+from apps.invoicing.events import InvoiceCancelled
+from apps.organizations.models import Organization, OrganizationMembership
+from apps.service.models import Customer, ServiceRecord, Vehicle
+from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.core.management import call_command
+from django.test import SimpleTestCase
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
+
+from ..models import Invoice, InvoiceLineItem, InvoiceSequence
+
+
+class InvoicingAPITestBase(APITestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Now required — AccountingEventHandler is permanently
+        # subscribed to default_bus from the moment apps.accounting's
+        # AppConfig.ready() runs, for the rest of this test process.
+        # Every InvoiceIssued this file's tests publish now also
+        # attempts a real posting; without a seeded Chart of Accounts,
+        # that attempt fails loudly (Outbox row marked FAILED, not
+        # silently skipped) — this line keeps that failure from
+        # leaking into tests that aren't actually about accounting.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.invoicing@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        # 17 Sep 2026 -- Brand-New Workshop Readiness fallout. seed_coa()
+        # alone resolves COA + periods, but InvoiceStatusUpdateView's
+        # ISSUED transition is now gated on FULL organization
+        # readiness, which also requires the Opening Position pillar
+        # resolved. Genuinely brand-new test fixture, not a migrating
+        # shop -- zero-confirmation is the correct, honest choice here.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 2219 AB", manufacture_year=2022,
+            vehicle_type="Mobil", model="Honda Brio",
+        )
+        # Made's own explicit reason, confirmed 31 Jul: a specific
+        # mechanic must be identifiable on every invoice, even for
+        # routine work, so he can go back and question that person
+        # directly if the same car has an issue again. self.service_
+        # record is now created through a real WorkOrder.close() call
+        # — the only way a ServiceRecord ever actually comes into
+        # existence in production — with a mechanic already assigned,
+        # so every existing test in this file that creates an invoice
+        # from it keeps working exactly as before.
+        # InvoiceMechanicRequirementTests below deliberately builds
+        # its own service records without a mechanic, specifically to
+        # prove the hard block itself.
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
+        )
+        # Made's own confirmed real-world rule, 2 Aug — Chris
+        # witnessed it directly at Arya Motor: EVERY job goes through
+        # QC before being marked done, even a routine oil change or
+        # spark plug replacement. WorkOrder.close() now correctly
+        # rejects closing directly from OPEN or IN_PROGRESS (see
+        # apps.workorders.models.WorkOrder.close()) — a real
+        # precondition, not test boilerplate to skip.
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        self.service_record = work_order.close(closed_by=self.owner)
+        self.part = Part.objects.create(
+            organization=self.org, name="Kampas Rem", unit="set", unit_price=Decimal("250000.00"),
+        )
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("10.00"), reason="restock",
+        )
+        self.client.force_authenticate(user=self.owner)
+
+
+class InvoiceCreationTests(InvoicingAPITestBase):
+
+    def test_create_invoice_snapshots_customer_and_plate(self):
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["invoice"]["customer_name_snapshot"], "Brian Sira")
+        self.assertEqual(resp.data["invoice"]["license_plate_snapshot"], "BP 2219 AB")
+
+    def test_create_invoice_pulls_in_existing_part_usage(self):
+        PartUsage.objects.create(
+            organization=self.org, service_record=self.service_record, part=self.part,
+            quantity=Decimal("1.00"), unit_price_at_time=Decimal("250000.00"),
+        )
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        line_items = resp.data["invoice"]["line_items"]
+        self.assertEqual(len(line_items), 1)
+        self.assertEqual(line_items[0]["kind"], "part")
+        self.assertEqual(Decimal(line_items[0]["unit_price"]), Decimal("250000.00"))
+
+    def test_create_invoice_with_multiple_labor_lines(self):
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {
+                "labor_lines": [
+                    {"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 150000},
+                    {"description": "Jasa Balancing", "quantity": 1, "unit_price": 75000},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        labor_items = [li for li in resp.data["invoice"]["line_items"] if li["kind"] == "labor"]
+        self.assertEqual(len(labor_items), 2)
+        self.assertEqual(Decimal(resp.data["invoice"]["total"]), Decimal("225000.00"))
+
+    def test_price_snapshot_survives_later_part_price_change(self):
+        """
+        The core reason InvoiceLineItem snapshots unit_price instead
+        of reading Part.unit_price live — this is the test that
+        would fail immediately if that discipline were ever dropped.
+        """
+        PartUsage.objects.create(
+            organization=self.org, service_record=self.service_record, part=self.part,
+            quantity=Decimal("1.00"), unit_price_at_time=Decimal("250000.00"),
+        )
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = resp.data["invoice"]["id"]
+
+        self.part.unit_price = Decimal("999999.00")
+        self.part.save(update_fields=["unit_price"])
+
+        recheck = self.client.get(f"/api/invoices/{invoice_id}/")
+        self.assertEqual(Decimal(recheck.data["invoice"]["total"]), Decimal("250000.00"))
+
+    def test_cannot_invoice_the_same_service_record_twice(self):
+        first = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        second = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(Invoice.objects.filter(service_record=self.service_record).count(), 1)
+
+    def test_deposit_reduces_balance_due(self):
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa", "quantity": 1, "unit_price": 100000}]},
+            format="json",
+        )
+        invoice = Invoice.objects.get(id=resp.data["invoice"]["id"])
+        invoice.deposit_amount = Decimal("40000.00")
+        invoice.save(update_fields=["deposit_amount"])
+        self.assertEqual(invoice.balance_due, Decimal("60000.00"))
+
+    def test_missing_invoice_code_returns_clean_400_not_500(self):
+        """
+        The actual bug this guards against: Invoice.save() used to
+        hardcode 'AM' directly, so a shop with no invoice_code
+        configured would silently collide with Arya Motor's numbers
+        instead of getting told to configure their own code.
+        """
+        self.org.invoice_code = ""
+        self.org.save(update_fields=["invoice_code"])
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("invoice_code", resp.data["message"])
+        # The atomic transaction must have rolled back completely —
+        # no orphaned Invoice or InvoiceLineItem left behind by the
+        # failed attempt.
+        self.assertFalse(Invoice.objects.filter(service_record=self.service_record).exists())
+
+
+class InvoiceNumberingTests(InvoicingAPITestBase):
+
+    def _create_invoice_for_new_visit(self, plate):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number=plate, manufacture_year=2022,
+            vehicle_type="Mobil", model="Honda Brio",
+        )
+        # Reuses self.mechanic from the base fixture — same real
+        # WorkOrder.close() pattern, not a directly-created
+        # ServiceRecord with no originating WorkOrder.
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=vehicle, assigned_to=self.mechanic,
+        )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        record = work_order.close(closed_by=self.owner)
+        return self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+
+    def test_sequence_increments_within_the_same_year(self):
+        first = self._create_invoice_for_new_visit("BP 0001 AA")
+        second = self._create_invoice_for_new_visit("BP 0002 AA")
+        self.assertEqual(first.data["invoice"]["sequence_number"], 1)
+        self.assertEqual(second.data["invoice"]["sequence_number"], 2)
+
+    def test_number_format_matches_mades_scheme(self):
+        resp = self._create_invoice_for_new_visit("BP 0003 AA")
+        number = resp.data["invoice"]["number"]
+        self.assertRegex(number, r"^INV/REG/AM/\d{4}/\d{4}$")
+
+    def test_sequence_is_scoped_per_organization(self):
+        """Two different shops both creating their first invoice of
+        the year must both legitimately get sequence 1 — the
+        (organization, year) scoping on InvoiceSequence is what makes
+        that safe rather than a collision."""
+        self._create_invoice_for_new_visit("BP 0004 AA")  # org's 2nd invoice this test class
+
+        other_org = Organization.objects.create(name="Bengkel Lain Invoicing", invoice_code="BL")
+        # Real requirement, 26 Aug 2026 — WorkOrder.close() now hard-
+        # checks AccountingPeriod.assert_open_for_posting()
+        # synchronously. This test closes a real WorkOrder for
+        # other_org below, so it needs a real seeded period too.
+        call_command("seed_coa", organization=str(other_org.id), verbosity=0)
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherinvoicing@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=other_org, user=other_owner, role="owner", is_active=True,
+        )
+        other_customer = Customer.objects.create(organization=other_org, name="Other Customer")
+        other_vehicle = Vehicle.objects.create(
+            organization=other_org, customer=other_customer,
+            plate_number="BP 9999 ZZ", manufacture_year=2022,
+            vehicle_type="Mobil", model="Other Car",
+        )
+        # A mechanic scoped to other_org specifically, not self.mechanic
+        # (which belongs to self.org) — a real WorkOrder's mechanic
+        # must belong to the same organization as the WorkOrder itself.
+        other_mechanic = Mechanic.objects.create(organization=other_org, name="Budi")
+        other_work_order = WorkOrder.objects.create(
+            organization=other_org, vehicle=other_vehicle, assigned_to=other_mechanic,
+        )
+        other_work_order.status = "IN_PROGRESS"
+        other_work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=other_org, work_order=other_work_order, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        other_work_order.status = "QC"
+        other_work_order.save(update_fields=["status"])
+        other_record = other_work_order.close(closed_by=other_owner)
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.post(f"/api/service-records/{other_record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.data["invoice"]["sequence_number"], 1)
+
+
+class InvoiceStatusTests(InvoicingAPITestBase):
+
+    def test_status_can_be_updated(self):
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = resp.data["invoice"]["id"]
+        update = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        self.assertEqual(update.status_code, status.HTTP_200_OK)
+        self.assertEqual(update.data["invoice"]["status"], "ISSUED")
+
+    def test_invalid_status_rejected(self):
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = resp.data["invoice"]["id"]
+        update = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "MADE_UP"}, format="json")
+        self.assertEqual(update.status_code, status.HTTP_400_BAD_REQUEST)
+
+class InvoiceIssuedEventTests(InvoicingAPITestBase):
+    """
+    Proves both halves of what changed in InvoiceStatusUpdateView:
+    the real InvoiceIssued publish with a correct revenue split, and
+    the DRAFT one-way guard that's what makes "exactly once" an
+    actual guarantee for that publish, not just an intention.
+    """
+
+    def _issued_invoice(self):
+        """
+        One part line (via PartUsage, quantity 1.00 @ self.part's
+        250000.00) + one labor line (quantity 1 @ 100000) — real
+        split across both revenue categories, not a same-category
+        coincidence that would pass even with the fields swapped.
+        """
+        PartUsage.objects.create(
+            organization=self.org, service_record=self.service_record, part=self.part,
+            quantity=Decimal("1.00"), unit_price_at_time=Decimal("250000.00"),
+        )
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 100000}]},
+            format="json",
+        )
+        return create.data["invoice"]["id"]
+
+    def test_issuing_invoice_publishes_invoice_issued_with_correct_split(self):
+        invoice_id = self._issued_invoice()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        row = Outbox.objects.get(event_type="InvoiceIssued", payload__invoice_id=invoice_id)
+        self.assertEqual(row.organization_id, self.org.id)
+        # 1.00 * 100000.00 (labor) and 1.00 * 250000.00 (part) —
+        # verified by hand before writing this assertion, see
+        # conversation for the standalone check.
+        self.assertEqual(row.payload["service_amount"], "100000.0000")
+        self.assertEqual(row.payload["parts_amount"], "250000.0000")
+        self.assertEqual(row.payload["total"], "350000.0000")
+        self.assertEqual(row.payload["line_item_count"], 2)
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+
+    def test_creating_invoice_alone_does_not_publish_invoice_issued(self):
+        """
+        The trigger is specifically the DRAFT -> ISSUED transition,
+        not invoice creation itself — an invoice sits in DRAFT the
+        moment it's created (see Invoice.STATUS_CHOICES default) and
+        must not recognize revenue before it's actually issued.
+        """
+        self._issued_invoice()  # creates but never PATCHes to ISSUED
+        self.assertEqual(Outbox.objects.filter(event_type="InvoiceIssued").count(), 0)
+
+    def test_cannot_revert_issued_invoice_to_draft(self):
+        invoice_id = self._issued_invoice()
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+
+        resp = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "DRAFT"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        invoice = Invoice.objects.get(id=invoice_id)
+        self.assertEqual(invoice.status, "ISSUED")  # unchanged by the rejected attempt
+        # Exactly one InvoiceIssued — the guard blocks the illegal
+        # revert outright, it isn't merely suppressing a second
+        # publish while quietly allowing the revert itself through.
+        self.assertEqual(
+            Outbox.objects.filter(event_type="InvoiceIssued", payload__invoice_id=invoice_id).count(), 1,
+        )
+
+    def test_cannot_revert_cancelled_invoice_to_draft(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json")
+
+        resp = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "DRAFT"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_draft_to_draft_is_still_allowed(self):
+        """
+        Precision check on the guard — it blocks a REAL reversion
+        (old_status != DRAFT), not every PATCH that merely names
+        DRAFT as the target. A same-state no-op must still succeed.
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+
+        resp = self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "DRAFT"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+class InvoiceCancelledEventTests(InvoicingAPITestBase):
+    """
+    Task 2.3, Half A — proves an unpaid, issued invoice's cancellation
+    actually reverses the exact posting InvoiceIssued made (net
+    effect on every touched account is zero), not just that the
+    invoice's status field flips to CANCELLED.
+    """
+
+    def _issue_mixed_invoice(self):
+        """
+        Same real mixed part+labor shape as InvoiceIssuedEventTests'
+        own _issued_invoice() helper — one part line, one labor line,
+        so the reversal has to correctly flip a real 3-line entry,
+        not a trivial 2-line one.
+        """
+        PartUsage.objects.create(
+            organization=self.org, service_record=self.service_record, part=self.part,
+            quantity=Decimal("1.00"), unit_price_at_time=Decimal("250000.00"),
+        )
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 100000}]},
+            format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        return invoice_id
+
+    def test_cancelling_unpaid_issued_invoice_reverses_the_original_posting(self):
+        invoice_id = self._issue_mixed_invoice()
+
+        # Confirm the original posting really happened first — the
+        # reversal proof is meaningless if there was nothing to reverse.
+        self.assertEqual(JournalEntry.objects.filter(event_type="InvoiceIssued").count(), 1)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(JournalEntry.objects.filter(event_type="InvoiceCancelled").count(), 1)
+        reversal = JournalEntry.objects.get(event_type="InvoiceCancelled")
+        self.assertEqual(reversal.lines.count(), 3)
+
+        # The real proof — net effect across BOTH entries (the
+        # original issue + this reversal) must be exactly zero on
+        # every account either one touched.
+        ar = Account.objects.get(organization=self.org, code="1201")
+        service_rev = Account.objects.get(organization=self.org, code="4001")
+        parts_rev = Account.objects.get(organization=self.org, code="4002")
+        self.assertEqual(ar.balance(), Decimal("0.00"))
+        self.assertEqual(service_rev.balance(), Decimal("0.00"))
+        self.assertEqual(parts_rev.balance(), Decimal("0.00"))
+
+    def test_cancelling_draft_invoice_does_not_publish_invoice_cancelled(self):
+        """
+        A DRAFT invoice cancelled directly never had anything posted
+        for it — InvoiceIssued never fired. Publishing a cancellation
+        event here would be pure audit-trail noise with nothing to
+        reverse.
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(Outbox.objects.filter(event_type="InvoiceCancelled").count(), 0)
+
+    def test_cancelling_with_no_matching_original_entry_does_not_crash(self):
+        """
+        Simulates a real historical edge case — an invoice whose
+        issued_event_id doesn't correspond to any JournalEntry that
+        actually exists (e.g. the original InvoiceIssued failed to
+        post because the Chart of Accounts wasn't seeded yet at the
+        time). Cancellation itself must still succeed; the reversal
+        must simply not happen, not crash the request.
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+        invoice.issued_event_id = uuid.uuid4()  # a real UUID, matching nothing
+        invoice.save(update_fields=["issued_event_id"])
+
+        journal_count_before = JournalEntry.objects.count()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(JournalEntry.objects.count(), journal_count_before)  # nothing new posted
+        row = Outbox.objects.filter(event_type="InvoiceCancelled").first()
+        self.assertIsNotNone(row)
+        # Succeeded — the handler ran, it just had nothing to reverse.
+        # This is NOT a failure case, same distinction already proven
+        # for WorkOrderCompleted's zero-amount case.
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+
+    def test_calling_reverse_for_event_twice_does_not_double_reverse(self):
+        """
+        Idempotency guard, proven directly against cancellations.
+        reverse_for_event() itself — same reasoning and same pattern
+        as journal_generator.post_for_event()'s own idempotency test:
+        going through default_bus.publish() twice for the same
+        event_id would hit Outbox's own unique constraint first,
+        before ever reaching this guard, so the guard is tested by
+        calling the function directly instead.
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            issued_event_id=invoice.issued_event_id,
+        )
+        cancellations.reverse_for_event(cancel_event)
+        cancellations.reverse_for_event(cancel_event)  # same event, called again directly
+
+        self.assertEqual(
+            JournalEntry.objects.filter(reference_event_id=cancel_event.event_id).count(), 1,
+        )
+
+    def test_reversal_entry_carries_the_real_actor_when_cancelled_by_is_set(self):
+        """
+        6 Sep 2026 — real audit-trail coverage for reverse_for_event()'s
+        own actor resolution (Sansan's own "who performed this
+        reversal" question, Q57), not a live incident. Constructs
+        InvoiceCancelled directly, isolating the resolution logic
+        itself from the real view's own request/response cycle — see
+        test_real_cancellation_via_the_api_attributes_the_reversal_to_
+        the_acting_user below for the real, end-to-end HTTP proof that
+        InvoiceStatusUpdateView.patch() actually threads this through
+        in production.
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            issued_event_id=invoice.issued_event_id,
+            cancelled_by=self.owner.id,
+        )
+        reversal = cancellations.reverse_for_event(cancel_event)
+
+        self.assertEqual(reversal.created_by_id, self.owner.id)
+
+    def test_reversal_entry_has_no_actor_when_cancelled_by_is_not_set(self):
+        """
+        Regression proof — cancelled_by is genuinely optional (a
+        system-triggered cancellation with no human actor, say); a
+        reversal built from an event that never set it must still
+        resolve cleanly, created_by simply staying null, not crash.
+        """
+        invoice_id = self._issue_mixed_invoice()
+        invoice = Invoice.objects.get(id=invoice_id)
+
+        cancel_event = InvoiceCancelled(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            issued_event_id=invoice.issued_event_id,
+        )
+        reversal = cancellations.reverse_for_event(cancel_event)
+
+        self.assertIsNone(reversal.created_by_id)
+
+    def test_real_cancellation_via_the_api_attributes_the_reversal_to_the_acting_user(self):
+        """
+        6 Sep 2026 — THE real, end-to-end proof this whole fix exists
+        for: InvoiceStatusUpdateView.patch() now threads request.user
+        into the published InvoiceCancelled event, closing the gap
+        the two tests above deliberately isolated away from — this is
+        the one that actually exercises the real HTTP PATCH endpoint,
+        not a direct model/event construction.
+        """
+        invoice_id = self._issue_mixed_invoice()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        reversal = JournalEntry.objects.get(event_type="InvoiceCancelled")
+        self.assertEqual(reversal.created_by_id, self.owner.id)
+
+class InvoiceTenantIsolationTests(InvoicingAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.other_org = Organization.objects.create(name="Bengkel Lain Invoice Isolasi")
+        self.other_owner = CustomUser.objects.create_user(
+            email="owner.otherinvoiceisolasi@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.other_org, user=self.other_owner, role="owner", is_active=True,
+        )
+
+    def test_org_b_cannot_create_invoice_for_org_a_service_record(self):
+        self.client.force_authenticate(user=self.other_owner)
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_org_b_cannot_view_org_a_invoice(self):
+        created = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = created.data["invoice"]["id"]
+        self.client.force_authenticate(user=self.other_owner)
+        resp = self.client.get(f"/api/invoices/{invoice_id}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class InvoicePdfTests(InvoicingAPITestBase):
+    """
+    Made's own ask, 31 Jul: a real, downloadable PDF for LUNAS
+    invoices, gated hard to PAID only — confirmed with Chris. Can't
+    verify individual rendered cell values the way the Excel-based
+    tests do (no PDF-parsing library available here), so this proves
+    what's genuinely checkable: the actual gate itself (the real
+    point of this feature), that a real, valid PDF comes back for a
+    PAID invoice, and that the filename is safe.
+    """
+
+    def _create_and_pay(self):
+        """
+        UPDATED — status="PAID" can no longer be reached via a manual
+        PATCH (see apps.invoicing.views.InvoiceStatusUpdateView's own
+        updated docstring, and apps.payments.models.Payment.record()).
+        This now pays the invoice for real through the actual payment
+        endpoint, same as production — the second PATCH this used to
+        end with is exactly the shortcut that no longer exists.
+        """
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Servis Rem", "quantity": 1, "unit_price": 150000}]},
+            format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+
+        total = create.data["invoice"]["total"]
+        self.client.post(
+            f"/api/invoices/{invoice_id}/payments/",
+            {"amount": total, "method": "cash"},
+            format="json",
+        )
+        return invoice_id
+
+    def test_returns_a_real_pdf_for_a_paid_invoice(self):
+        invoice_id = self._create_and_pay()
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        # %PDF is the real, standard magic-byte signature every valid
+        # PDF file starts with — proves this is a genuine rendered
+        # document, not empty or garbage bytes silently returned as
+        # a 200.
+        self.assertTrue(resp.content.startswith(b"%PDF"))
+
+    def test_blocked_for_draft_invoice(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("Lunas", resp.data["message"])
+
+    def test_blocked_for_issued_invoice(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_blocked_for_cancelled_invoice(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = create.data["invoice"]["id"]
+        self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "CANCELLED"}, format="json")
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_filename_has_no_raw_slashes(self):
+        """
+        The exact real bug caught before shipping: invoice.number
+        genuinely contains slashes ("INV/REG/AM/0004/2026"), which
+        would break as a raw filename on a real filesystem.
+        """
+        invoice_id = self._create_and_pay()
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        disposition = resp["Content-Disposition"]
+        filename = disposition.split("filename=")[1]
+        self.assertNotIn("/", filename)
+
+    def test_org_b_cannot_download_org_a_invoice_pdf(self):
+        """
+        other_owner isn't part of InvoicingAPITestBase's own setUp()
+        — only InvoiceTenantIsolationTests defines it, in its own
+        setUp(), for a different test class entirely. Created locally
+        here instead, matching the same self-contained pattern
+        InvoiceNumberingTests.test_sequence_is_scoped_per_organization
+        already uses for exactly this situation.
+        """
+        invoice_id = self._create_and_pay()
+
+        other_org = Organization.objects.create(name="Bengkel Lain PDF", invoice_code="BLP")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherinvoicepdf@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=other_org, user=other_owner, role="owner", is_active=True,
+        )
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.get(f"/api/invoices/{invoice_id}/receipt.pdf")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class TerbilangRupiahTests(SimpleTestCase):
+    """
+    Made's own handwritten meeting note, 4 Aug: "WO & Invoice:
+    terbilang, diterima oleh." Chris's own confirmed scope, 5 Aug:
+    Invoice only. Direct, real unit tests against the pure function —
+    InvoicePdfTests above can't verify individual rendered text (no
+    PDF-parsing library available), so this is the actual, precise
+    coverage for the algorithm itself: a wrong spelled-out amount on
+    a financial document is a real trust problem, not a cosmetic bug.
+    SimpleTestCase, not APITestCase — no database touched at all.
+    """
+
+    def test_zero(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(0), "Nol Rupiah")
+
+    def test_single_digit(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(1), "Satu Rupiah")
+
+    def test_teens_use_belas_not_puluh(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(11), "Sebelas Rupiah")
+        self.assertEqual(terbilang_rupiah(15), "Lima Belas Rupiah")
+
+    def test_tens_with_a_remainder(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(21), "Dua Puluh Satu Rupiah")
+
+    def test_exactly_one_hundred_uses_seratus_not_satu_ratus(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(100), "Seratus Rupiah")
+
+    def test_exactly_one_thousand_uses_seribu_not_satu_ribu(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(1000), "Seribu Rupiah")
+
+    def test_two_thousand_does_not_say_seribu_ribu(self):
+        """The real reason seribu is a special case bounded at 2000,
+        not just "n < 1000" — without it, 2000 would recurse into
+        terbilang_words(2) + " ribu" on top of the 1000-1999 branch
+        producing nonsense like "seribu ribu" for anything doubled."""
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(2000), "Dua Ribu Rupiah")
+
+    def test_no_trailing_nol_when_a_remainder_is_genuinely_zero(self):
+        """The actual bug the recursive algorithm has to avoid — a
+        naive implementation emits a trailing 'nol' whenever a
+        remainder is exactly zero (e.g. "tujuh ratus empat puluh ribu
+        nol" for 740.000), which is wrong and would look broken on a
+        real invoice."""
+        from ..pdf import terbilang_rupiah
+        result = terbilang_rupiah(740000)
+        self.assertEqual(result, "Tujuh Ratus Empat Puluh Ribu Rupiah")
+        self.assertNotIn("Nol", result)
+
+    def test_real_value_from_this_apps_own_example(self):
+        """The exact total shown on a real invoice screenshot during
+        this feature's own planning — Rp 740.000."""
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(740000), "Tujuh Ratus Empat Puluh Ribu Rupiah")
+
+    def test_millions(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(1500000), "Satu Juta Lima Ratus Ribu Rupiah")
+
+    def test_accepts_a_decimal_same_as_every_other_money_field_in_this_app(self):
+        from ..pdf import terbilang_rupiah
+        self.assertEqual(terbilang_rupiah(Decimal("240000.00")), "Dua Ratus Empat Puluh Ribu Rupiah")
+
+
+class InvoiceMechanicRequirementTests(InvoicingAPITestBase):
+    """
+    Made's own explicit reason, confirmed 31 Jul: a specific mechanic
+    must be identifiable on every invoice, even for routine work, so
+    he can go back and question that person directly if the same car
+    has an issue again. Hard-blocked, not a soft warning — deliberately
+    builds its own service records WITHOUT a mechanic assigned, since
+    the shared base fixture's own self.service_record now always has
+    one (see InvoicingAPITestBase's own setUp() for why).
+    """
+
+    def _work_order_without_mechanic(self):
+        """
+        Made's own "no orphan completions" rule, 4 Aug, means
+        WorkOrder.close() itself now ALSO rejects assigned_to=None —
+        the normal path (WorkOrder -> close() -> ServiceRecord) can
+        no longer produce a mechanic-less ServiceRecord at all, which
+        is exactly the point (see the new, dedicated coverage for
+        that rule in apps.workorders.tests.test_workorders.WorkOrderNoMechanicHardBlockTests).
+
+        This helper now constructs the scenario directly via the ORM
+        instead, bypassing close() entirely — still a real, defensible
+        case (a ServiceRecord linked to a WorkOrder some other way,
+        never through close() itself) and still the right place to
+        prove Invoice.save()'s OWN, independent check actually holds,
+        not merely that WorkOrder.close() happens to catch it first.
+        """
+        work_order = WorkOrder.objects.create(organization=self.org, vehicle=self.vehicle)
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-31", odometer_km=5000,
+            issue_description="Dibuat langsung, tanpa mekanik",
+        )
+        work_order.service_record = record
+        work_order.save(update_fields=["service_record"])
+        return record
+
+    def test_cannot_create_invoice_when_work_order_has_no_mechanic(self):
+        record = self._work_order_without_mechanic()
+        resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("mekanik", resp.data["message"].lower())
+
+    def test_failed_attempt_leaves_no_orphaned_invoice(self):
+        """Same rollback discipline already proven for the missing-
+        invoice_code case — a failed attempt must leave nothing
+        behind, not a half-created Invoice with no line items."""
+        record = self._work_order_without_mechanic()
+        self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertFalse(Invoice.objects.filter(service_record=record).exists())
+
+    def test_cannot_create_invoice_when_service_record_has_no_work_order_at_all(self):
+        """
+        Defensive edge case — a ServiceRecord created some other way
+        (direct ORM, an admin action, a future code path) with no
+        WorkOrder pointing back to it at all. getattr(..., None) must
+        treat this exactly the same as "no mechanic assigned," not
+        crash with RelatedObjectDoesNotExist.
+        """
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-31", odometer_km=5000,
+            issue_description="Dibuat langsung, tanpa work order",
+        )
+        resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_can_create_invoice_once_mechanic_is_assigned(self):
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
+        )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        record = work_order.close(closed_by=self.owner)
+        resp = self.client.post(f"/api/service-records/{record.id}/invoice/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["invoice"]["mechanic_name_snapshot"], "Alex")
+
+    def test_mechanic_snapshot_survives_later_mechanic_rename(self):
+        """
+        The core reason this is a snapshot rather than a live
+        reference — mirrors test_price_snapshot_survives_later_
+        part_price_change's own reasoning exactly, applied to the
+        mechanic's name instead of a part's price.
+        """
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = resp.data["invoice"]["id"]
+
+        self.mechanic.name = "Alex (Nama Baru)"
+        self.mechanic.save(update_fields=["name"])
+
+        recheck = self.client.get(f"/api/invoices/{invoice_id}/")
+        self.assertEqual(recheck.data["invoice"]["mechanic_name_snapshot"], "Alex")
+
+    def test_mechanic_snapshot_survives_later_mechanic_deactivation(self):
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice_id = resp.data["invoice"]["id"]
+
+        self.mechanic.is_active = False
+        self.mechanic.save(update_fields=["is_active"])
+
+        recheck = self.client.get(f"/api/invoices/{invoice_id}/")
+        self.assertEqual(recheck.data["invoice"]["mechanic_name_snapshot"], "Alex")
+
+
+class InvoiceLineItemNegativeAmountTests(InvoicingAPITestBase):
+    """
+    6 Sep 2026 — real coverage for InvoiceLineItem.save()'s new
+    negative-amount guard, found via Sansan's own "negative
+    transaction" design-review question (Q25), not a live incident.
+    Chris's own confirmed policy: a standard Invoice must never
+    represent a negative transaction at all — a genuine credit/return
+    belongs in a dedicated, separate flow with its own journal
+    treatment, never a raw negative Invoice line.
+    """
+
+    def test_negative_quantity_rejected_at_the_model_layer(self):
+        """
+        The real, unconditional proof of the fix itself — direct ORM
+        construction, bypassing any serializer/view layer entirely,
+        so this holds regardless of whatever validation may or may
+        not already exist above the model.
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        with self.assertRaises(ValueError):
+            InvoiceLineItem.objects.create(
+                invoice=invoice, kind="labor", description="Jasa Negatif",
+                quantity=Decimal("-1.00"), unit_price=Decimal("100000.00"),
+            )
+
+    def test_negative_unit_price_rejected_at_the_model_layer(self):
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        with self.assertRaises(ValueError):
+            InvoiceLineItem.objects.create(
+                invoice=invoice, kind="labor", description="Jasa Harga Negatif",
+                quantity=Decimal("1.00"), unit_price=Decimal("-50000.00"),
+            )
+
+    def test_rejected_line_item_is_never_persisted(self):
+        """
+        Real proof this fails BEFORE writing anything, not after —
+        matching this codebase's own "validate before touching the
+        database" discipline used everywhere else (JournalEntry.
+        post(), OpeningBalanceSession.post(), etc.).
+        """
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        count_before = InvoiceLineItem.objects.filter(invoice=invoice).count()
+        try:
+            InvoiceLineItem.objects.create(
+                invoice=invoice, kind="labor", description="Jasa Negatif",
+                quantity=Decimal("-1.00"), unit_price=Decimal("100000.00"),
+            )
+        except ValueError:
+            pass
+        self.assertEqual(InvoiceLineItem.objects.filter(invoice=invoice).count(), count_before)
+
+    def test_positive_line_items_still_save_normally(self):
+        """Regression proof — the guard must not accidentally block
+        the normal, legitimate case."""
+        create = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        InvoiceLineItem.objects.create(
+            invoice=invoice, kind="labor", description="Jasa Normal",
+            quantity=Decimal("1.00"), unit_price=Decimal("100000.00"),
+        )
+        self.assertTrue(InvoiceLineItem.objects.filter(invoice=invoice, description="Jasa Normal").exists())
+
+    def test_negative_labor_line_via_the_real_api_does_not_return_500(self):
+        """
+        Real, honest caveat: this asserts the response is NOT a raw
+        500 — it does not assume a specific clean status code, since
+        invoicing/serializers.py and the invoice-creation view itself
+        were not reviewed directly to confirm whether a serializer-
+        level guard already exists above this model fix, or whether
+        the view catches ValueError the same way it demonstrably does
+        for the missing-invoice_code and missing-mechanic cases
+        (both proven elsewhere in this file). Either a clean 4xx or a
+        genuinely different real validation error is an acceptable
+        outcome here — a raw 500 crashing the request is not.
+        """
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Negatif", "quantity": 1, "unit_price": -100000}]},
+            format="json",
+        )
+        self.assertLess(resp.status_code, 500)
+
+class InvoiceDueDateCreationTests(InvoicingAPITestBase):
+    """
+    15 Sep 2026 — real coverage for the new, optional due_date passed
+    at invoice-creation time.
+    """
+
+    def test_due_date_can_be_set_at_creation(self):
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"due_date": "2026-10-01"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        invoice = Invoice.objects.get(id=resp.data["invoice"]["id"])
+        self.assertEqual(invoice.due_date, date(2026, 10, 1))
+
+    def test_due_date_defaults_to_none_when_omitted(self):
+        resp = self.client.post(f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json")
+        invoice = Invoice.objects.get(id=resp.data["invoice"]["id"])
+        self.assertIsNone(invoice.due_date)
+
+
+class InvoiceIsOverdueTests(InvoicingAPITestBase):
+    """
+    15 Sep 2026 — real, direct model-layer coverage for Invoice.
+    is_overdue — a derived property, not a status value, so tested
+    directly against real Invoice rows in every real status
+    combination it has to distinguish.
+    """
+
+    def _invoice(self, *, due_date=None, status_value="ISSUED"):
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/", {}, format="json",
+        )
+        invoice = Invoice.objects.get(id=create.data["invoice"]["id"])
+        invoice.due_date = due_date
+        invoice.status = status_value
+        invoice.save(update_fields=["due_date", "status"])
+        return invoice
+
+    def test_no_due_date_is_never_overdue(self):
+        invoice = self._invoice(due_date=None, status_value="ISSUED")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_future_due_date_is_not_overdue(self):
+        invoice = self._invoice(due_date=date.today() + timedelta(days=7), status_value="ISSUED")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_past_due_date_on_issued_invoice_is_overdue(self):
+        invoice = self._invoice(due_date=date.today() - timedelta(days=1), status_value="ISSUED")
+        self.assertTrue(invoice.is_overdue)
+
+    def test_past_due_date_on_partially_paid_invoice_is_overdue(self):
+        """THE real proof an invoice can be both partially paid AND
+        overdue at once — the actual reason this is a derived
+        property, not a competing status value."""
+        invoice = self._invoice(due_date=date.today() - timedelta(days=1), status_value="PARTIALLY_PAID")
+        self.assertTrue(invoice.is_overdue)
+
+    def test_past_due_date_on_paid_invoice_is_not_overdue(self):
+        """A fully-settled invoice is never 'late,' no matter how
+        overdue the original due date was — it's already paid."""
+        invoice = self._invoice(due_date=date.today() - timedelta(days=30), status_value="PAID")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_past_due_date_on_cancelled_invoice_is_not_overdue(self):
+        invoice = self._invoice(due_date=date.today() - timedelta(days=30), status_value="CANCELLED")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_past_due_date_on_draft_invoice_is_not_overdue(self):
+        """Never issued yet — 'late' doesn't honestly apply."""
+        invoice = self._invoice(due_date=date.today() - timedelta(days=30), status_value="DRAFT")
+        self.assertFalse(invoice.is_overdue)
+
+    def test_due_date_exactly_today_is_not_yet_overdue(self):
+        """A real boundary check — due TODAY is not yet late; it
+        becomes overdue starting tomorrow, not the day it's due."""
+        invoice = self._invoice(due_date=date.today(), status_value="ISSUED")
+        self.assertFalse(invoice.is_overdue)
+
+class InvoiceListTests(InvoicingAPITestBase):
+    """
+    15 Sep 2026 — real coverage for the new, previously-missing
+    global invoice list endpoint (GET /api/invoices/).
+    """
+
+    def _create_invoice(self, plate, *, labor_total=100000):
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number=plate, manufacture_year=2022,
+            vehicle_type="Mobil", model="Honda Brio",
+        )
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=vehicle, assigned_to=self.mechanic,
+        )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order,
+            description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        record = work_order.close(closed_by=self.owner)
+        create = self.client.post(
+            f"/api/service-records/{record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa", "quantity": 1, "unit_price": labor_total}]},
+            format="json",
+        )
+        return create.data["invoice"]["id"]
+
+    def test_lists_every_invoice_for_the_org(self):
+        self._create_invoice("BP 5001 AA")
+        self._create_invoice("BP 5002 AA")
+        resp = self.client.get("/api/invoices/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 2)
+
+    def test_filters_by_status(self):
+        draft_id = self._create_invoice("BP 5003 AA")
+        issued_id = self._create_invoice("BP 5004 AA")
+        self.client.patch(f"/api/invoices/{issued_id}/status/", {"status": "ISSUED"}, format="json")
+
+        resp = self.client.get("/api/invoices/?status=ISSUED")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        returned_ids = {inv["id"] for inv in resp.data["invoices"]}
+        self.assertEqual(returned_ids, {issued_id})
+
+    def test_invalid_status_filter_is_ignored_not_rejected(self):
+        """A real, deliberate choice — an unrecognized status value
+        just yields the unfiltered list, same harmless behavior as
+        every other plain-equality filter already in this codebase
+        (e.g. CustomerListView's own ?customer_type= filter)."""
+        self._create_invoice("BP 5005 AA")
+        resp = self.client.get("/api/invoices/?status=NOT_A_REAL_STATUS")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_customer_name(self):
+        self._create_invoice("BP 5006 AA")  # self.customer is "Brian Sira"
+        resp = self.client.get("/api/invoices/?search=Brian")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_plate_number(self):
+        self._create_invoice("BP 5007 ZZ")
+        resp = self.client.get("/api/invoices/?search=5007")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_matches_invoice_number(self):
+        invoice_id = self._create_invoice("BP 5008 AA")
+        invoice = Invoice.objects.get(id=invoice_id)
+        resp = self.client.get(f"/api/invoices/?search={invoice.number}")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_search_with_no_match_returns_empty_not_error(self):
+        self._create_invoice("BP 5009 AA")
+        resp = self.client.get("/api/invoices/?search=SomethingThatDoesNotExist")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_overdue_filter_excludes_non_overdue_invoices(self):
+        overdue_id = self._create_invoice("BP 5010 AA")
+        not_overdue_id = self._create_invoice("BP 5011 AA")
+
+        overdue_invoice = Invoice.objects.get(id=overdue_id)
+        overdue_invoice.status = "ISSUED"
+        overdue_invoice.due_date = date.today() - timedelta(days=5)
+        overdue_invoice.save(update_fields=["status", "due_date"])
+
+        not_overdue_invoice = Invoice.objects.get(id=not_overdue_id)
+        not_overdue_invoice.status = "ISSUED"
+        not_overdue_invoice.due_date = date.today() + timedelta(days=5)
+        not_overdue_invoice.save(update_fields=["status", "due_date"])
+
+        resp = self.client.get("/api/invoices/?overdue=true")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        returned_ids = {inv["id"] for inv in resp.data["invoices"]}
+        self.assertEqual(returned_ids, {overdue_id})
+
+    def test_overdue_filter_combines_with_status_filter(self):
+        """Real proof the two real filters compose correctly — a
+        PARTIALLY_PAID+overdue invoice found by BOTH filters at once,
+        not just each independently."""
+        invoice_id = self._create_invoice("BP 5012 AA")
+        invoice = Invoice.objects.get(id=invoice_id)
+        invoice.status = "PARTIALLY_PAID"
+        invoice.due_date = date.today() - timedelta(days=1)
+        invoice.save(update_fields=["status", "due_date"])
+
+        resp = self.client.get("/api/invoices/?status=PARTIALLY_PAID&overdue=true")
+        self.assertEqual(resp.data["count"], 1)
+
+        resp_wrong_status = self.client.get("/api/invoices/?status=PAID&overdue=true")
+        self.assertEqual(resp_wrong_status.data["count"], 0)
+
+    def test_org_b_cannot_see_org_a_invoices_in_the_list(self):
+        self._create_invoice("BP 5013 AA")
+        # InvoicingAPITestBase itself has no other_owner — build one
+        # locally, same self-contained pattern already established
+        # elsewhere in this file (e.g. InvoiceNumberingTests.
+        # test_sequence_is_scoped_per_organization).
+        other_org = Organization.objects.create(name="Bengkel Lain Invoice List")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherinvoicelist@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/invoices/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 0)
+
+class InvoiceIssueReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7. Real proof
+    the readiness gate is scoped SPECIFICALLY to the ISSUED
+    transition — and, just as importantly, that CANCELLING an
+    invoice is never blocked by it (a wind-down action, not a new
+    financial commitment).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.invissuereadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Budi")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Wowo")
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _draft_invoice(self):
+        wo = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic, status="QC",
+        )
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle, service_date=date(2026, 9, 17),
+            odometer_km=10000, issue_description="Servis",
+        )
+        wo.service_record = record
+        wo.status = "DONE"
+        wo.save(update_fields=["service_record", "status"])
+        return Invoice.objects.create(service_record=record)
+
+    def test_issue_blocked_when_org_not_ready(self):
+        invoice = self._draft_invoice()
+        resp = self.client.patch(f"/api/invoices/{invoice.id}/status/", {"status": "ISSUED"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "DRAFT")
+
+    def test_issue_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        invoice = self._draft_invoice()
+        resp = self.client.patch(f"/api/invoices/{invoice.id}/status/", {"status": "ISSUED"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "ISSUED")
+
+    def test_cancel_never_blocked_by_readiness(self):
+        """The real, central proof of the whole 'don't gate wind-down
+        actions' design call — cancelling a DRAFT invoice must work
+        even when the org is not ready."""
+        invoice = self._draft_invoice()
+        resp = self.client.patch(f"/api/invoices/{invoice.id}/status/", {"status": "CANCELLED"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "CANCELLED")        

@@ -28,7 +28,7 @@ expression in PartUsage.save() — and would need its OWN publish()
 call for PartConsumed, or that stock movement would silently never
 reach the ledger. Not wired here because no live API endpoint
 creating PartUsage directly has been confirmed to exist in
-production — only direct-ORM test setup in apps.invoicing.tests.
+production — only direct-ORM test setup in apps.invoicing.tests.test_invoicing.
 Needs a direct answer before Sprint 2 is considered complete.
 
 --- Sprint 7, Task 7.3: StockOpnameCompleted (added here) ---

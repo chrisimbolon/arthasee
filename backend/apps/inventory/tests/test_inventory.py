@@ -1,0 +1,1255 @@
+# =============================================================================
+# === backend/apps/inventory/tests.py ===
+# =============================================================================
+import uuid
+from decimal import Decimal
+
+from apps.authentication.models import CustomUser
+from apps.invoicing.models import Invoice
+from apps.organizations.models import Organization, OrganizationMembership
+from apps.service.models import Customer, ServiceRecord, Vehicle
+from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.core.management import call_command
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
+
+from ..models import Part, PartFieldChange, PartUsage, StockAdjustment
+
+
+class InventoryAPITestBase(APITestCase):
+    """
+    Deliberately its own base fixture, not imported from
+    apps.service.tests.test_service — apps.inventory should be independently
+    testable without a hard dependency on another app's test module,
+    same loose-coupling instinct as serializers.py's local
+    _user_org_ids copy. A little setUp duplication is a fair trade
+    for that.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        # Real requirement, 26 Aug 2026 — WorkOrder.close() now hard-
+        # checks AccountingPeriod.assert_open_for_posting()
+        # synchronously. PartUsageFrozenAfterInvoiceTests' own setUp()
+        # closes a real WorkOrder, so this org needs a real seeded
+        # period, not just a COA.
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.inventory@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.customer = Customer.objects.create(organization=self.org, name="Budi Pelanggan")
+        self.client.force_authenticate(user=self.owner)
+
+
+class PartInventoryTests(InventoryAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", sku="BSI-001",
+            unit="pcs", unit_price=Decimal("25000.00"),
+        )
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 7001 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        self.service_record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-20", odometer_km=10000,
+            issue_description="Ganti busi",
+        )
+
+    def test_create_part_via_api_starts_at_zero_stock(self):
+        resp = self.client.post(
+            "/api/parts/",
+            {"name": "Filter Oli", "unit": "pcs", "unit_price": 45000},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(resp.data["part"]["current_stock"]), Decimal("0.00"))
+
+    def test_current_stock_is_read_only_via_api(self):
+        resp = self.client.put(
+            f"/api/parts/{self.part.id}/",
+            {"current_stock": "9999.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("0.00"))
+
+    def test_stock_adjustment_restock_increases_stock(self):
+        resp = self.client.post(
+            f"/api/parts/{self.part.id}/adjustments/",
+            {"quantity_change": "20.00", "reason": "restock"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("20.00"))
+
+    def test_stock_adjustment_damage_decreases_stock(self):
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("20.00"), reason="restock",
+        )
+        resp = self.client.post(
+            f"/api/parts/{self.part.id}/adjustments/",
+            {"quantity_change": "-3.00", "reason": "damage"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("17.00"))
+
+    def test_part_usage_deducts_stock_matching_mades_own_example(self):
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("20.00"), reason="restock",
+        )
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "4.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("16.00"))
+        self.assertEqual(resp.data["warnings"], [])
+
+    def test_part_usage_snapshots_price_not_a_live_reference(self):
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("20.00"), reason="restock",
+        )
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "2.00"},
+            format="json",
+        )
+        usage_id = resp.data["part_usage"]["id"]
+
+        self.part.unit_price = Decimal("99999.00")
+        self.part.save(update_fields=["unit_price"])
+
+        usage = PartUsage.objects.get(id=usage_id)
+        self.assertEqual(usage.unit_price_at_time, Decimal("25000.00"))
+
+    def test_part_usage_allows_negative_stock_but_returns_a_warning(self):
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "5.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(len(resp.data["warnings"]) > 0)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("-5.00"))
+
+    def test_low_stock_filter(self):
+        """
+        Updated for the real per-part minimum_stock field (previously
+        relied on the old global "<=5" default, which no longer
+        exists). Both parts now get an explicit threshold — this test
+        proves the SAME real behavior it always proved (a part below
+        its own threshold flags, a well-stocked one doesn't), just
+        against the new, real per-part mechanism instead of an
+        implicit global rule.
+        """
+        self.part.minimum_stock = Decimal("5.00")
+        self.part.save(update_fields=["minimum_stock"])
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("3.00"), reason="restock",
+        )
+        well_stocked = Part.objects.create(
+            organization=self.org, name="Oli Mesin", unit="liter", unit_price=Decimal("105000.00"),
+            minimum_stock=Decimal("5.00"),
+        )
+        StockAdjustment.objects.create(
+            organization=self.org, part=well_stocked, quantity_change=Decimal("50.00"), reason="restock",
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 1)
+        self.assertEqual(resp.data["results"][0]["name"], "Busi")
+
+
+    def test_part_search_by_name_or_sku(self):
+        by_sku = self.client.get("/api/parts/?search=BSI-001")
+        self.assertEqual(by_sku.data["count"], 1)
+        by_name = self.client.get("/api/parts/?search=Busi")
+        self.assertEqual(by_name.data["count"], 1)
+
+
+class InventoryProtectedDeletionTests(InventoryAPITestBase):
+    """Part's own version of the Principle 2 protected-deletion tests
+    — see apps.service.tests.test_service.Principle2ProtectedDeletionTests for the
+    Customer/Vehicle equivalents."""
+
+    def test_part_with_usage_history_cannot_be_deleted(self):
+        part = Part.objects.create(
+            organization=self.org, name="Busi Protected Test", unit="pcs", unit_price=Decimal("25000.00"),
+        )
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 3334 CC", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        service_record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=vehicle,
+            service_date="2026-07-19", odometer_km=10000,
+            issue_description="Ganti busi",
+        )
+        PartUsage.objects.create(
+            organization=self.org, service_record=service_record, part=part,
+            quantity=Decimal("1.00"), unit_price_at_time=Decimal("25000.00"),
+        )
+        resp = self.client.delete(f"/api/parts/{part.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertTrue(Part.objects.filter(id=part.id).exists())
+
+    def test_part_without_usage_history_can_be_deleted(self):
+        empty_part = Part.objects.create(
+            organization=self.org, name="Never Used Part", unit="pcs", unit_price=Decimal("1000.00"),
+        )
+        resp = self.client.delete(f"/api/parts/{empty_part.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(Part.objects.filter(id=empty_part.id).exists())
+
+
+class InventoryTenantIsolationTests(InventoryAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", unit="pcs", unit_price=Decimal("25000.00"),
+        )
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 8001 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        self.service_record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle,
+            service_date="2026-07-20", odometer_km=10000,
+            issue_description="Ganti busi",
+        )
+        self.other_org = Organization.objects.create(name="Bengkel Lain Inventaris")
+        self.other_owner = CustomUser.objects.create_user(
+            email="owner.otherinventory@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.other_org, user=self.other_owner, role="owner", is_active=True,
+        )
+
+    def test_org_b_cannot_see_org_a_parts(self):
+        self.client.force_authenticate(user=self.other_owner)
+        resp = self.client.get("/api/parts/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_org_b_cannot_retrieve_org_a_part_detail(self):
+        self.client.force_authenticate(user=self.other_owner)
+        resp = self.client.get(f"/api/parts/{self.part.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cannot_create_stock_adjustment_against_cross_org_part(self):
+        self.client.force_authenticate(user=self.other_owner)
+        resp = self.client.post(
+            f"/api/parts/{self.part.id}/adjustments/",
+            {"quantity_change": "10.00", "reason": "restock"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("0.00"))
+
+    def test_cannot_create_part_usage_with_another_orgs_part(self):
+        other_part = Part.objects.create(
+            organization=self.other_org, name="Part Lain", unit="pcs", unit_price=Decimal("1000.00"),
+        )
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(other_part.id), "quantity": "1.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_create_part_usage_against_cross_org_service_record(self):
+        other_customer = Customer.objects.create(organization=self.other_org, name="Other Customer")
+        other_vehicle = Vehicle.objects.create(
+            organization=self.other_org, customer=other_customer,
+            plate_number="BP 8002 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Other Car",
+        )
+        other_service_record = ServiceRecord.objects.create(
+            organization=self.other_org, vehicle=other_vehicle,
+            service_date="2026-07-20", odometer_km=1000,
+            issue_description="x",
+        )
+        resp = self.client.post(
+            f"/api/service-records/{other_service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "1.00"},
+            format="json",
+        )
+        self.assertIn(resp.status_code, (status.HTTP_404_NOT_FOUND, status.HTTP_400_BAD_REQUEST))
+
+
+class PartUsageFrozenAfterInvoiceTests(InventoryAPITestBase):
+    """
+    Proves the actual gap Sansan's review surfaced: PartUsageListView
+    previously only checked tenant ownership, never whether an
+    Invoice already existed — meaning a direct API call (no UI bug
+    required) could still add usage to a ServiceRecord whose Invoice
+    had already snapshotted a different set of line items, silently
+    drifting stock and the invoice apart.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", unit="pcs", unit_price=Decimal("25000.00"),
+        )
+        StockAdjustment.objects.create(
+            organization=self.org, part=self.part, quantity_change=Decimal("20.00"), reason="restock",
+        )
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 7002 AA", manufacture_year=2020,
+            vehicle_type="Mobil", model="Toyota Avanza",
+        )
+        # Invoice creation now hard-requires a mechanic (Made's own
+        # 31 Jul rule) — self.service_record is created through a
+        # real WorkOrder.close() call, with a mechanic assigned, so
+        # the two tests below that create a real Invoice from it
+        # satisfy that precondition without this class needing to
+        # test mechanic assignment itself, which isn't its purpose.
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
+        )
+        # Made's own confirmed real-world rule, 2 Aug — Chris
+        # witnessed it directly at Arya Motor: EVERY job goes through
+        # QC before being marked done, even a routine oil change or
+        # spark plug replacement. WorkOrder.close() now correctly
+        # rejects closing directly from OPEN or IN_PROGRESS (see
+        # apps.workorders.models.WorkOrder.close()) — a real
+        # precondition, not test boilerplate to skip.
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        self.service_record = work_order.close(closed_by=self.owner)
+
+    def test_can_add_part_usage_before_invoice_exists(self):
+        """Sanity check the guard doesn't over-block the normal case."""
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "2.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_cannot_add_part_usage_after_invoice_exists(self):
+        Invoice.objects.create(service_record=self.service_record, created_by=self.owner)
+
+        resp = self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "1.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_rejected_attempt_does_not_touch_stock(self):
+        """
+        Not just the status code — proves the actual side effect
+        (stock deduction) genuinely never happened, matching this
+        project's habit of verifying real state, not just HTTP codes.
+        """
+        Invoice.objects.create(service_record=self.service_record, created_by=self.owner)
+        self.part.refresh_from_db()
+        stock_before = self.part.current_stock
+
+        self.client.post(
+            f"/api/service-records/{self.service_record.id}/part-usages/",
+            {"part": str(self.part.id), "quantity": "5.00"},
+            format="json",
+        )
+
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, stock_before)
+
+class StockSummaryTests(APITestCase):
+    """
+    Pure logic tests against reports.py directly — no HTTP needed
+    here, same TestCase/APITestCase split apps.analytics.tests.test_analytics
+    already uses for the same reason (some tests are about the
+    aggregation itself, some are about the endpoint wiring).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor Summary", invoice_code="AMS")
+
+    def test_summary_counts_and_total_value(self):
+        from .. import reports
+        Part.objects.create(
+            organization=self.org, name="A", current_stock=Decimal("10"),
+            unit_price=Decimal("1000"), minimum_stock=Decimal("5"),
+        )
+        Part.objects.create(
+            organization=self.org, name="B", current_stock=Decimal("2"),
+            unit_price=Decimal("500"), minimum_stock=Decimal("5"),
+        )  # below its own threshold -> low stock
+        Part.objects.create(
+            organization=self.org, name="C", current_stock=Decimal("0"),
+            unit_price=Decimal("200"), minimum_stock=Decimal("0"),
+        )  # completely out, no threshold ever configured -> out of stock
+
+        result = reports.stock_summary(self.org)
+        self.assertEqual(result["total_parts"], 3)
+        self.assertEqual(result["total_stock_value"], Decimal("11000"))  # 10*1000 + 2*500 + 0*200
+        self.assertEqual(result["low_stock_count"], 1)
+        self.assertEqual(result["out_of_stock_count"], 1)
+
+    def test_low_stock_and_out_of_stock_never_double_count(self):
+        from .. import reports
+        Part.objects.create(
+            organization=self.org, name="Zero With Threshold",
+            current_stock=Decimal("0"), minimum_stock=Decimal("5"),
+        )
+        result = reports.stock_summary(self.org)
+        self.assertEqual(result["out_of_stock_count"], 1)
+        self.assertEqual(result["low_stock_count"], 0)
+
+
+class LowStockFilterAPITests(InventoryAPITestBase):
+    """
+    Real proof the OLD global "<=5" rule is genuinely gone, replaced
+    by the per-part threshold. Reuses InventoryAPITestBase's real
+    org/owner/auth setup rather than duplicating it.
+    """
+
+    def test_high_stock_with_no_configured_threshold_never_flags(self):
+        """
+        The exact real behavior change this whole fix was for — a
+        part with 50 units on hand and no configured threshold must
+        NOT show as low stock just because it happens to be under
+        some old generic global cutoff that no longer exists.
+        """
+        Part.objects.create(organization=self.org, name="Plenty", current_stock=Decimal("50"), minimum_stock=Decimal("0"))
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_part_below_its_own_configured_threshold_flags(self):
+        Part.objects.create(organization=self.org, name="Configured Low", current_stock=Decimal("3"), minimum_stock=Decimal("10"))
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_completely_out_of_stock_flags_even_without_a_configured_threshold(self):
+        Part.objects.create(organization=self.org, name="Zero No Threshold", current_stock=Decimal("0"), minimum_stock=Decimal("0"))
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_stock_summary_endpoint(self):
+        Part.objects.create(organization=self.org, name="A", current_stock=Decimal("5"), unit_price=Decimal("1000"))
+        resp = self.client.get("/api/parts/stock-summary/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["total_parts"], 1)
+        self.assertIn("total_stock_value_basis", resp.data)
+
+
+class MovementHistoryTests(APITestCase):
+    """Pure logic tests against reports.movement_history() directly."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor Movements", invoice_code="AMM")
+        self.customer = Customer.objects.create(organization=self.org, name="Test Customer")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 9001 AA",
+            manufacture_year=2020, vehicle_type="Mobil", model="Test Model",
+        )
+        self.service_record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle, service_date="2026-08-01",
+            odometer_km=1000, issue_description="Test",
+        )
+
+    def test_merges_usage_and_adjustment_and_sorts_chronologically(self):
+        from .. import reports
+        part = Part.objects.create(organization=self.org, name="P", current_stock=Decimal("15"), unit_price=Decimal("100"))
+        StockAdjustment.objects.create(organization=self.org, part=part, quantity_change=Decimal("20"), reason="restock")
+        PartUsage.objects.create(
+            organization=self.org, service_record=self.service_record, part=part,
+            quantity=Decimal("5"), unit_price_at_time=Decimal("100"),
+        )
+
+        rows = reports.movement_history(part)
+        self.assertEqual(len(rows), 2)
+        types = {r["type"] for r in rows}
+        self.assertEqual(types, {"usage", "adjustment"})
+
+        usage_row = next(r for r in rows if r["type"] == "usage")
+        # Usage always shows as a real negative — consumption, never
+        # a sign the caller has to reinterpret.
+        self.assertEqual(usage_row["quantity_change"], Decimal("-5"))
+
+        adjustment_row = next(r for r in rows if r["type"] == "adjustment")
+        self.assertEqual(adjustment_row["quantity_change"], Decimal("20"))
+        self.assertEqual(adjustment_row["reason"], "Restock / Pembelian")
+
+
+class MovementHistoryAPITests(InventoryAPITestBase):
+    """The one real HTTP smoke test for the new endpoint — separated
+    from MovementHistoryTests so that class can stay a focused,
+    pure-logic suite without an odd one-off HTTP call inside it."""
+
+    def test_movement_history_endpoint(self):
+        part = Part.objects.create(organization=self.org, name="P", current_stock=Decimal("10"), unit_price=Decimal("100"))
+        StockAdjustment.objects.create(organization=self.org, part=part, quantity_change=Decimal("10"), reason="restock")
+
+        resp = self.client.get(f"/api/parts/{part.id}/movements/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["movements"]), 1)
+
+class PartTaxonomyValidationTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.1 — proves Part.clean()'s mutual-exclusivity
+    invariant, both at the model layer directly and through the real
+    API (PartSerializer.validate(), which is what actually invokes
+    clean() for API-created/updated parts — DRF does not call it
+    automatically).
+    """
+
+    def test_model_clean_rejects_spare_part_with_fluid_brand(self):
+        part = Part(
+            organization=self.org, name="Busi Salah", item_type=Part.ItemType.SPARE_PART,
+            fluid_brand=Part.FluidBrand.CASTROL,
+        )
+        with self.assertRaises(Exception):
+            part.clean()
+
+    def test_model_clean_rejects_fluid_with_vehicle_brand(self):
+        part = Part(
+            organization=self.org, name="Oli Salah", item_type=Part.ItemType.FLUID,
+            vehicle_brand=Part.VehicleBrand.TOYOTA,
+        )
+        with self.assertRaises(Exception):
+            part.clean()
+
+    def test_model_clean_allows_correctly_typed_spare_part(self):
+        part = Part(
+            organization=self.org, name="Busi Benar", item_type=Part.ItemType.SPARE_PART,
+            vehicle_brand=Part.VehicleBrand.HONDA,
+        )
+        part.clean()  # must not raise
+
+    def test_model_clean_allows_correctly_typed_fluid(self):
+        part = Part(
+            organization=self.org, name="Oli Benar", item_type=Part.ItemType.FLUID,
+            fluid_brand=Part.FluidBrand.SHELL, viscosity_grade=Part.ViscosityGrade.ENGINE_10W40,
+        )
+        part.clean()  # must not raise
+
+    def test_model_clean_allows_untagged_part_mid_categorization(self):
+        """
+        A part that hasn't been given a brand yet at all (neither
+        field set) is NOT itself invalid — clean() only rejects the
+        WRONG-type field being set, never requires the correct-type
+        field to already be filled in. Matches the real migration
+        backfill state for Busi/Filter.
+        """
+        part = Part(organization=self.org, name="Belum Dikategorikan")
+        part.clean()  # must not raise
+
+    def test_api_rejects_spare_part_with_fluid_brand(self):
+        resp = self.client.post(
+            "/api/parts/",
+            {
+                "name": "Busi Salah API", "unit": "pcs",
+                "item_type": "SPARE_PART", "fluid_brand": "CASTROL",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("fluid_brand", resp.data["errors"])
+
+    def test_api_accepts_correctly_typed_fluid(self):
+        resp = self.client.post(
+            "/api/parts/",
+            {
+                "name": "Oli Mesin API", "unit": "liter",
+                "item_type": "FLUID", "fluid_brand": "SHELL", "viscosity_grade": "10W-40",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["part"]["fluid_brand"], "SHELL")
+
+    def test_api_update_to_wrong_type_field_is_rejected(self):
+        """
+        A PUT that would push an EXISTING, previously-valid part into
+        an invalid state must be rejected the same way creation is —
+        the merged-instance validate() logic has to consider the
+        instance's current field values, not just the incoming
+        partial payload.
+        """
+        part = Part.objects.create(
+            organization=self.org, name="Busi Existing", item_type=Part.ItemType.SPARE_PART,
+            vehicle_brand=Part.VehicleBrand.TOYOTA,
+        )
+        resp = self.client.put(
+            f"/api/parts/{part.id}/", {"fluid_brand": "SHELL"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PartMigrationBackfillTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.1 — proves the real backfill defaults from
+    migration 0007 land the way the design intended: item_type
+    correctly defaults to SPARE_PART (a real, correct value for
+    existing parts, not a placeholder), while vehicle_brand and
+    reorder_cadence are left honestly blank rather than guessed.
+    """
+
+    def test_new_part_created_without_taxonomy_defaults_to_spare_part_unset_cadence(self):
+        part = Part.objects.create(organization=self.org, name="Untagged")
+        self.assertEqual(part.item_type, Part.ItemType.SPARE_PART)
+        self.assertEqual(part.vehicle_brand, "")
+        self.assertEqual(part.reorder_cadence, "")
+
+
+class HarianReorderCadenceLowStockTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.1 — the real behavioral fix: a HARIAN part
+    (e.g. an on-demand sensor deliberately kept at zero stock) must
+    NEVER surface in the low_stock filter, unconditionally — not
+    just for the zero-stock case, but even if a HARIAN part were
+    somehow given a non-zero minimum_stock too (belt-and-suspenders,
+    matching the view's own widened guard).
+    """
+
+    def test_harian_part_at_zero_stock_never_flags_low_stock(self):
+        Part.objects.create(
+            organization=self.org, name="Sensor Oksigen", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_harian_part_below_a_configured_threshold_still_never_flags(self):
+        """
+        Defensive case — even if someone mistakenly configures a
+        minimum_stock on a HARIAN part, the HARIAN exclusion still
+        wins. The guard excludes the whole cadence, not just the
+        zero-stock half of the filter.
+        """
+        Part.objects.create(
+            organization=self.org, name="Sensor Dengan Threshold", current_stock=Decimal("1"),
+            minimum_stock=Decimal("5"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 0)
+
+    def test_non_harian_part_at_zero_stock_still_flags_as_before(self):
+        """
+        Regression proof — the HARIAN guard must not accidentally
+        suppress the existing, correct zero-stock behavior for every
+        OTHER cadence (or for parts with no cadence set at all, the
+        real migration-backfill state for Busi/Filter).
+        """
+        Part.objects.create(
+            organization=self.org, name="Filter Biasa", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.MINGGUAN,
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 1)
+
+    def test_untagged_part_at_zero_stock_still_flags(self):
+        """
+        A part with reorder_cadence="" (the real state for every
+        pre-Sprint-7 part until Made categorizes it) must keep
+        today's exact existing zero-stock alerting behavior — the
+        HARIAN exclusion is a string-equality exclude(), which
+        correctly never matches an empty string.
+        """
+        Part.objects.create(
+            organization=self.org, name="Belum Ditandai", current_stock=Decimal("0"), minimum_stock=Decimal("0"),
+        )
+        resp = self.client.get("/api/parts/?low_stock=true")
+        self.assertEqual(resp.data["count"], 1)
+
+class StockSummaryHarianExclusionTests(APITestCase):
+    """
+    Sprint 7, Task 7.1 (follow-up fix) — proves stock_summary()'s
+    out_of_stock_count/low_stock_count now match PartListView's
+    ?low_stock=true filter exactly. Before this fix, a HARIAN part at
+    zero stock was correctly hidden from the parts list but still
+    wrongly counted on the dashboard's own "Stok Habis" card — two
+    views of the same data disagreeing about the same part.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor Harian Summary", invoice_code="AMHS")
+
+    def test_harian_zero_stock_excluded_from_out_of_stock_count(self):
+        from .. import reports
+        Part.objects.create(
+            organization=self.org, name="Sensor", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        result = reports.stock_summary(self.org)
+        self.assertEqual(result["out_of_stock_count"], 0)
+        # Still counted in the honest catalog total — a HARIAN part
+        # is a real part, just not a reorder signal.
+        self.assertEqual(result["total_parts"], 1)
+
+    def test_non_harian_zero_stock_still_counts_as_before(self):
+        """Regression proof — the fix must not suppress the real, existing case."""
+        from .. import reports
+        Part.objects.create(
+            organization=self.org, name="Filter", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.MINGGUAN,
+        )
+        result = reports.stock_summary(self.org)
+        self.assertEqual(result["out_of_stock_count"], 1)
+
+    def test_summary_and_list_filter_agree_on_the_same_harian_part(self):
+        """
+        The real proof this fix was for — both endpoints, asked
+        about the exact same part, must now give consistent answers.
+        """
+        from apps.authentication.models import CustomUser
+        from apps.organizations.models import OrganizationMembership
+
+        from .. import reports
+
+        part = Part.objects.create(
+            organization=self.org, name="Sensor Konsisten", current_stock=Decimal("0"),
+            minimum_stock=Decimal("0"), reorder_cadence=Part.ReorderCadence.HARIAN,
+        )
+        owner = CustomUser.objects.create_user(
+            email="owner.summary@test.id", password="pass12345!",
+            full_name="Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=owner)
+
+        summary = reports.stock_summary(self.org)
+        list_resp = self.client.get("/api/parts/?low_stock=true")
+
+        self.assertEqual(summary["out_of_stock_count"], 0)
+        self.assertEqual(list_resp.data["count"], 0)
+
+class StockOpnameSessionTests(InventoryAPITestBase):
+    """
+    Sprint 7, Task 7.3 — the guided Stock Opname workflow, end to
+    end: scoped session creation, count recording, variance
+    computation, real Part.current_stock correction via
+    StockAdjustment, and (the final test in this class) proof that
+    StockOpnameCompleted actually posts a correct, balanced
+    JournalEntry — not just that the model methods ran without
+    raising.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part_a = Part.objects.create(
+            organization=self.org, name="Busi", unit="pcs",
+            unit_price=Decimal("25000.00"), current_stock=Decimal("20.00"),
+        )
+        self.part_b = Part.objects.create(
+            organization=self.org, name="Filter Oli", unit="pcs",
+            unit_price=Decimal("45000.00"), current_stock=Decimal("10.00"),
+        )
+
+    def _start(self, part_ids=None):
+        return self.client.post(
+            "/api/stock-opname/",
+            {"part_ids": part_ids if part_ids is not None else [str(self.part_a.id), str(self.part_b.id)]},
+            format="json",
+        )
+
+    def test_start_session_creates_line_items_with_frozen_system_stock(self):
+        resp = self._start()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        lines = resp.data["session"]["line_items"]
+        self.assertEqual(len(lines), 2)
+        # resp.data holds PRE-RENDER Python types, not JSON — a UUID
+        # field comes back as a real uuid.UUID object here, not a
+        # string. `UUID == str` is always False in Python, so every
+        # key/comparison against an id from resp.data must go
+        # through str() explicitly — this bit me in the first draft
+        # of this exact test.
+        by_part = {str(l["part"]): l for l in lines}
+        self.assertEqual(Decimal(by_part[str(self.part_a.id)]["system_stock_at_time"]), Decimal("20.00"))
+        self.assertEqual(Decimal(by_part[str(self.part_b.id)]["system_stock_at_time"]), Decimal("10.00"))
+        self.assertIsNone(by_part[str(self.part_a.id)]["physical_count"])
+
+    def test_start_session_requires_at_least_one_part(self):
+        resp = self._start(part_ids=[])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_start_session_rejects_unknown_part_id(self):
+        resp = self._start(part_ids=[str(uuid.uuid4())])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_records_physical_count_and_computes_variance(self):
+        session_id = self._start().data["session"]["id"]
+        resp = self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # See the earlier test's comment — resp.data gives back a
+        # real uuid.UUID for "part", not a string.
+        line = next(l for l in resp.data["session"]["line_items"] if str(l["part"]) == str(self.part_a.id))
+        self.assertEqual(Decimal(line["physical_count"]), Decimal("18.00"))
+        self.assertEqual(Decimal(line["variance"]), Decimal("-2.00"))
+
+    def test_complete_blocks_when_any_line_uncounted(self):
+        session_id = self._start().data["session"]["id"]
+        # Only count ONE of the two parts.
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},
+            format="json",
+        )
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_complete_applies_stock_adjustment_correction(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "18.00"},  # shortage of 2
+                {"part_id": str(self.part_b.id), "physical_count": "12.00"},  # surplus of 2
+            ]},
+            format="json",
+        )
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["session"]["status"], "COMPLETED")
+
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("18.00"))
+        self.assertEqual(self.part_b.current_stock, Decimal("12.00"))
+
+        self.assertTrue(StockAdjustment.objects.filter(
+            part=self.part_a, reason="correction", quantity_change=Decimal("-2.00"),
+        ).exists())
+        self.assertTrue(StockAdjustment.objects.filter(
+            part=self.part_b, reason="correction", quantity_change=Decimal("2.00"),
+        ).exists())
+
+    def test_complete_zero_variance_creates_no_correction_and_posts_nothing(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "20.00"},  # matches exactly
+                {"part_id": str(self.part_b.id), "physical_count": "10.00"},  # matches exactly
+            ]},
+            format="json",
+        )
+        adjustments_before = StockAdjustment.objects.count()
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(StockAdjustment.objects.count(), adjustments_before)
+
+        from apps.core.models import Outbox
+        self.assertFalse(Outbox.objects.filter(event_type="StockOpnameCompleted").exists())
+
+    def test_complete_twice_is_blocked(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "20.00"},
+                {"part_id": str(self.part_b.id), "physical_count": "10.00"},
+            ]},
+            format="json",
+        )
+        self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_record_count_blocked_after_session_completed(self):
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "20.00"},
+                {"part_id": str(self.part_b.id), "physical_count": "10.00"},
+            ]},
+            format="json",
+        )
+        self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        resp = self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "99.00"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_complete_posts_one_balanced_journal_entry_with_both_shortage_and_surplus(self):
+        """
+        The real end-to-end proof: a session with both a shortage and
+        a surplus produces exactly ONE JournalEntry with 4 correctly-
+        valued, balanced lines — Dr 5004 / Cr 1301 for the shortage,
+        Dr 1301 / Cr 4004 for the surplus.
+
+        Seeds a real Chart of Accounts AND AccountingPeriod first,
+        explicitly — without both, this test would hit the exact real
+        production incident this whole sprint was spent fixing
+        (missing account / missing period), just inside a test
+        instead of production. Deliberately not left to chance.
+
+        Wraps the completion call in captureOnCommitCallbacks(execute
+        =True) — EventBus.publish() defers actual handler dispatch to
+        transaction.on_commit(), which NEVER fires inside a plain
+        TestCase's own wrapping transaction (it gets rolled back, not
+        committed). Same real pitfall the roadmap already documents
+        for Appointment.convert_to_work_order()'s own regression test
+        — without this, the assertions below would silently test
+        nothing, not because the posting logic is wrong, but because
+        the event handler never actually got invoked at all.
+        """
+        from apps.accounting.coa import seed_chart_of_accounts
+        from apps.accounting.models import JournalEntry
+        from apps.accounting.periods import ensure_current_month_period
+
+        seed_chart_of_accounts(self.org)
+        ensure_current_month_period(self.org)
+
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "18.00"},  # shortage: 2 × 25000 = 50000
+                {"part_id": str(self.part_b.id), "physical_count": "12.00"},  # surplus: 2 × 45000 = 90000
+            ]},
+            format="json",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        entries = JournalEntry.objects.filter(organization=self.org, event_type="StockOpnameCompleted")
+        self.assertEqual(entries.count(), 1)
+        lines = list(entries.first().lines.all())
+        self.assertEqual(len(lines), 4)
+
+        by_code = {}
+        for line in lines:
+            by_code.setdefault(line.account.code, []).append(line)
+
+        self.assertEqual(by_code["5004"][0].debit_amount, Decimal("50000.00"))
+        self.assertEqual(by_code["4004"][0].credit_amount, Decimal("90000.00"))
+
+        # 1301 appears TWICE in this entry — once as a credit (the
+        # shortage side) and once as a debit (the surplus side),
+        # never netted together into a single line.
+        account_1301_lines = by_code["1301"]
+        self.assertEqual(len(account_1301_lines), 2)
+        credit_1301 = next(l for l in account_1301_lines if l.credit_amount)
+        debit_1301  = next(l for l in account_1301_lines if l.debit_amount)
+        self.assertEqual(credit_1301.credit_amount, Decimal("50000.00"))
+        self.assertEqual(debit_1301.debit_amount, Decimal("90000.00"))
+
+        total_debit  = sum((l.debit_amount or Decimal("0")) for l in lines)
+        total_credit = sum((l.credit_amount or Decimal("0")) for l in lines)
+        self.assertEqual(total_debit, total_credit)
+
+    def test_complete_values_variance_at_cost_price_not_selling_price(self):
+        """
+        6 Sep 2026 — THE real regression test for the actual defect
+        found via a design-review trace, not a live incident:
+        StockOpnameSession.complete() used to value variance at
+        Part.unit_price (SELLING price) unconditionally, then post
+        that exact figure straight into Account 1301 (Inventory) —
+        the SAME account GoodsReceived/PartConsumed correctly
+        denominate in COST. A stock-opname correction was silently
+        mixing retail-priced money into a cost-basis ledger account.
+
+        part_a is deliberately given a real cost_price DIFFERENT
+        from its own unit_price (25000 cost vs 40000 sell) — the
+        existing test_complete_posts_one_balanced_journal_entry_with_
+        both_shortage_and_surplus above never exercises this
+        distinction at all, since neither of ITS parts ever sets
+        cost_price (both default to 0), so both fall back to
+        unit_price either way and would pass identically whether
+        this fix existed or not — it proves the entry is balanced,
+        not that the VALUATION BASIS is correct.
+        """
+        from apps.accounting.coa import seed_chart_of_accounts
+        from apps.accounting.models import JournalEntry
+        from apps.accounting.periods import ensure_current_month_period
+
+        seed_chart_of_accounts(self.org)
+        ensure_current_month_period(self.org)
+
+        self.part_a.cost_price = Decimal("25000.00")
+        self.part_a.unit_price = Decimal("40000.00")  # deliberately different from cost_price
+        self.part_a.save(update_fields=["cost_price", "unit_price"])
+
+        session_id = self._start(part_ids=[str(self.part_a.id)]).data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},  # shortage of 2
+            format="json",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        entry = JournalEntry.objects.get(organization=self.org, event_type="StockOpnameCompleted")
+        # 2 * cost_price (25000) = 50000 — NOT 2 * unit_price (40000)
+        # = 80000. If this ever regresses back to unit_price, this
+        # assertion fails loudly with 80000.00 instead of silently
+        # passing either way.
+        debit_5004  = entry.lines.get(account__code="5004")
+        credit_1301 = entry.lines.get(account__code="1301")
+        self.assertEqual(debit_5004.debit_amount, Decimal("50000.00"))
+        self.assertEqual(credit_1301.credit_amount, Decimal("50000.00"))
+
+    def test_complete_falls_back_to_unit_price_when_cost_price_is_still_zero(self):
+        """
+        Real proof of the deliberate fallback — a part with no real
+        GRN history yet (cost_price still at its own real default of
+        0) must still value its stock-opname variance sensibly, using
+        unit_price, rather than silently valuing a real, counted
+        shortage/surplus at zero. Same established meaning cost_
+        price=0 already has elsewhere in this codebase
+        (WorkOrderMaterialLine.save()'s own identical fallback).
+        part_a here is used exactly as setUp() created it — cost_
+        price untouched, still 0 — confirming this is genuinely the
+        fallback path, not a coincidence.
+        """
+        from apps.accounting.coa import seed_chart_of_accounts
+        from apps.accounting.models import JournalEntry
+        from apps.accounting.periods import ensure_current_month_period
+
+        seed_chart_of_accounts(self.org)
+        ensure_current_month_period(self.org)
+
+        self.assertEqual(self.part_a.cost_price, Decimal("0.00"))
+
+        session_id = self._start(part_ids=[str(self.part_a.id)]).data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [{"part_id": str(self.part_a.id), "physical_count": "18.00"}]},  # shortage of 2
+            format="json",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(f"/api/stock-opname/{session_id}/complete/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        entry = JournalEntry.objects.get(organization=self.org, event_type="StockOpnameCompleted")
+        # 2 * unit_price (25000, part_a's own real setUp value) = 50000.
+        debit_5004 = entry.lines.get(account__code="5004")
+        self.assertEqual(debit_5004.debit_amount, Decimal("50000.00"))
+    def test_complete_blocked_synchronously_when_current_period_is_closed(self):
+        """
+        6 Sep 2026 — THE real regression test for Q37: completing a
+        session against an already-closed period must roll back
+        EVERYTHING, including the real stock-quantity change — not
+        silently succeed at the DB layer while only the async GL
+        posting fails in the background afterward. Closes the
+        CURRENT real month's own period (the one seed_coa's own
+        signup-time seeding always creates) directly via the ORM —
+        the exact real period StockOpnameSession.complete()'s own new
+        guard checks against (today's local date — StockOpnameCompleted
+        carries no transaction_date of its own).
+        """
+        from apps.accounting.models import AccountingPeriod
+        from apps.inventory.models import StockOpnameSession
+
+        today = timezone.now().date()
+        period = AccountingPeriod.objects.get(
+            organization=self.org, year=today.year, month=today.month,
+        )
+        period.is_closed = True
+        period.save(update_fields=["is_closed"])
+
+        session_id = self._start().data["session"]["id"]
+        self.client.patch(
+            f"/api/stock-opname/{session_id}/",
+            {"counts": [
+                {"part_id": str(self.part_a.id), "physical_count": "18.00"},
+                {"part_id": str(self.part_b.id), "physical_count": "12.00"},
+            ]},
+            format="json",
+        )
+
+        session = StockOpnameSession.objects.get(id=session_id)
+        with self.assertRaises(ValueError):
+            session.complete()
+
+        session.refresh_from_db()
+        self.assertEqual(session.status, StockOpnameSession.Status.DRAFT)
+
+        # THE real proof — stock must be COMPLETELY UNCHANGED, not
+        # partially adjusted before the guard fired partway through.
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, Decimal("20.00"))
+        self.assertEqual(self.part_b.current_stock, Decimal("10.00"))
+        self.assertEqual(StockAdjustment.objects.filter(reason="correction").count(), 0)
+
+class PartApplyEditTests(InventoryAPITestBase):
+    """
+    14 Sep 2026 — real coverage for Part.apply_edit() — same real
+    diff logic as Customer.apply_edit()/Vehicle.apply_edit()
+    (apps.service), now proven against Part's own five real
+    TextChoices fields.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", sku="BSI-001", unit="pcs",
+            unit_price=Decimal("25000.00"), minimum_stock=Decimal("5.00"),
+        )
+
+    def test_real_change_creates_a_history_row(self):
+        self.part.apply_edit(changed_by=self.owner, name="Busi NGK")
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.name, "Busi NGK")
+        change = PartFieldChange.objects.get(part=self.part)
+        self.assertEqual(change.field_name, "name")
+        self.assertEqual(change.old_value, "Busi")
+        self.assertEqual(change.new_value, "Busi NGK")
+
+    def test_unchanged_value_creates_no_history_row(self):
+        self.part.apply_edit(changed_by=self.owner, name="Busi")
+        self.assertFalse(PartFieldChange.objects.filter(part=self.part).exists())
+
+    def test_decimal_field_diffs_correctly(self):
+        self.part.apply_edit(changed_by=self.owner, unit_price=Decimal("30000.00"))
+        change = PartFieldChange.objects.get(part=self.part, field_name="unit_price")
+        self.assertEqual(change.old_value, "25000.00")
+        self.assertEqual(change.new_value, "30000.00")
+
+    def test_choice_field_stores_the_human_readable_label(self):
+        """THE real proof of the label resolution — reorder_cadence
+        must log "Mingguan", never the raw "MINGGUAN" code."""
+        self.part.apply_edit(changed_by=self.owner, reorder_cadence=Part.ReorderCadence.MINGGUAN)
+        change = PartFieldChange.objects.get(part=self.part, field_name="reorder_cadence")
+        self.assertEqual(change.old_value, "")  # genuinely unset before
+        self.assertEqual(change.new_value, "Mingguan")
+
+    def test_item_type_change_logs_real_labels_both_sides(self):
+        self.part.apply_edit(
+            changed_by=self.owner, item_type=Part.ItemType.FLUID,
+            vehicle_brand="", fluid_brand=Part.FluidBrand.SHELL,
+        )
+        change = PartFieldChange.objects.get(part=self.part, field_name="item_type")
+        self.assertEqual(change.old_value, "Spare Part")
+        self.assertEqual(change.new_value, "Fluida")
+        brand_change = PartFieldChange.objects.get(part=self.part, field_name="fluid_brand")
+        self.assertEqual(brand_change.old_value, "")
+        self.assertEqual(brand_change.new_value, "Shell")
+
+    def test_current_stock_is_not_trackable(self):
+        """THE real proof of the exclusion — current_stock only ever
+        moves through PartUsage/StockAdjustment, never apply_edit()."""
+        with self.assertRaises(ValueError):
+            self.part.apply_edit(changed_by=self.owner, current_stock=Decimal("999.00"))
+
+    def test_cost_price_is_not_trackable(self):
+        """Same real exclusion as current_stock — cost_price is
+        exclusively system-maintained from real GRN history."""
+        with self.assertRaises(ValueError):
+            self.part.apply_edit(changed_by=self.owner, cost_price=Decimal("999.00"))
+
+    def test_multiple_fields_in_one_call_each_get_their_own_row(self):
+        self.part.apply_edit(changed_by=self.owner, name="Busi Baru", unit_price=Decimal("28000.00"))
+        self.assertEqual(PartFieldChange.objects.filter(part=self.part).count(), 2)
+
+    def test_unknown_field_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.part.apply_edit(changed_by=self.owner, not_a_real_field="x")
+
+
+class PartHistoryAPITests(InventoryAPITestBase):
+    """
+    14 Sep 2026 — HTTP-level coverage: PUT creates history through
+    the real endpoint, GET .../history/ returns it correctly.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.part = Part.objects.create(
+            organization=self.org, name="Busi", sku="BSI-001", unit="pcs",
+            unit_price=Decimal("25000.00"),
+        )
+
+    def test_put_creates_a_real_history_row(self):
+        resp = self.client.put(f"/api/parts/{self.part.id}/", {"unit_price": "28000.00"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(PartFieldChange.objects.filter(part=self.part, field_name="unit_price").exists())
+
+    def test_history_endpoint_returns_real_changes_newest_first(self):
+        self.client.put(f"/api/parts/{self.part.id}/", {"unit_price": "28000.00"}, format="json")
+        self.client.put(f"/api/parts/{self.part.id}/", {"name": "Busi Baru"}, format="json")
+
+        resp = self.client.get(f"/api/parts/{self.part.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        changes = resp.data["changes"]
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(changes[0]["field_name"], "name")
+        self.assertEqual(changes[1]["field_name"], "unit_price")
+
+    def test_history_returns_empty_list_for_a_never_edited_part(self):
+        resp = self.client.get(f"/api/parts/{self.part.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["changes"], [])
+
+    def test_history_returns_404_for_nonexistent_part(self):
+        resp = self.client.get(f"/api/parts/{uuid.uuid4()}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_history_scoped_to_organization(self):
+        other_org = Organization.objects.create(name="Bengkel Lain Part History")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.parthistory@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+
+        self.client.put(f"/api/parts/{self.part.id}/", {"unit_price": "28000.00"}, format="json")
+
+        self.client.force_authenticate(user=other_owner)
+        resp = self.client.get(f"/api/parts/{self.part.id}/history/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_put_never_leaks_current_stock_or_cost_price_into_apply_edit(self):
+        """
+        Real, defensive proof — even if a caller includes
+        current_stock or cost_price in the PUT body, both are
+        read-only at the SERIALIZER layer (PartSerializer's own
+        read_only_fields), so validated_data never contains them —
+        apply_edit() never even sees them, let alone raises for them.
+        """
+        resp = self.client.put(
+            f"/api/parts/{self.part.id}/",
+            {"current_stock": "999.00", "cost_price": "999.00", "name": "Busi Aman"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, Decimal("0.00"))
+        self.assertEqual(self.part.cost_price, Decimal("0.00"))
+        self.assertEqual(self.part.name, "Busi Aman")

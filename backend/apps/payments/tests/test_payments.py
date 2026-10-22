@@ -1,0 +1,1505 @@
+# =============================================================================
+# === backend/apps/payments/tests.py ===
+# =============================================================================
+"""
+Fixture setUp() deliberately mirrors apps.invoicing.tests.test_invoicing.
+InvoicingAPITestBase almost exactly — same real WorkOrder -> close()
+-> ServiceRecord -> Invoice chain, since a Payment can't exist
+without a real Invoice, which can't exist without a real
+ServiceRecord with a mechanic assigned. Not copy-pasted out of
+laziness — this is genuinely the only way any of these objects come
+into existence in production, so it's the only honest way to test
+against them.
+
+2 Sep 2026 — InternalCashMutationTests / InternalCashMutationAPITests
+added, closing a real gap: the model, event, and endpoint all shipped
+same-day as the Kas Harian dashboard with zero automated coverage —
+every other real write path in this file (OperatingExpense,
+SupplierPayment) got its own test class the session it shipped; this
+one didn't, in the middle of a live production incident response.
+Own fixture, mirrors OperatingExpenseTests' own shape exactly — no
+Invoice/WorkOrder chain needed, just a seeded org.
+
+6 Sep 2026 — PaymentConcurrencyTests added, closing a real gap found
+via a design-review trace (Sansan's own "double-payment race"
+question, Q50), not a live incident.
+"""
+import uuid
+from datetime import date
+from datetime import datetime as dt
+from datetime import timedelta
+from decimal import Decimal
+
+from apps.accounting import cancellations
+from apps.accounting.models import Account, JournalEntry, OpeningBalanceSession
+from apps.authentication.models import CustomUser
+from apps.core.models import Outbox
+from apps.invoicing.events import InvoiceRefunded
+from apps.invoicing.models import Invoice, InvoiceLineItem
+from apps.organizations.models import Organization, OrganizationMembership
+from apps.payments.models import (InternalCashMutation, OperatingExpense,
+                                  SupplierPayment, TaxRemittance)
+from apps.purchasing.models import Supplier, SupplierInvoice
+from apps.service.models import Customer, ServiceRecord, Vehicle
+from apps.workorders.models import Mechanic, WorkOrder, WorkOrderJobLine
+from django.core.management import call_command
+from django.test import TestCase
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
+
+from ..models import Payment, Refund
+
+
+class PaymentsAPITestBase(APITestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.payments@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        # 17 Sep 2026 -- Brand-New Workshop Readiness fallout. seed_coa()
+        # alone resolves COA + periods, but this class's own setUp()
+        # issues the invoice over real HTTP, and _pay() posts to the
+        # real, now-gated payment endpoint -- both need FULL
+        # organization readiness, which also requires the Opening
+        # Position pillar resolved. Genuinely brand-new test fixture,
+        # not a migrating shop -- zero-confirmation is the correct,
+        # honest choice here.
+        opening_balance = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        opening_balance.confirm_zero(confirmed_by=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Brian Sira")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 2219 AB", manufacture_year=2022,
+            vehicle_type="Mobil", model="Honda Brio",
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Alex")
+
+        work_order = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic,
+        )
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order,
+            description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        self.service_record = work_order.close(closed_by=self.owner)
+
+        self.client.force_authenticate(user=self.owner)
+
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {"labor_lines": [{"description": "Jasa Servis", "quantity": 1, "unit_price": 250000}]},
+            format="json",
+        )
+
+        self.invoice_id = create.data["invoice"]["id"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(
+                f"/api/invoices/{self.invoice_id}/status/", {"status": "ISSUED"}, format="json",
+            )
+
+    def _pay(self, amount, **extra):
+        body = {"amount": str(amount), "method": "cash", **extra}
+        return self.client.post(f"/api/invoices/{self.invoice_id}/payments/", body, format="json")
+
+
+class PaymentConcurrencyTests(PaymentsAPITestBase):
+    """
+    6 Sep 2026 — real, hard concurrency coverage for Payment.record(),
+    found via Sansan's own "double-payment race" design-review
+    question (Q50), not a live incident. Same "load a second,
+    genuinely independent copy before either call" technique already
+    proven correct for OpeningBalanceSession.post()'s own double-post
+    regression test — a true simultaneous race would need real
+    threads/multiple DB connections, which this codebase's own test
+    suite doesn't do anywhere; this proves the redesigned status/
+    balance_due check correctly re-runs against a locked, re-fetched
+    copy of the invoice, rather than trusting the possibly-stale
+    in-memory object the caller happened to pass in.
+    """
+
+    def test_second_concurrent_full_payment_is_rejected(self):
+        """
+        THE real regression test — two full-payment requests for the
+        same invoice, each starting from its own independently-loaded
+        copy (simulating two separate HTTP requests), must not both
+        succeed. Without the select_for_update() fix, the second
+        call's own in-memory balance_due (computed before the first
+        payment committed) would still show the full original
+        balance, incorrectly accepting a second full payment.
+        """
+        first_copy = Invoice.objects.get(id=self.invoice_id)
+        second_copy = Invoice.objects.get(id=self.invoice_id)
+
+        Payment.record(invoice=first_copy, amount=Decimal("250000"), method="cash")
+
+        with self.assertRaises(ValueError):
+            Payment.record(invoice=second_copy, amount=Decimal("250000"), method="cash")
+
+        self.assertEqual(Payment.objects.filter(invoice_id=self.invoice_id).count(), 1)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PAID")
+        self.assertEqual(invoice.balance_due, Decimal("0.00"))
+
+    def test_second_concurrent_partial_payment_that_would_overpay_is_rejected(self):
+        """
+        A subtler real case — two PARTIAL payments that individually
+        look fine against a stale balance, but together would
+        overpay: 150000 + 150000 = 300000 against a 250000 invoice.
+        """
+        first_copy = Invoice.objects.get(id=self.invoice_id)
+        second_copy = Invoice.objects.get(id=self.invoice_id)
+
+        Payment.record(invoice=first_copy, amount=Decimal("150000"), method="cash")
+
+        with self.assertRaises(ValueError):
+            Payment.record(invoice=second_copy, amount=Decimal("150000"), method="cash")
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.balance_due, Decimal("100000.00"))
+        self.assertEqual(Payment.objects.filter(invoice_id=self.invoice_id).count(), 1)
+
+    def test_legitimate_sequential_partial_payments_still_both_succeed(self):
+        """
+        Regression proof — the guard must not accidentally block the
+        normal, legitimate two-payment case (deposit + balance) this
+        whole app is explicitly designed around. Each payment loads
+        its own fresh copy, matching how two real, genuinely
+        sequential HTTP requests would each load their own.
+        """
+        first_copy = Invoice.objects.get(id=self.invoice_id)
+        Payment.record(invoice=first_copy, amount=Decimal("100000"), method="cash")
+
+        second_copy = Invoice.objects.get(id=self.invoice_id)
+        Payment.record(invoice=second_copy, amount=Decimal("150000"), method="cash")
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PAID")
+        self.assertEqual(Payment.objects.filter(invoice_id=self.invoice_id).count(), 2)
+
+
+class PaymentRecordingTests(PaymentsAPITestBase):
+
+    def test_full_payment_marks_invoice_paid(self):
+        resp = self._pay(250000)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PAID")
+        self.assertEqual(invoice.balance_due, Decimal("0.00"))
+
+    def test_partial_payment_sets_invoice_partially_paid(self):
+        """
+        15 Sep 2026 — renamed and re-asserted: a partial payment now
+        correctly moves the invoice to PARTIALLY_PAID (a real status
+        that didn't exist when this test was first written, when
+        "stays ISSUED" was the only honest thing to assert). This is
+        THE real proof of the new status-derivation logic in Payment.
+        record() itself.
+        """
+        resp = self._pay(100000)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")
+        self.assertEqual(invoice.balance_due, Decimal("150000.00"))
+
+    def test_two_partial_payments_together_complete_the_balance(self):
+        """
+        The exact real-world case this app exists for — a deposit at
+        intake, a balance payment at pickup — two genuinely separate
+        Payment rows against one Invoice, not one field overwritten
+        twice.
+        """
+        first = self._pay(100000)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")
+
+        second = self._pay(150000)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "PAID")
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 2)
+
+    def test_overpayment_rejected(self):
+        resp = self._pay(300000)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "ISSUED")
+        self.assertFalse(Payment.objects.filter(invoice=invoice).exists())
+
+    def test_zero_amount_rejected(self):
+        resp = self._pay(0)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_negative_amount_rejected(self):
+        resp = self._pay(-50000)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_pay_a_draft_invoice(self):
+        create = self.client.post(
+            f"/api/service-records/{self.service_record.id}/invoice/",
+            {}, format="json",
+        )
+        self.assertEqual(create.status_code, status.HTTP_409_CONFLICT)
+
+        vehicle2 = Vehicle.objects.create(
+            organization=self.org, customer=self.customer,
+            plate_number="BP 3001 AA", manufacture_year=2022,
+            vehicle_type="Mobil", model="Honda Brio",
+        )
+        wo2 = WorkOrder.objects.create(organization=self.org, vehicle=vehicle2, assigned_to=self.mechanic)
+        wo2.status = "IN_PROGRESS"
+        wo2.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=wo2, description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        wo2.status = "QC"
+        wo2.save(update_fields=["status"])
+        record2 = wo2.close(closed_by=self.owner)
+        create2 = self.client.post(f"/api/service-records/{record2.id}/invoice/", {}, format="json")
+        draft_invoice_id = create2.data["invoice"]["id"]
+
+        resp = self.client.post(
+            f"/api/invoices/{draft_invoice_id}/payments/",
+            {"amount": "1000", "method": "cash"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_pay_an_already_paid_invoice(self):
+        first = self._pay(250000)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        second = self._pay(1)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_pay_a_cancelled_invoice(self):
+        self.client.patch(f"/api/invoices/{self.invoice_id}/status/", {"status": "CANCELLED"}, format="json")
+        resp = self._pay(100000)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_payment_history_lists_all_payments_for_invoice(self):
+        self._pay(100000)
+        self._pay(150000)
+        resp = self.client.get(f"/api/invoices/{self.invoice_id}/payments/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["payments"]), 2)
+
+    def test_manual_status_paid_still_rejected_even_with_real_payment_endpoint_present(self):
+        """
+        The exact regression this whole app exists to prevent —
+        proven again here, alongside the new endpoint, not just in
+        apps.invoicing.tests.test_invoicing. Both must hold together.
+        """
+        resp = self.client.patch(
+            f"/api/invoices/{self.invoice_id}/status/", {"status": "PAID"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PaymentPPh23WithholdingTests(PaymentsAPITestBase):
+    """
+    15 Oct 2026 -- real regression coverage for Payment.record()'s own
+    pph23_withheld_amount split (9/10 Oct 2026, the PPh 23 + PPh Final
+    UMKM patch), closing the half of Roadmap Open Decision #43 scoped to
+    Payment itself. Zero tests existed for this before -- the model's
+    own validation and posting_engine.py's own GL split were both
+    shipped and never proven.
+
+    Reuses PaymentsAPITestBase's own fixture (a 250000, labor-only
+    invoice) exactly as PaymentRecordingTests/InvoiceRefundTests do --
+    the withholding split doesn't need a parts line to prove itself,
+    since it operates on the payment's own total `amount`, not on the
+    invoice's service/parts mix (that split is suggested_pph23_self_
+    remit()'s own concern, not Payment.record()'s -- deliberately out
+    of scope here, see this patch's own module docstring).
+    """
+
+    def test_withheld_amount_persists_on_payment_row(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self._pay(250000, pph23_withheld_amount="50000")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get(invoice_id=self.invoice_id)
+        self.assertEqual(payment.pph23_withheld_amount, Decimal("50000.00"))
+
+    def test_withheld_amount_defaults_to_zero_when_omitted(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(250000)
+        payment = Payment.objects.get(invoice_id=self.invoice_id)
+        self.assertEqual(payment.pph23_withheld_amount, Decimal("0.00"))
+
+    def test_negative_withheld_amount_rejected_over_the_real_api(self):
+        """
+        Real behavior, not the one you'd guess from Payment.record()'s
+        own docstring alone: PaymentRecordSerializer's own
+        min_value=Decimal("0") on this field rejects a negative value
+        BEFORE Payment.record() is ever called -- still a 400, but from
+        the serializer layer, not the model's own ValueError. See
+        test_negative_withheld_amount_rejected_at_model_layer below for
+        the model's own guard, which this path never actually reaches.
+        """
+        resp = self._pay(250000, pph23_withheld_amount="-1000")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+    def test_negative_withheld_amount_rejected_at_model_layer(self):
+        """
+        Payment.record()'s own `withheld < Decimal("0")` guard, called
+        directly -- the only way to actually exercise it, since the API
+        serializer's own min_value=0 constraint (confirmed above) means
+        no real HTTP request can ever reach this branch today. Still
+        worth proving in isolation: any future caller that skips the
+        serializer (a management command, a different endpoint) must
+        not be able to post a negative withholding straight to the
+        ledger.
+        """
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        with self.assertRaises(ValueError):
+            Payment.record(
+                invoice=invoice, amount=Decimal("250000"), method="cash",
+                pph23_withheld_amount=Decimal("-1000"),
+            )
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+    def test_withheld_amount_exceeding_payment_amount_rejected(self):
+        resp = self._pay(100000, pph23_withheld_amount="150000")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+    def test_withheld_amount_splits_gl_entry_cash_and_prepaid_pph23(self):
+        """
+        The real regression guard. Before this test existed, nothing
+        proved posting_engine.py's own PaymentReceived branch actually
+        splits the entry correctly: AR must still clear for the FULL
+        settled amount (withholding never changes what the customer
+        owed), only the NET lands in cash, and the withheld portion
+        becomes a real prepaid-tax asset (1205) rather than vanishing.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self._pay(250000, pph23_withheld_amount="50000")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        cash          = Account.objects.get(organization=self.org, code="1001")
+        prepaid_pph23 = Account.objects.get(organization=self.org, code="1205")
+        ar            = Account.objects.get(organization=self.org, code="1201")
+
+        self.assertEqual(ar.balance(), Decimal("0.00"))
+        self.assertEqual(cash.balance(), Decimal("200000.00"))
+        self.assertEqual(prepaid_pph23.balance(), Decimal("50000.00"))
+
+    def test_zero_withheld_posts_no_prepaid_pph23_line(self):
+        """
+        Regression anchor for the pre-9-Oct-2026 behavior: a payment
+        with no withholding posts exactly as it always did -- the full
+        amount straight to cash, nothing touching 1205 at all
+        (posting_engine._lines() drops the zero-amount withheld line).
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(250000)
+
+        cash          = Account.objects.get(organization=self.org, code="1001")
+        prepaid_pph23 = Account.objects.get(organization=self.org, code="1205")
+
+        self.assertEqual(cash.balance(), Decimal("250000.00"))
+        self.assertEqual(prepaid_pph23.balance(), Decimal("0.00"))
+
+
+class TaxRemittanceSuggestedCalculationTests(PaymentsAPITestBase):
+    """
+    15 Oct 2026 -- real regression coverage for
+    TaxRemittance.suggested_pph_umkm_final()/suggested_pph23_self_remit()
+    (9 Oct 2026, the PPh 23 + PPh Final UMKM patch), closing the second
+    half of Roadmap Open Decision #43 -- patch_pph23_withholding_tests.py
+    already closed the first half (Payment.record() itself). Zero tests
+    existed for either calculation before this.
+
+    See this patch's own module docstring for the fixture strategy
+    (real invoices via the API, real OR synthetic Outbox rows depending
+    on what each test needs precise control over).
+    """
+
+    def _issue_invoice(self, *, labor_amount=Decimal("0"), parts_amount=Decimal("0"), customer_type="INDIVIDUAL"):
+        """
+        Issues a fresh, independent Invoice -- deliberately NOT
+        self.invoice_id, a genuinely separate one every time, since
+        both suggested_* functions aggregate across every real Outbox
+        row for the whole organization and several tests below need
+        more than one invoice in play without them bleeding into each
+        other's totals.
+
+        The labor line goes through the real invoice-creation endpoint
+        (so it posts a real InvoiceLineItem the normal way); the parts
+        line is added directly via the ORM afterward, BEFORE the
+        ISSUED transition -- skipping the real PartConsumed/PartUsage
+        pipeline is deliberate: both suggested_* functions only ever
+        read invoice.line_items / the frozen InvoiceIssued event
+        payload, never PartUsage itself, so replicating the full
+        consumption flow here would prove nothing these tests actually
+        depend on.
+        """
+        customer = Customer.objects.create(
+            organization=self.org, name="Pelanggan Uji", customer_type=customer_type,
+        )
+        vehicle = Vehicle.objects.create(
+            organization=self.org, customer=customer,
+            plate_number=f"BP {uuid.uuid4().hex[:4].upper()} TT", manufacture_year=2022,
+            vehicle_type="Mobil", model="Test Model",
+        )
+        work_order = WorkOrder.objects.create(organization=self.org, vehicle=vehicle, assigned_to=self.mechanic)
+        work_order.status = "IN_PROGRESS"
+        work_order.save(update_fields=["status"])
+        WorkOrderJobLine.objects.create(
+            organization=self.org, work_order=work_order,
+            description="(qc placeholder)", completed_at=timezone.now(),
+        )
+        work_order.status = "QC"
+        work_order.save(update_fields=["status"])
+        service_record = work_order.close(closed_by=self.owner)
+
+        labor_lines = (
+            [{"description": "Jasa", "quantity": 1, "unit_price": str(labor_amount)}]
+            if labor_amount else []
+        )
+        create = self.client.post(
+            f"/api/service-records/{service_record.id}/invoice/",
+            {"labor_lines": labor_lines}, format="json",
+        )
+        invoice_id = create.data["invoice"]["id"]
+
+        if parts_amount:
+            InvoiceLineItem.objects.create(
+                invoice_id=invoice_id, kind="part",
+                description="Sparepart Uji", quantity=1, unit_price=parts_amount,
+            )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{invoice_id}/status/", {"status": "ISSUED"}, format="json")
+
+        return invoice_id
+
+    def _craft_outbox(self, *, event_type, payload, occurred_at):
+        """
+        A synthetic Outbox row, built directly -- see this patch's own
+        module docstring for why that's the right tool for the
+        boundary/exclusion tests below, not a shortcut around building
+        a real fixture.
+        """
+        return Outbox.objects.create(
+            organization=self.org, event_id=uuid.uuid4(), event_type=event_type,
+            payload=payload, occurred_at=occurred_at, status=Outbox.Status.PROCESSED,
+        )
+
+    def _this_year_month(self):
+        now_local = timezone.localtime(timezone.now())
+        return now_local.year, now_local.month
+
+    def _prior_year_month(self):
+        year, month = self._this_year_month()
+        return (year - 1, 12) if month == 1 else (year, month - 1)
+
+    # ------------------------------------------------------------------
+    # suggested_pph_umkm_final -- 0.5% of the month's PARTS revenue only
+    # ------------------------------------------------------------------
+
+    def test_umkm_final_is_zero_when_only_labor_revenue_exists(self):
+        """
+        The base fixture invoice (self.invoice_id, issued in setUp()) is
+        labor-only -- jasa is explicitly excluded from this base (Chris's
+        own real example in the method's own docstring: parts only).
+        """
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph_umkm_final(self.org, year, month), Decimal("0.00"))
+
+    def test_umkm_final_sums_parts_revenue_across_multiple_invoices(self):
+        """
+        Hand-verified (Cheat Sheet SS5's own discipline): two invoices,
+        parts 300000 and 200000 this month -> (300000 + 200000) * 0.005
+        = 2500.00. 300000 -> 1500 is Chris's own real confirmed example
+        from the method's own docstring; this just adds a second
+        invoice to prove SUMMING across invoices, not just one.
+        """
+        self._issue_invoice(labor_amount=Decimal("100000"), parts_amount=Decimal("300000"))
+        self._issue_invoice(labor_amount=Decimal("50000"), parts_amount=Decimal("200000"))
+
+        year, month = self._this_year_month()
+        suggested = TaxRemittance.suggested_pph_umkm_final(self.org, year, month)
+        self.assertEqual(suggested, Decimal("2500.00"))
+
+    def test_umkm_final_excludes_invoices_outside_the_target_month(self):
+        """
+        A crafted Outbox row dated last month must show up when asked
+        about LAST month and not at all when asked about THIS month --
+        proves the real month/year filter, not just that the function
+        can sum numbers.
+        """
+        this_year, this_month = self._this_year_month()
+        prior_year, prior_month = self._prior_year_month()
+        prior_occurred_at = timezone.now().replace(year=prior_year, month=prior_month, day=1)
+
+        self._craft_outbox(
+            event_type="InvoiceIssued",
+            payload={"invoice_id": str(uuid.uuid4()), "service_amount": "0.00",
+                     "parts_amount": "500000.00", "total": "500000.00", "line_item_count": 1},
+            occurred_at=prior_occurred_at,
+        )
+
+        self.assertEqual(
+            TaxRemittance.suggested_pph_umkm_final(self.org, this_year, this_month), Decimal("0.00"),
+        )
+        self.assertEqual(
+            TaxRemittance.suggested_pph_umkm_final(self.org, prior_year, prior_month), Decimal("2500.00"),
+        )
+
+    # ------------------------------------------------------------------
+    # suggested_pph23_self_remit -- 2% of the jasa share of this
+    # month's payments from INDIVIDUAL customers not already withheld
+    # ------------------------------------------------------------------
+
+    def test_pph23_self_remit_is_zero_with_no_payments_this_month(self):
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph23_self_remit(self.org, year, month), Decimal("0.00"))
+
+    def test_pph23_self_remit_computes_jasa_proportional_share(self):
+        """
+        Hand-verified: labor 100000 + parts 200000 = 300000 total,
+        jasa_ratio = 100000/300000 = 1/3. Paid in full (300000), not
+        withheld at source. base = 300000 * 1/3 = 100000.
+        tax = 100000 * 0.02 = 2000.00.
+        """
+        invoice_id = self._issue_invoice(
+            labor_amount=Decimal("100000"), parts_amount=Decimal("200000"), customer_type="INDIVIDUAL",
+        )
+        invoice = Invoice.objects.get(id=invoice_id)
+        with self.captureOnCommitCallbacks(execute=True):
+            Payment.record(invoice=invoice, amount=Decimal("300000"), method="bank_transfer")
+
+        year, month = self._this_year_month()
+        suggested = TaxRemittance.suggested_pph23_self_remit(self.org, year, month)
+        self.assertEqual(suggested, Decimal("2000.00"))
+
+    def test_pph23_self_remit_excludes_institutional_customers(self):
+        """
+        Pak Holan's own confirmed split (TaxRemittance.record()'s own
+        class docstring): an INSTITUTIONAL customer withholds directly
+        at payment -- already captured on the Payment itself via
+        pph23_withheld_amount, never this function's concern. A fully
+        jasa INSTITUTIONAL payment with nothing withheld must still be
+        excluded purely on customer_type, proving the filter doesn't
+        silently fall through to "withheld == 0 is enough."
+        """
+        invoice_id = self._issue_invoice(labor_amount=Decimal("100000"), customer_type="INSTITUTIONAL")
+        invoice = Invoice.objects.get(id=invoice_id)
+        with self.captureOnCommitCallbacks(execute=True):
+            Payment.record(invoice=invoice, amount=Decimal("100000"), method="bank_transfer")
+
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph23_self_remit(self.org, year, month), Decimal("0.00"))
+
+    def test_pph23_self_remit_excludes_payments_already_withheld_at_source(self):
+        """
+        An INSTITUTIONAL customer who DID withhold PPh 23 directly at
+        this payment (pph23_withheld_amount > 0, the OTHER real case
+        TaxRemittance covers) must also be excluded here -- it was
+        already captured on the Payment itself, not this suggestion.
+        """
+        invoice_id = self._issue_invoice(labor_amount=Decimal("100000"), customer_type="INSTITUTIONAL")
+        invoice = Invoice.objects.get(id=invoice_id)
+        with self.captureOnCommitCallbacks(execute=True):
+            Payment.record(
+                invoice=invoice, amount=Decimal("100000"), method="bank_transfer",
+                pph23_withheld_amount=Decimal("2000"),
+            )
+
+        year, month = self._this_year_month()
+        self.assertEqual(TaxRemittance.suggested_pph23_self_remit(self.org, year, month), Decimal("0.00"))
+
+    def test_pph23_self_remit_excludes_payments_outside_the_target_month(self):
+        """
+        Same month-boundary proof as test_umkm_final_excludes_invoices_
+        outside_the_target_month, for the OTHER suggestion calculation
+        -- a crafted PaymentReceived Outbox row pointed at a real,
+        fully-jasa INDIVIDUAL invoice, dated last month. base = 50000
+        (100% jasa) -> tax = 50000 * 0.02 = 1000.00.
+        """
+        invoice_id = self._issue_invoice(labor_amount=Decimal("50000"), customer_type="INDIVIDUAL")
+
+        this_year, this_month = self._this_year_month()
+        prior_year, prior_month = self._prior_year_month()
+        prior_occurred_at = timezone.now().replace(year=prior_year, month=prior_month, day=1)
+
+        self._craft_outbox(
+            event_type="PaymentReceived",
+            payload={"invoice_id": invoice_id, "payment_id": str(uuid.uuid4()),
+                     "amount": "50000.00", "method": "bank_transfer",
+                     "customer_name": "Pelanggan Uji", "pph23_withheld_amount": "0.00"},
+            occurred_at=prior_occurred_at,
+        )
+
+        self.assertEqual(
+            TaxRemittance.suggested_pph23_self_remit(self.org, this_year, this_month), Decimal("0.00"),
+        )
+        self.assertEqual(
+            TaxRemittance.suggested_pph23_self_remit(self.org, prior_year, prior_month), Decimal("1000.00"),
+        )
+
+
+class PartiallyPaidStatusTests(PaymentsAPITestBase):
+    """
+    15 Sep 2026 — real, dedicated coverage for the PARTIALLY_PAID
+    status itself: the payment-guard fix that lets a SECOND payment
+    land on an already-partially-paid invoice (the actual bug that
+    would have existed if PARTIALLY_PAID were introduced without
+    also widening Payment.record()'s own status check), and the
+    manual-PATCH rejection mirroring PAID's own existing treatment.
+    """
+
+    def test_second_payment_on_partially_paid_invoice_succeeds(self):
+        """
+        THE real proof of the guard fix — without it, this second
+        call would incorrectly raise ValueError, since the OLD guard
+        only ever accepted status=="ISSUED", and the first payment
+        above already moved the invoice to PARTIALLY_PAID.
+        """
+        first = self._pay(100000)
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self._pay(150000)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PAID")
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 2)
+
+    def test_third_payment_that_still_does_not_clear_balance_stays_partially_paid(self):
+        """Real proof the status re-derivation is a genuine no-op
+        when the invoice is already at the correct target status —
+        not just correct on the FIRST transition into PARTIALLY_PAID."""
+        self._pay(50000)
+        resp = self._pay(50000)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")
+        self.assertEqual(invoice.balance_due, Decimal("150000.00"))
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 2)
+
+    def test_manual_status_partially_paid_rejected(self):
+        """Same real treatment PAID already gets — PARTIALLY_PAID
+        must never be settable via a human's PATCH, only ever derived
+        by Payment.record() itself."""
+        resp = self.client.patch(
+            f"/api/invoices/{self.invoice_id}/status/", {"status": "PARTIALLY_PAID"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "ISSUED")  # unchanged by the rejected attempt
+
+    def test_overpayment_still_rejected_against_a_partially_paid_invoice(self):
+        """Regression proof — the widened status guard must not
+        accidentally loosen the existing overpayment check."""
+        self._pay(100000)
+        resp = self._pay(999999)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PARTIALLY_PAID")  # unchanged by the rejected attempt
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 1)
+
+class PaymentPeriodLockTests(PaymentsAPITestBase):
+    """
+    6 Sep 2026 — real, synchronous period-lock coverage for
+    Payment.record(), closing the same gap already found and fixed
+    for SupplierPayment.record()/StockOpnameSession.complete()
+    elsewhere in this codebase — Payment.record() had NO period-open
+    check at all before this fix. Closes the CURRENT real month's own
+    period (the one this fixture's own real WorkOrder.close() flow
+    depends on already existing) directly via the ORM.
+    """
+
+    def test_payment_blocked_when_current_period_is_closed(self):
+        from apps.accounting.models import AccountingPeriod
+
+        today = timezone.now().date()
+        period = AccountingPeriod.objects.get(
+            organization=self.org, year=today.year, month=today.month,
+        )
+        period.is_closed = True
+        period.save(update_fields=["is_closed"])
+
+        resp = self._pay(250000)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "ISSUED")  # unchanged by the rejected attempt
+        self.assertFalse(Payment.objects.filter(invoice_id=self.invoice_id).exists())
+
+
+class PaymentTenantIsolationTests(PaymentsAPITestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.other_org = Organization.objects.create(name="Bengkel Lain Payments")
+        self.other_owner = CustomUser.objects.create_user(
+            email="owner.otherpayments@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.other_org, user=self.other_owner, role="owner", is_active=True,
+        )
+
+    def test_org_b_cannot_pay_org_a_invoice(self):
+        self.client.force_authenticate(user=self.other_owner)
+        resp = self._pay(100000)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_org_b_cannot_view_org_a_payment_history(self):
+        self._pay(100000)
+        self.client.force_authenticate(user=self.other_owner)
+        resp = self.client.get(f"/api/invoices/{self.invoice_id}/payments/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+class PaymentReceivedEventTests(PaymentsAPITestBase):
+
+    def test_full_payment_publishes_payment_received(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self._pay(250000, method="cash")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        row = Outbox.objects.get(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(row.organization_id, self.org.id)
+        self.assertEqual(row.payload["amount"], "250000.00")
+        self.assertEqual(row.payload["method"], "cash")
+        self.assertEqual(row.status, Outbox.Status.PROCESSED)
+
+    def test_partial_payment_still_publishes_payment_received(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(100000, method="bank_transfer")
+
+        row = Outbox.objects.get(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(row.payload["amount"], "100000.00")
+        self.assertEqual(row.payload["method"], "bank_transfer")
+
+    def test_two_partial_payments_publish_two_separate_events(self):
+        self._pay(100000)
+        self._pay(150000)
+        rows = Outbox.objects.filter(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(rows.count(), 2)
+        amounts = sorted(row.payload["amount"] for row in rows)
+        self.assertEqual(amounts, ["100000.00", "150000.00"])
+
+    def test_payment_id_in_payload_matches_the_real_payment_row(self):
+        resp = self._pay(250000)
+        payment_id = resp.data["payment"]["id"]
+        row = Outbox.objects.get(event_type="PaymentReceived", payload__invoice_id=self.invoice_id)
+        self.assertEqual(row.payload["payment_id"], payment_id)
+
+    def test_rejected_overpayment_publishes_nothing(self):
+        resp = self._pay(300000)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Outbox.objects.filter(event_type="PaymentReceived").count(), 0)
+
+class InvoiceRefundTests(PaymentsAPITestBase):
+    """
+    Task 2.3, Half B — proves refunding a fully-paid invoice reverses
+    the exact revenue posting WITHOUT touching AR (which is already
+    correctly at zero from the payment that got it there), and
+    credits the right cash/bank account based on the refund's own
+    method — independent of whatever method the original payment used.
+    """
+
+    def _pay_in_full(self, method="cash"):
+        with self.captureOnCommitCallbacks(execute=True):
+            self._pay(250000, method=method)
+
+    def test_refunding_paid_invoice_reverses_revenue_not_ar(self):
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "PAID")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "CANCELLED")
+
+        service_rev = Account.objects.get(organization=self.org, code="4001")
+        cash        = Account.objects.get(organization=self.org, code="1001")
+        ar          = Account.objects.get(organization=self.org, code="1201")
+
+        self.assertEqual(service_rev.balance(), Decimal("0.00"))
+        self.assertEqual(ar.balance(), Decimal("0.00"))
+        self.assertEqual(cash.balance(), Decimal("0.00"))
+
+    def test_refund_method_is_independent_of_payment_method(self):
+        self._pay_in_full(method="cash")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "bank_transfer"}, format="json",
+            )
+
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("250000.00"))
+        self.assertEqual(bank.balance(), Decimal("-250000.00"))
+
+    def test_cannot_refund_an_unpaid_invoice(self):
+        resp = self.client.post(
+            f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_refunding_twice_is_blocked_by_status_guard(self):
+        self._pay_in_full(method="cash")
+        with self.captureOnCommitCallbacks(execute=True):
+            first = self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+            )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self.client.post(
+            f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_calling_reverse_for_refund_event_twice_does_not_double_reverse(self):
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+
+        refund_event = InvoiceRefunded(
+            organization_id=self.org.id, invoice_id=invoice.id,
+            refund_id=uuid.uuid4(), issued_event_id=invoice.issued_event_id,
+            amount=Decimal("250000.00"), method="cash",
+        )
+        cancellations.reverse_for_refund_event(refund_event)
+        cancellations.reverse_for_refund_event(refund_event)
+
+        self.assertEqual(
+            JournalEntry.objects.filter(reference_event_id=refund_event.event_id).count(), 1,
+        )
+
+    def test_reversal_entry_carries_the_real_refunding_actor(self):
+        """
+        6 Sep 2026 — real audit-trail coverage for reverse_for_refund_
+        event()'s own actor resolution (Sansan's own "who performed
+        this reversal" question, Q57), not a live incident. Calls
+        Refund.record() directly with an explicit refunded_by, rather
+        than through the real HTTP /refund/ endpoint — this proves
+        Refund.record()'s own real refunded_by parameter now
+        genuinely survives all the way through InvoiceRefunded's own
+        payload into the reversal JournalEntry's created_by,
+        independent of whether the real refund VIEW (not reviewed
+        for this fix) actually passes the authenticated request user
+        through today.
+        """
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            Refund.record(invoice=invoice, method="cash", refunded_by=self.owner)
+
+        reversal = JournalEntry.objects.get(event_type="InvoiceRefunded")
+        self.assertEqual(reversal.created_by_id, self.owner.id)
+
+    def test_reversal_entry_has_no_actor_when_refunded_by_is_not_set(self):
+        """Regression proof — the field is nullable; a refund with no
+        real actor attached must still resolve cleanly, created_by
+        simply staying null, not crash."""
+        self._pay_in_full(method="cash")
+        invoice = Invoice.objects.get(id=self.invoice_id)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            Refund.record(invoice=invoice, method="cash")
+
+        reversal = JournalEntry.objects.get(event_type="InvoiceRefunded")
+        self.assertIsNone(reversal.created_by_id)
+
+    def test_status_patch_to_cancelled_on_paid_invoice_points_at_refund_endpoint(self):
+        self._pay_in_full(method="cash")
+        resp = self.client.patch(
+            f"/api/invoices/{self.invoice_id}/status/", {"status": "CANCELLED"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("refund", resp.data["message"].lower())
+
+    def test_missing_cash_account_marks_outbox_failed_not_silent(self):
+        self._pay_in_full(method="bank_transfer")
+
+        Account.objects.get(organization=self.org, code="1001").delete()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/api/invoices/{self.invoice_id}/refund/", {"method": "cash"}, format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        invoice = Invoice.objects.get(id=self.invoice_id)
+        self.assertEqual(invoice.status, "CANCELLED")
+
+        row = Outbox.objects.get(event_type="InvoiceRefunded", payload__invoice_id=str(invoice.id))
+        self.assertEqual(row.status, Outbox.Status.FAILED)
+        self.assertIn("CancellationEventHandler", row.last_error)
+
+        self.assertFalse(JournalEntry.objects.filter(event_type="InvoiceRefunded").exists())
+
+class SupplierPaymentMadeEventTests(TestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart Jaya")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.invoice = SupplierInvoice.record(
+                organization=self.org, supplier=self.supplier,
+                amount=Decimal("450000.00"), invoice_date="2026-08-09",
+            )
+
+    def test_payment_clears_ap_and_credits_bank(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            SupplierPayment.record(supplier_invoice=self.invoice, method="bank_transfer")
+
+        ap   = Account.objects.get(organization=self.org, code="2001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(ap.balance(), Decimal("0.00"))
+        self.assertEqual(bank.balance(), Decimal("-450000.00"))
+
+    def test_payment_via_cash_credits_cash_not_bank(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            SupplierPayment.record(supplier_invoice=self.invoice, method="cash")
+
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("-450000.00"))
+        self.assertEqual(bank.balance(), Decimal("0.00"))
+
+
+class OperatingExpenseTests(TestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Yoga")
+
+    def test_record_creates_sequential_number(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.captureOnCommitCallbacks(execute=True):
+            expense = OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("300000.00"),
+            )
+        self.assertEqual(expense.number, "EXP/00001")
+        self.assertEqual(expense.sequence_number, 1)
+
+    def test_cash_expense_posts_dr_account_cr_cash(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.captureOnCommitCallbacks(execute=True):
+            OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("300000.00"), method="cash",
+            )
+        utilities = Account.objects.get(organization=self.org, code="6003")
+        cash      = Account.objects.get(organization=self.org, code="1001")
+        self.assertEqual(utilities.balance(), Decimal("300000.00"))
+        self.assertEqual(cash.balance(), Decimal("-300000.00"))
+
+    def test_bank_expense_posts_dr_account_cr_bank(self):
+        account = Account.objects.get(organization=self.org, code="6001")
+        with self.captureOnCommitCallbacks(execute=True):
+            OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("6000000.00"), method="bank",
+            )
+        salary = Account.objects.get(organization=self.org, code="6001")
+        bank   = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(salary.balance(), Decimal("6000000.00"))
+        self.assertEqual(bank.balance(), Decimal("-6000000.00"))
+
+    def test_posting_date_matches_paid_at_not_occurred_at(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        yesterday = timezone.now() - timedelta(days=1)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("100000.00"),
+                paid_at=yesterday,
+            )
+
+        entry = JournalEntry.objects.get(organization=self.org, event_type="OperatingExpenseRecorded")
+        self.assertEqual(entry.posting_date, yesterday.date())
+
+    def test_account_must_be_expense_type(self):
+        cash_account = Account.objects.get(organization=self.org, code="1001")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(organization=self.org, account=cash_account, amount=Decimal("100000.00"))
+
+    def test_6004_depreciation_account_rejected(self):
+        depreciation_account = Account.objects.get(organization=self.org, code="6004")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(
+                organization=self.org, account=depreciation_account, amount=Decimal("50000.00"),
+            )
+
+    def test_mechanic_allowed_for_gaji_karyawan(self):
+        salary_account = Account.objects.get(organization=self.org, code="6001")
+        with self.captureOnCommitCallbacks(execute=True):
+            expense = OperatingExpense.record(
+                organization=self.org, account=salary_account, amount=Decimal("6000000.00"),
+                mechanic=self.mechanic,
+            )
+        self.assertEqual(expense.mechanic_id, self.mechanic.id)
+
+    def test_mechanic_rejected_for_non_salary_account(self):
+        utilities_account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(
+                organization=self.org, account=utilities_account, amount=Decimal("300000.00"),
+                mechanic=self.mechanic,
+            )
+
+    def test_zero_amount_rejected(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(organization=self.org, account=account, amount=Decimal("0"))
+
+    def test_negative_amount_rejected(self):
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(organization=self.org, account=account, amount=Decimal("-50000.00"))
+
+    def test_blocked_when_target_period_is_closed(self):
+        from apps.accounting.models import AccountingPeriod
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=1)
+        period.close(closed_by=None)
+
+        account = Account.objects.get(organization=self.org, code="6003")
+        with self.assertRaises(ValueError):
+            OperatingExpense.record(
+                organization=self.org, account=account, amount=Decimal("100000.00"),
+                paid_at=timezone.make_aware(dt(2026, 1, 15)),
+            )
+
+
+class OperatingExpenseAPITests(APITestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.opex@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def test_create_operating_expense_via_api(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post("/api/operating-expenses/", {
+                "account_code": "6003", "amount": "300000.00", "method": "cash",
+            }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        utilities = Account.objects.get(organization=self.org, code="6003")
+        self.assertEqual(utilities.balance(), Decimal("300000.00"))
+
+    def test_6004_rejected_via_api(self):
+        resp = self.client.post("/api/operating-expenses/", {
+            "account_code": "6004", "amount": "50000.00", "method": "cash",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(OperatingExpense.objects.exists())
+
+    def test_rejects_cross_tenant_mechanic(self):
+        other_org = Organization.objects.create(name="Bengkel Lain OpEx")
+        other_mechanic = Mechanic.objects.create(organization=other_org, name="Mekanik Lain")
+
+        resp = self.client.post("/api/operating-expenses/", {
+            "account_code": "6001", "amount": "6000000.00", "method": "cash",
+            "mechanic": str(other_mechanic.id),
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(OperatingExpense.objects.exists())
+
+
+class InternalCashMutationTests(TestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_record_creates_sequential_number(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            mutation = InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("1500000.00"),
+            )
+        self.assertEqual(mutation.number, "MUT/00001")
+        self.assertEqual(mutation.sequence_number, 1)
+
+    def test_cash_to_bank_posts_dr_1101_cr_1001(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("1500000.00"),
+            )
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("-1500000.00"))
+        self.assertEqual(bank.balance(), Decimal("1500000.00"))
+
+    def test_bank_to_cash_posts_dr_1001_cr_1101(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1101", to_account_code="1001",
+                amount=Decimal("500000.00"),
+            )
+        cash = Account.objects.get(organization=self.org, code="1001")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(cash.balance(), Decimal("500000.00"))
+        self.assertEqual(bank.balance(), Decimal("-500000.00"))
+
+    def test_zero_pnl_impact(self):
+        from apps.accounting import reports
+        with self.captureOnCommitCallbacks(execute=True):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("1500000.00"),
+            )
+        data = reports.profit_and_loss(self.org, since=date(2026, 1, 1), as_of=date(2026, 12, 31))
+        self.assertEqual(data["net_income"], Decimal("0"))
+
+    def test_same_account_rejected(self):
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1001",
+                amount=Decimal("100000.00"),
+            )
+        self.assertFalse(InternalCashMutation.objects.exists())
+
+    def test_account_outside_cash_or_bank_rejected(self):
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="2001",
+                amount=Decimal("100000.00"),
+            )
+
+    def test_zero_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("0"),
+            )
+
+    def test_negative_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("-100000"),
+            )
+
+    def test_blocked_when_target_period_is_closed(self):
+        from apps.accounting.models import AccountingPeriod
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=1)
+        period.close(closed_by=None)
+
+        with self.assertRaises(ValueError):
+            InternalCashMutation.record(
+                organization=self.org, from_account_code="1001", to_account_code="1101",
+                amount=Decimal("100000.00"), transaction_date=date(2026, 1, 15),
+            )
+        self.assertFalse(InternalCashMutation.objects.exists())
+
+
+class InternalCashMutationAPITests(APITestCase):
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        self.owner = CustomUser.objects.create_user(
+            email="owner.icm@test.id", password="pass12345!",
+            full_name="Made Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(
+            organization=self.org, user=self.owner, role="owner", is_active=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def test_create_internal_cash_mutation_via_api(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post("/api/internal-cash-mutations/", {
+                "from_account_code": "1001", "to_account_code": "1101", "amount": "1500000.00",
+            }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(bank.balance(), Decimal("1500000.00"))
+
+    def test_same_account_rejected_via_api(self):
+        resp = self.client.post("/api/internal-cash-mutations/", {
+            "from_account_code": "1001", "to_account_code": "1001", "amount": "100000.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(InternalCashMutation.objects.exists())
+
+    def test_invalid_account_code_rejected_via_api(self):
+        resp = self.client.post("/api/internal-cash-mutations/", {
+            "from_account_code": "1001", "to_account_code": "2001", "amount": "100000.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_list_scoped_to_organization(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post("/api/internal-cash-mutations/", {
+                "from_account_code": "1001", "to_account_code": "1101", "amount": "100000.00",
+            }, format="json")
+
+        other_org = Organization.objects.create(name="Bengkel Lain ICM")
+        other_owner = CustomUser.objects.create_user(
+            email="owner.otherorg.icm@test.id", password="pass12345!",
+            full_name="Other Owner", role=CustomUser.Role.OWNER,
+        )
+        OrganizationMembership.objects.create(organization=other_org, user=other_owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=other_owner)
+
+        resp = self.client.get("/api/internal-cash-mutations/")
+        self.assertEqual(resp.data["internal_cash_mutations"], [])
+
+class PaymentRecordReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7 (AR side).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.paymentreadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.customer = Customer.objects.create(organization=self.org, name="Budi")
+        self.vehicle = Vehicle.objects.create(
+            organization=self.org, customer=self.customer, plate_number="BP 1 AA",
+            manufacture_year=2022, vehicle_type="Mobil", model="Avanza",
+        )
+        self.mechanic = Mechanic.objects.create(organization=self.org, name="Wowo")
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _issued_invoice(self):
+        """Constructed directly via the ORM, bypassing the real
+        InvoiceIssued event/journal posting entirely — this test is
+        about the PAYMENT gate specifically, not re-proving invoice
+        issuance's own posting logic (covered separately, above)."""
+        wo = WorkOrder.objects.create(
+            organization=self.org, vehicle=self.vehicle, assigned_to=self.mechanic, status="QC",
+        )
+        record = ServiceRecord.objects.create(
+            organization=self.org, vehicle=self.vehicle, service_date=date(2026, 9, 17),
+            odometer_km=10000, issue_description="Servis",
+        )
+        wo.service_record = record
+        wo.status = "DONE"
+        wo.save(update_fields=["service_record", "status"])
+        invoice = Invoice.objects.create(service_record=record)
+        InvoiceLineItem.objects.create(
+            invoice=invoice, kind="labor", description="Jasa", quantity=1, unit_price=Decimal("100000"),
+        )
+        invoice.status = "ISSUED"
+        invoice.save(update_fields=["status"])
+        return invoice
+
+    def test_payment_blocked_when_org_not_ready(self):
+        invoice = self._issued_invoice()
+        resp = self.client.post(
+            f"/api/invoices/{invoice.id}/payments/", {"amount": "50000", "method": "cash"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        self.assertFalse(invoice.payments.exists())
+
+    def test_payment_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        invoice = self._issued_invoice()
+        resp = self.client.post(
+            f"/api/invoices/{invoice.id}/payments/", {"amount": "50000", "method": "cash"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(invoice.payments.exists())
+
+
+class SupplierPaymentReadinessGateTests(APITestCase):
+    """
+    17 Sep 2026 — Brand-New Workshop Readiness, Step 7 (AP side) —
+    the deliberate extension beyond the literal "Payment record"
+    wording, flagged directly when delivered.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor")
+        self.owner = CustomUser.objects.create_user(
+            email="owner.suppayreadiness@test.id", password="pass12345!", full_name="Owner",
+        )
+        OrganizationMembership.objects.create(organization=self.org, user=self.owner, role="owner", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+        self.supplier = Supplier.objects.create(organization=self.org, name="PT Sparepart")
+
+    def _make_org_ready(self):
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+        session = OpeningBalanceSession.objects.create(organization=self.org, start_date=date(2026, 9, 1))
+        session.confirm_zero(confirmed_by=self.owner)
+
+    def _unpaid_supplier_invoice(self):
+        """Constructed directly via the ORM -- SupplierInvoice.record()
+        itself calls AccountingPeriod.assert_open_for_posting()
+        internally, which would raise for a genuinely not-ready org
+        before this test could even reach the payment gate it's
+        actually testing."""
+        return SupplierInvoice.objects.create(
+            organization=self.org, supplier=self.supplier,
+            amount=Decimal("500000"), invoice_date=date(2026, 9, 17), status="UNPAID",
+        )
+
+    def test_supplier_payment_blocked_when_org_not_ready(self):
+        invoice = self._unpaid_supplier_invoice()
+        resp = self.client.post(
+            f"/api/supplier-invoices/{invoice.id}/pay/", {"method": "bank_transfer"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("blocks", resp.data)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "UNPAID")
+
+    def test_supplier_payment_succeeds_when_org_ready(self):
+        self._make_org_ready()
+        invoice = self._unpaid_supplier_invoice()
+        resp = self.client.post(
+            f"/api/supplier-invoices/{invoice.id}/pay/", {"method": "bank_transfer"}, format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "PAID")
+
+class TaxRemittanceTests(TestCase):
+    """
+    15 Oct 2026 -- real regression coverage for the TaxRemittanceRecorded
+    handler-registration bug (see patch_handlers_taxremittance_fix.py / the
+    Roadmap's own Phase 20 writeup for the full incident). Zero tests
+    existed for TaxRemittance before this -- the gap this fix closes is
+    exactly why the original bug shipped silently and was never caught by
+    the test suite first.
+
+    Mirrors OperatingExpenseTests' own fixture shape (Cheat Sheet SS6 --
+    one test class per real write path): a seeded org, no Invoice/WorkOrder
+    chain needed.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Arya Motor", invoice_code="AM")
+        call_command("seed_coa", organization=str(self.org.id), verbosity=0)
+
+    def test_record_creates_sequential_number(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            remittance = TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("150000.00"),
+            )
+        self.assertEqual(remittance.number, "TAX/00001")
+        self.assertEqual(remittance.sequence_number, 1)
+
+    def test_pph23_self_remit_posts_dr_1205_cr_bank(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("150000.00"),
+                method="bank",
+            )
+        prepaid_pph23 = Account.objects.get(organization=self.org, code="1205")
+        bank = Account.objects.get(organization=self.org, code="1101")
+        self.assertEqual(prepaid_pph23.balance(), Decimal("150000.00"))
+        self.assertEqual(bank.balance(), Decimal("-150000.00"))
+
+    def test_pph_umkm_final_posts_dr_6006_cr_cash(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph_umkm_final",
+                period_year=2026, period_month=9, amount=Decimal("75000.00"),
+                method="cash",
+            )
+        pph_final = Account.objects.get(organization=self.org, code="6006")
+        cash = Account.objects.get(organization=self.org, code="1001")
+        self.assertEqual(pph_final.balance(), Decimal("75000.00"))
+        self.assertEqual(cash.balance(), Decimal("-75000.00"))
+
+    def test_outbox_row_actually_posts_a_journal_entry(self):
+        """
+        The real regression guard. Before the handlers.py fix, this test
+        would FAIL on its own last two asserts: the Outbox row ends up
+        PROCESSED (not FAILED -- an unregistered event is dispatched to
+        zero handlers, which dispatcher.py's own _dispatch_now() treats as
+        a normal, successful no-op), while zero JournalEntry rows exist --
+        the exact silent-no-post bug. A PROCESSED-looking success with no
+        real ledger effect is precisely what replay_failed_events can never
+        find, since it only ever looks at FAILED rows.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("150000.00"),
+            )
+        outbox_row = Outbox.objects.get(organization=self.org, event_type="TaxRemittanceRecorded")
+        self.assertEqual(outbox_row.status, Outbox.Status.PROCESSED)
+        self.assertTrue(
+            JournalEntry.objects.filter(
+                organization=self.org, event_type="TaxRemittanceRecorded",
+            ).exists(),
+            "TaxRemittanceRecorded was marked PROCESSED but posted no JournalEntry "
+            "-- the handler-registration regression is back.",
+        )
+
+    def test_posting_date_matches_paid_at_not_occurred_at(self):
+        yesterday = timezone.now() - timedelta(days=1)
+        with self.captureOnCommitCallbacks(execute=True):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph_umkm_final",
+                period_year=2026, period_month=9, amount=Decimal("75000.00"),
+                paid_at=yesterday,
+            )
+        entry = JournalEntry.objects.get(organization=self.org, event_type="TaxRemittanceRecorded")
+        self.assertEqual(entry.posting_date, timezone.localtime(yesterday).date())
+
+    def test_zero_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=9, amount=Decimal("0"),
+            )
+
+    def test_unknown_tax_type_rejected(self):
+        with self.assertRaises(ValueError):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph_unifikasi",
+                period_year=2026, period_month=9, amount=Decimal("100000.00"),
+            )
+
+    def test_blocked_when_target_period_is_closed(self):
+        from apps.accounting.models import AccountingPeriod
+        period = AccountingPeriod.objects.get(organization=self.org, year=2026, month=1)
+        period.close(closed_by=None)
+
+        with self.assertRaises(ValueError):
+            TaxRemittance.record(
+                organization=self.org, tax_type="pph23_self_remit",
+                period_year=2026, period_month=1, amount=Decimal("150000.00"),
+                paid_at=timezone.make_aware(dt(2026, 1, 15)),
+            )
