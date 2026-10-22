@@ -3,8 +3,9 @@
 # =============================================================================
 from django.urls import path
 
-from .views import (InvoiceCreateView, InvoiceDetailView, InvoiceListView,
-                    InvoicePdfView, InvoiceStatusUpdateView,
+from .views import (InvoiceCreateView, InvoiceDetailView,
+                    InvoiceLaborLineDetailView, InvoiceLaborLineListView,
+                    InvoiceListView, InvoicePdfView, InvoiceStatusUpdateView,
                     InvoiceSuggestedLaborLinesView)
 
 urlpatterns = [
@@ -18,4 +19,7 @@ urlpatterns = [
     path("invoices/<uuid:pk>/",          InvoiceDetailView.as_view(),       name="invoice-detail"),
     path("invoices/<uuid:pk>/status/",   InvoiceStatusUpdateView.as_view(), name="invoice-status-update"),
     path("invoices/<uuid:pk>/receipt.pdf", InvoicePdfView.as_view(),        name="invoice-pdf"),
+    # 22 Oct 2026 (Phase 21, Task C1) -- jasa lines on a DRAFT invoice.
+    path("invoices/<uuid:pk>/line-items/",  InvoiceLaborLineListView.as_view(),   name="invoice-labor-line-add"),
+    path("invoices/line-items/<uuid:pk>/",  InvoiceLaborLineDetailView.as_view(), name="invoice-labor-line-detail"),
 ]
