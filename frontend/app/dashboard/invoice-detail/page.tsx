@@ -240,8 +240,9 @@ function DraftJasaEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
 // 12 Sep: "masih bisa tambah & kurang barang"). Unlike jasa, these move
 // stock and post to the books right away (COGS <-> Inventory):
 //   - Tambah: stock goes down, billed at the selling price (editable).
-//   - Kembalikan ke stok: stock goes back, the cost is reversed, the line
-//     leaves the invoice. Whole line only (agreed 22 Oct).
+//   - Kembalikan ke stok: stock goes back, the cost is reversed. Since
+//     23 Oct 2026 staff pick HOW MANY (e.g. 1 of 2 busi); the line shrinks,
+//     or leaves the invoice when all of it goes back. Fluids: whole line only.
 //   - Tidak ditagih: the part was used; the line stays at Rp 0 marked
 //     "(tidak ditagih)" so the customer sees it was free. Nothing moves.
 // Both posting actions can be stopped by the readiness gate; the shared
@@ -256,7 +257,12 @@ function DraftPartEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
   const [error, setError] = useState<string | null>(null);
   const [blocked, setBlocked] = useState<ReadinessBlockedError | null>(null);
 
+  // "How many?" row, shown under a line with more than one unit.
+  const [pick, setPick] = useState<{ lineId: string; action: "return" | "not-charged"; max: number; qty: string } | null>(null);
+
   useEffect(() => { partsApi.list().then(setCatalog).catch(() => setCatalog([])); }, []);
+
+  const isFluid = (partId: string | null) => catalog.find((p) => p.id === partId)?.item_type === "FLUID";
 
   const selected = catalog.find((p) => p.id === partId) ?? null;
   const selectedCost = selected && Number(selected.cost_price) > 0 ? Number(selected.cost_price) : null;
@@ -296,21 +302,45 @@ function DraftPartEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
     if (ok) { setPartId(""); setQty("1"); setPrice(""); }
   };
 
-  const returnPart = async (lineId: string, description: string, quantity: string) => {
-    if (!window.confirm(`Kembalikan "${description}" × ${Number(quantity)} ke stok?\n\nStok bertambah dan baris ini dihapus dari invoice.`)) return;
+  const returnWhole = async (lineId: string, description: string, quantity: number, fluid: boolean) => {
+    const note = fluid ? "\n\nFluida hanya bisa dikembalikan seluruhnya." : "";
+    if (!window.confirm(`Kembalikan "${description}" × ${quantity} ke stok?\n\nStok bertambah dan baris ini dihapus dari invoice.${note}`)) return;
     await run(() => invoicesApi.returnPartLine(lineId), "Gagal mengembalikan part.");
   };
 
-  const notCharged = async (lineId: string, description: string) => {
+  const notChargedWhole = async (lineId: string, description: string) => {
     if (!window.confirm(`Tandai "${description}" tidak ditagih?\n\nPart tetap tercatat terpakai, tampil di invoice dengan harga Rp 0.`)) return;
     await run(() => invoicesApi.markPartNotCharged(lineId), "Gagal mengubah part.");
+  };
+
+  // More than one unit (and, for returns, not a fluid): ask how many first.
+  const startReturn = (lineId: string, description: string, quantity: number, partId: string | null) => {
+    const fluid = isFluid(partId);
+    if (quantity > 1 && !fluid) setPick({ lineId, action: "return", max: quantity, qty: String(quantity) });
+    else returnWhole(lineId, description, quantity, fluid);
+  };
+
+  const startNotCharged = (lineId: string, description: string, quantity: number) => {
+    if (quantity > 1) setPick({ lineId, action: "not-charged", max: quantity, qty: String(quantity) });
+    else notChargedWhole(lineId, description);
+  };
+
+  const confirmPick = async () => {
+    if (!pick) return;
+    const n = Number(pick.qty);
+    if (!(n > 0) || n > pick.max) { setError(`Jumlah harus antara 1 dan ${pick.max}.`); return; }
+    const ok = pick.action === "return"
+      ? await run(() => invoicesApi.returnPartLine(pick.lineId, n), "Gagal mengembalikan part.")
+      : await run(() => invoicesApi.markPartNotCharged(pick.lineId, n), "Gagal mengubah part.");
+    if (ok) setPick(null);
   };
 
   return (
     <div className="no-print card" style={{ maxWidth: 720, margin: "18px auto 0", padding: 20 }}>
       <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Ubah Part (Draf)</h3>
       <p style={{ fontSize: 12.5, color: "var(--steel)", marginBottom: 14 }}>
-        Menambah atau mengembalikan part langsung mengubah stok dan pembukuan. &quot;Tidak ditagih&quot; = part
+        Menambah atau mengembalikan part langsung mengubah stok dan pembukuan — bisa sebagian (mis. 1 dari 2 busi),
+        kecuali fluida (oli, dll.) yang hanya bisa dikembalikan seluruhnya. &quot;Tidak ditagih&quot; = part
         dipakai tapi gratis untuk pelanggan (tampil Rp 0).
       </p>
       {blocked && <ReadinessBlockNotice blocked={blocked} />}
@@ -320,22 +350,41 @@ function DraftPartEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
         {partItems.length === 0 && <p style={{ color: "var(--steel)", fontSize: 13 }}>Belum ada part.</p>}
         {partItems.map((li) => {
           const free = li.description.endsWith("(tidak ditagih)");
+          const quantity = Number(li.quantity);
+          const picking = pick?.lineId === li.id ? pick : null;
           return (
-            <div key={li.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span className="mono" style={{ fontSize: 13 }}>{li.description} × {Number(li.quantity)}</span>
+            <div key={li.id}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span className="mono" style={{ fontSize: 13 }}>{li.description} × {quantity}</span>
               <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span className="mono" style={{ fontSize: 13 }}>{money(li.subtotal)}</span>
                 <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 8px" }} disabled={busy}
-                  onClick={() => returnPart(li.id, li.description, li.quantity)}>
+                  onClick={() => startReturn(li.id, li.description, quantity, li.part)}>
                   Kembalikan ke stok
                 </button>
                 {!free && (
                   <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 8px" }} disabled={busy}
-                    onClick={() => notCharged(li.id, li.description)}>
+                    onClick={() => startNotCharged(li.id, li.description, quantity)}>
                     Tidak ditagih
                   </button>
                 )}
               </span>
+            </div>
+            {picking && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 6, padding: "8px 10px", background: "var(--paper, #f6f6f4)", borderRadius: 5, fontSize: 12.5 }}>
+                <span>{picking.action === "return" ? "Berapa yang dikembalikan ke stok?" : "Berapa yang tidak ditagih?"}</span>
+                <input className="input" style={{ width: 70 }} type="number" min={1} max={picking.max} step={1} value={picking.qty}
+                  onChange={(e) => setPick({ ...picking, qty: e.target.value })} />
+                <span style={{ color: "var(--steel)" }}>dari {picking.max}</span>
+                <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} disabled={busy} onClick={confirmPick}>
+                  {busy ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <Check size={12} />}
+                  {picking.action === "return" ? " Kembalikan" : " Tandai gratis"}
+                </button>
+                <button className="btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} disabled={busy} onClick={() => setPick(null)}>
+                  Batal
+                </button>
+              </div>
+            )}
             </div>
           );
         })}
