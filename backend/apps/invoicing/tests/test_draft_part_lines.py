@@ -200,3 +200,97 @@ class DraftPartLineTests(InvoicingAPITestBase):
         with self.assertRaisesMessage(ValueError, "tidak bisa diubah"):
             invoice.return_part_line(self.part_line)
         self.assertEqual(self._stock(), Decimal("8.00"))
+
+    # ── 23 Oct 2026: part of a line (e.g. 1 of 2 busi) ──────────────────────
+    # Fixture line: 2 x Kampas Rem, price 250.000, cost 150.000 (a spare part).
+    def _action_qty(self, line_id, action, quantity):
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(f"/api/invoices/part-lines/{line_id}/{action}/", {"quantity": quantity}, format="json")
+
+    def test_partial_return_moves_only_those_units(self):
+        resp = self._action_qty(self.part_line.id, "return", 1)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.part_line.refresh_from_db()
+        self.assertEqual(self.part_line.quantity, Decimal("1.00"))
+        self.assertEqual(self._stock(), Decimal("9.00"))
+        self.assertEqual(self._balance("5001"), Decimal("150000"))
+        self.assertEqual(self._balance("1301"), Decimal("-150000"))
+        usage = PartUsage.objects.get(service_record=self.record)
+        self.assertEqual(usage.quantity, Decimal("1.00"))
+        row = Outbox.objects.get(event_type="InvoicePartAdjusted")
+        self.assertEqual(Decimal(str(row.payload["quantity"])), Decimal("1"))
+        self.assertTrue(JournalEntry.objects.filter(event_type="InvoicePartAdjusted", reference_event_id=row.event_id).exists())
+
+    def test_partial_return_then_issue_bills_what_is_left(self):
+        self._action_qty(self.part_line.id, "return", 1)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.patch(f"/api/invoices/{self.invoice_id}/status/", {"status": "ISSUED"}, format="json")
+        row = Outbox.objects.get(event_type="InvoiceIssued", payload__invoice_id=self.invoice_id)
+        self.assertEqual(Decimal(row.payload["parts_amount"]), Decimal("250000"))
+
+    def test_returning_the_rest_later_removes_the_line_and_nets_to_zero(self):
+        self._action_qty(self.part_line.id, "return", 1)
+        self._action_qty(self.part_line.id, "return", 1)
+        self.assertFalse(InvoiceLineItem.objects.filter(id=self.part_line.id).exists())
+        self.assertEqual(self._stock(), Decimal("10.00"))
+        self.assertEqual(self._balance("5001"), Decimal("0"))
+        self.assertEqual(self._balance("1301"), Decimal("0"))
+        self.assertEqual(PartUsage.objects.filter(service_record=self.record).count(), 0)
+
+    def test_return_quantity_must_be_valid_and_bad_input_moves_nothing(self):
+        for bad in (3, 0, -1, "abc"):
+            resp = self._action_qty(self.part_line.id, "return", bad)
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, bad)
+        self.part_line.refresh_from_db()
+        self.assertEqual(self.part_line.quantity, Decimal("2.00"))
+        self.assertEqual(self._stock(), Decimal("8.00"))
+        self.assertFalse(Outbox.objects.filter(event_type="InvoicePartAdjusted").exists())
+
+    def test_fluids_return_whole_line_only(self):
+        self.part.item_type = Part.ItemType.FLUID
+        self.part.save(update_fields=["item_type"])
+        resp = self._action_qty(self.part_line.id, "return", 1)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Fluida", resp.data["message"])
+        self.assertEqual(self._stock(), Decimal("8.00"))
+        self.assertFalse(Outbox.objects.filter(event_type="InvoicePartAdjusted").exists())
+        # The whole line still can go back (unopened, or the job was undone).
+        self.assertEqual(self._action(self.part_line.id, "return").status_code, status.HTTP_200_OK)
+        self.assertEqual(self._stock(), Decimal("10.00"))
+
+    def test_partial_not_charged_splits_the_line_and_moves_nothing(self):
+        resp = self._action_qty(self.part_line.id, "not-charged", 1)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.part_line.refresh_from_db()
+        self.assertEqual((self.part_line.quantity, self.part_line.unit_price), (Decimal("1.00"), Decimal("250000.00")))
+        free = InvoiceLineItem.objects.filter(invoice_id=self.invoice_id, kind="part").exclude(id=self.part_line.id).get()
+        self.assertEqual((free.quantity, free.unit_price, free.unit_cost), (Decimal("1.00"), Decimal("0.00"), Decimal("150000.00")))
+        self.assertTrue(free.description.endswith("(tidak ditagih)"))
+        self.assertEqual(self._stock(), Decimal("8.00"))
+        self.assertEqual(self._balance("5001"), Decimal("300000"))
+        self.assertFalse(Outbox.objects.filter(event_type="InvoicePartAdjusted").exists())
+        # The free unit can still go back to stock, at its frozen cost.
+        self._action(free.id, "return")
+        self.assertEqual(self._stock(), Decimal("9.00"))
+        self.assertEqual(self._balance("5001"), Decimal("150000"))
+
+    def test_fluids_can_be_partly_given_free(self):
+        self.part.item_type = Part.ItemType.FLUID
+        self.part.save(update_fields=["item_type"])
+        self.assertEqual(self._action_qty(self.part_line.id, "not-charged", 1).status_code, status.HTTP_200_OK)
+        self.assertEqual(InvoiceLineItem.objects.filter(invoice_id=self.invoice_id, kind="part").count(), 2)
+
+    def test_not_charged_with_the_full_quantity_keeps_one_line(self):
+        self._action_qty(self.part_line.id, "not-charged", 2)
+        self.part_line.refresh_from_db()
+        self.assertEqual(self.part_line.unit_price, Decimal("0.00"))
+        self.assertEqual(InvoiceLineItem.objects.filter(invoice_id=self.invoice_id, kind="part").count(), 1)
+
+    def test_a_stale_line_cannot_be_returned_twice(self):
+        invoice = Invoice.objects.get(pk=self.invoice_id)
+        stale = InvoiceLineItem.objects.get(pk=self.part_line.pk)
+        with self.captureOnCommitCallbacks(execute=True):
+            invoice.return_part_line(self.part_line)
+        with self.assertRaisesMessage(ValueError, "sudah tidak ada"):
+            invoice.return_part_line(stale, quantity=1)
+        self.assertEqual(self._stock(), Decimal("10.00"))
