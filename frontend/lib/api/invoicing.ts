@@ -157,12 +157,13 @@ export const invoicesApi = {
     const { data } = await api.post(`/api/invoices/${invoiceId}/part-lines/`, payload);
     return data.invoice;
   },
-  async returnPartLine(lineId: string): Promise<Invoice> {
-    const { data } = await api.post(`/api/invoices/part-lines/${lineId}/return/`);
+  // quantity omitted = the whole line (23 Oct 2026: partial is allowed).
+  async returnPartLine(lineId: string, quantity?: number): Promise<Invoice> {
+    const { data } = await api.post(`/api/invoices/part-lines/${lineId}/return/`, quantity === undefined ? {} : { quantity });
     return data.invoice;
   },
-  async markPartNotCharged(lineId: string): Promise<Invoice> {
-    const { data } = await api.post(`/api/invoices/part-lines/${lineId}/not-charged/`);
+  async markPartNotCharged(lineId: string, quantity?: number): Promise<Invoice> {
+    const { data } = await api.post(`/api/invoices/part-lines/${lineId}/not-charged/`, quantity === undefined ? {} : { quantity });
     return data.invoice;
   },
 };
