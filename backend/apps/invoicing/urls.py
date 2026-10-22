@@ -5,8 +5,9 @@ from django.urls import path
 
 from .views import (InvoiceCreateView, InvoiceDetailView,
                     InvoiceLaborLineDetailView, InvoiceLaborLineListView,
-                    InvoiceListView, InvoicePdfView, InvoiceStatusUpdateView,
-                    InvoiceSuggestedLaborLinesView)
+                    InvoiceListView, InvoicePartLineActionView,
+                    InvoicePartLineListView, InvoicePdfView,
+                    InvoiceStatusUpdateView, InvoiceSuggestedLaborLinesView)
 
 urlpatterns = [
     path("service-records/<uuid:service_record_id>/invoice/",
@@ -22,4 +23,7 @@ urlpatterns = [
     # 22 Oct 2026 (Phase 21, Task C1) -- jasa lines on a DRAFT invoice.
     path("invoices/<uuid:pk>/line-items/",  InvoiceLaborLineListView.as_view(),   name="invoice-labor-line-add"),
     path("invoices/line-items/<uuid:pk>/",  InvoiceLaborLineDetailView.as_view(), name="invoice-labor-line-detail"),
+    # 22 Oct 2026 (Phase 21, Task C2) -- parts on a DRAFT invoice.
+    path("invoices/<uuid:pk>/part-lines/",  InvoicePartLineListView.as_view(),   name="invoice-part-line-add"),
+    path("invoices/part-lines/<uuid:pk>/<str:action>/", InvoicePartLineActionView.as_view(), name="invoice-part-line-action"),
 ]

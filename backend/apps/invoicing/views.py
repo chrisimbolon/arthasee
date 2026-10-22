@@ -5,7 +5,9 @@ from decimal import Decimal
 
 from apps.accounting.services.readiness import readiness_block_response
 from apps.core.views import TenantScopedAPIView
+from apps.inventory.models import Part
 from apps.service.models import ServiceRecord
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse
@@ -139,6 +141,10 @@ class InvoiceCreateView(TenantScopedAPIView):
                         invoice=invoice, kind="part",
                         description=pu.part.name, quantity=pu.quantity,
                         unit_price=pu.unit_price_at_time, part=pu.part,
+                        # 22 Oct 2026 (Phase 21, Task C2) -- the cost this
+                        # part left stock at on the WO, so a later "Dikembalikan
+                        # ke stok" on the draft reverses exactly that.
+                        unit_cost=invoice._work_order_unit_cost(pu.part_id),
                     )
 
                 for line in labor_lines:
@@ -531,4 +537,70 @@ class InvoiceLaborLineDetailView(TenantScopedAPIView):
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         invoice = Invoice.objects.get(pk=invoice_id)
+        return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
+
+
+# ── 22 Oct 2026 (Phase 21, Task C2) — parts on a DRAFT invoice ──
+# Adding a part and returning one to stock both post to the ledger
+# (InvoicePartAdjusted), so both go through the readiness gate first
+# (Cheat Sheet section 13, decided explicitly). "Tidak ditagih" moves
+# nothing, so it does not. The real rules live in Invoice.add_part_line()
+# / return_part_line() / mark_part_not_charged().
+_NOT_DRAFT_PART_MESSAGE = "Invoice sudah diterbitkan atau dibatalkan — part tidak bisa diubah lagi."
+
+
+class InvoicePartLineListView(TenantScopedAPIView):
+    """POST /api/invoices/<id>/part-lines/  {"part": <id>, "quantity": n, "unit_price": optional}"""
+    model = Invoice
+
+    def post(self, request, pk):
+        invoice = self.get_object(pk)
+        if invoice.status != "DRAFT":
+            return Response({"success": False, "message": _NOT_DRAFT_PART_MESSAGE}, status=status.HTTP_409_CONFLICT)
+        blocked = readiness_block_response(invoice.organization)
+        if blocked is not None:
+            return blocked
+        try:
+            part = Part.objects.filter(pk=request.data.get("part"), organization=invoice.organization).first()
+        except (DjangoValidationError, ValueError):
+            part = None
+        if part is None:
+            return Response({"success": False, "message": "Part tidak ditemukan."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            invoice.add_part_line(
+                part=part, quantity=request.data.get("quantity", 1), unit_price=request.data.get("unit_price"),
+            )
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(pk=invoice.pk)
+        return Response({"success": True, "invoice": InvoiceSerializer(invoice).data}, status=status.HTTP_201_CREATED)
+
+
+class InvoicePartLineActionView(TenantScopedAPIView):
+    """
+    POST /api/invoices/part-lines/<id>/return/       "Dikembalikan ke stok"
+    POST /api/invoices/part-lines/<id>/not-charged/  "Tidak ditagih"
+    """
+    model = InvoiceLineItem
+
+    def post(self, request, pk, action):
+        line = self.get_object(pk)
+        if action not in ("return", "not-charged"):
+            return Response({"success": False, "message": "Aksi tidak dikenal."}, status=status.HTTP_404_NOT_FOUND)
+        if line.kind != "part":
+            return Response({"success": False, "message": "Hanya baris part."}, status=status.HTTP_409_CONFLICT)
+        invoice = line.invoice
+        if invoice.status != "DRAFT":
+            return Response({"success": False, "message": _NOT_DRAFT_PART_MESSAGE}, status=status.HTTP_409_CONFLICT)
+        try:
+            if action == "return":
+                blocked = readiness_block_response(invoice.organization)
+                if blocked is not None:
+                    return blocked
+                invoice.return_part_line(line)
+            else:
+                invoice.mark_part_not_charged(line)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(pk=invoice.pk)
         return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})

@@ -6,6 +6,7 @@ Arthasee — Invoicing Domain Events
 """
 import uuid
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 from apps.core.events.interfaces import DomainEvent
@@ -128,3 +129,36 @@ class InvoiceRefunded(DomainEvent):
     method: str
     refunded_by: uuid.UUID | None = None
     event_type: str = field(init=False, default="InvoiceRefunded", kw_only=True)
+
+
+@dataclass(frozen=True)
+class InvoicePartAdjusted(DomainEvent):
+    """
+    22 Oct 2026 (Phase 21, Task C2) — a part added to, or returned to stock
+    from, a DRAFT invoice. Made's note, 12 Sep 2026: "Waktu invoice di posisi
+    draft, masih bisa tambah & kurang barang / jasa."
+
+    By the time an invoice exists its WorkOrder is closed and its parts'
+    cost has already moved WIP -> COGS (WorkOrderCompleted). So a part
+    changed on the draft goes straight between Inventory and COGS:
+
+      direction "added"    -> Dr COGS Sparepart (5001) / Cr Inventory (1301)
+      direction "returned" -> Dr Inventory (1301) / Cr COGS Sparepart (5001)
+
+    both for `amount` = quantity x unit_cost (the part's COST, never its
+    selling price). A "returned" line uses the cost frozen on that invoice
+    line when it was created (InvoiceLineItem.unit_cost), so it undoes
+    exactly what was booked. "Tidak ditagih" (given free) publishes nothing:
+    the part really was used, so its cost correctly stays in COGS.
+
+    Published by Invoice.add_part_line() / Invoice.return_part_line().
+    transaction_date frozen at creation (Cheat Sheet section 4).
+    """
+    invoice_id: uuid.UUID
+    part_id: uuid.UUID
+    direction: str
+    quantity: Decimal
+    unit_cost: Decimal
+    amount: Decimal
+    transaction_date: date
+    event_type: str = field(init=False, default="InvoicePartAdjusted", kw_only=True)
