@@ -45,6 +45,7 @@ from decimal import Decimal, InvalidOperation
 
 from apps.core.models import TenantScopedModel
 from django.db import models, transaction
+from django.utils import timezone
 
 
 class InvoiceSequence(TenantScopedModel):
@@ -295,7 +296,8 @@ class Invoice(TenantScopedModel):
     def _lock_draft(self):
         locked = Invoice.objects.select_for_update().get(pk=self.pk)
         if locked.status != "DRAFT":
-            raise ValueError("Invoice sudah diterbitkan atau dibatalkan — jasa tidak bisa diubah lagi.")
+            # 22 Oct 2026 (Task C2): message made generic — jasa and parts share this lock.
+            raise ValueError("Invoice sudah diterbitkan atau dibatalkan — tidak bisa diubah lagi.")
         return locked
 
     @classmethod
@@ -311,7 +313,7 @@ class Invoice(TenantScopedModel):
         if not qty.is_finite() or qty <= 0 or qty > cls._MAX_LABOR_QTY:
             raise ValueError("Jumlah harus lebih dari 0.")
         if not price.is_finite() or price < 0 or price > cls._MAX_LABOR_PRICE:
-            raise ValueError("Harga jasa tidak boleh negatif.")
+            raise ValueError("Harga tidak boleh negatif.")
         return description[:255], qty.quantize(Decimal("0.01")), price.quantize(Decimal("0.01"))
 
     def _own_labor_line(self, line):
@@ -342,6 +344,134 @@ class Invoice(TenantScopedModel):
         with transaction.atomic():
             self._lock_draft()
             line.delete()
+
+    # ── 22 Oct 2026 (Phase 21, Task C2) — PARTS on a DRAFT invoice ─────────
+    # Made's note, 12 Sep 2026: "Waktu invoice di posisi draft, masih bisa
+    # tambah & kurang barang." Unlike jasa (C1), a part moves stock and cost:
+    # the WorkOrder is already closed and its parts' cost already sits in
+    # COGS, so changes here go straight between Inventory and COGS through
+    # InvoicePartAdjusted (see its docstring). Agreed 22 Oct with Chris:
+    #   - removing is whole-line only (no partial returns);
+    #   - "Dikembalikan ke stok" = stock back + Dr 1301 / Cr 5001 at the
+    #     line's own frozen cost; the line leaves the invoice;
+    #   - "Tidak ditagih" = no stock or ledger movement; the line STAYS at
+    #     Rp 0 marked "(tidak ditagih)" so the customer sees it was free.
+    # Same row lock + DRAFT re-check as the jasa methods, plus the period
+    # lock (readiness is checked in the views, Cheat Sheet section 13).
+    NOT_CHARGED_SUFFIX = " (tidak ditagih)"
+
+    def _work_order_unit_cost(self, part_id):
+        """The cost this part left stock at on this invoice's WorkOrder —
+        quantity-weighted across its material lines — or None."""
+        work_order = getattr(self.service_record, "work_order", None)
+        if work_order is None:
+            return None
+        lines = [ml for ml in work_order.material_lines.all() if ml.part_id == part_id]
+        quantity = sum((ml.quantity for ml in lines), Decimal("0"))
+        if not quantity:
+            return None
+        total = sum((ml.quantity * ml.unit_price_at_time for ml in lines), Decimal("0"))
+        return (total / quantity).quantize(Decimal("0.01"))
+
+    @staticmethod
+    def _current_unit_cost(part):
+        # The same rule WorkOrderMaterialLine.save() uses: last real cost,
+        # falling back to the selling price for a part never received via GRN.
+        return (part.cost_price or part.unit_price).quantize(Decimal("0.01"))
+
+    def _own_part_line(self, line):
+        if line.invoice_id != self.pk:
+            raise ValueError("Baris ini bukan milik invoice ini.")
+        if line.kind != "part" or line.part_id is None:
+            raise ValueError("Hanya baris part yang bisa diubah di sini.")
+
+    @staticmethod
+    def _today():
+        from apps.accounting.periods import safe_local_date
+        return safe_local_date(timezone.now())
+
+    def add_part_line(self, *, part, quantity, unit_price=None):
+        """Adds a part used on this job: stock goes down now (through a real
+        PartUsage, so the vehicle's service history shows it), the line is
+        billed at the selling price, and its cost moves Inventory -> COGS."""
+        from apps.accounting.models import AccountingPeriod
+        from apps.core.events.bus import default_bus
+        from apps.inventory.models import PartUsage
+        from .events import InvoicePartAdjusted
+
+        if part.organization_id != self.organization_id:
+            raise ValueError("Part tidak ditemukan.")
+        price = part.unit_price if unit_price in (None, "") else unit_price
+        _, qty, price = self._clean_labor(part.name, quantity, price)
+        unit_cost = self._current_unit_cost(part)
+        today = self._today()
+
+        with transaction.atomic():
+            self._lock_draft()
+            AccountingPeriod.assert_open_for_posting(self.organization, today)
+            PartUsage.objects.create(
+                organization=self.organization, service_record=self.service_record,
+                part=part, quantity=qty, unit_price_at_time=price,
+            )
+            line = InvoiceLineItem.objects.create(
+                invoice=self, kind="part", description=part.name, quantity=qty,
+                unit_price=price, part=part, unit_cost=unit_cost,
+            )
+            default_bus.publish(InvoicePartAdjusted(
+                organization_id=self.organization_id, invoice_id=self.id, part_id=part.id,
+                direction="added", quantity=qty, unit_cost=unit_cost,
+                amount=(qty * unit_cost).quantize(Decimal("0.01")), transaction_date=today,
+            ))
+        return line
+
+    def return_part_line(self, line):
+        """"Dikembalikan ke stok": the whole line goes back to stock, its
+        cost back from COGS to Inventory at the cost it was booked at, and
+        the line leaves the invoice (and the vehicle's service history)."""
+        from apps.accounting.models import AccountingPeriod
+        from apps.core.events.bus import default_bus
+        from apps.inventory.models import PartUsage, StockAdjustment
+        from .events import InvoicePartAdjusted
+
+        self._own_part_line(line)
+        unit_cost = (
+            line.unit_cost
+            or self._work_order_unit_cost(line.part_id)
+            or self._current_unit_cost(line.part)
+        )
+        today = self._today()
+
+        with transaction.atomic():
+            self._lock_draft()
+            AccountingPeriod.assert_open_for_posting(self.organization, today)
+            StockAdjustment.objects.create(
+                organization=self.organization, part=line.part, quantity_change=line.quantity,
+                reason="invoice_part_returned", notes=f"Dikembalikan dari invoice {self.number}",
+            )
+            usage = (PartUsage.objects
+                     .filter(service_record=self.service_record, part=line.part, quantity=line.quantity)
+                     .order_by("-created_at").first())
+            if usage is not None:
+                usage.delete()  # history only — the StockAdjustment above already moved the stock
+            default_bus.publish(InvoicePartAdjusted(
+                organization_id=self.organization_id, invoice_id=self.id, part_id=line.part_id,
+                direction="returned", quantity=line.quantity, unit_cost=unit_cost,
+                amount=(line.quantity * unit_cost).quantize(Decimal("0.01")), transaction_date=today,
+            ))
+            line.delete()
+
+    def mark_part_not_charged(self, line):
+        """"Tidak ditagih": the part was used and stays on the invoice at
+        Rp 0, marked so the customer can see it was given free. No stock or
+        ledger movement — its cost correctly stays in COGS."""
+        self._own_part_line(line)
+        with transaction.atomic():
+            self._lock_draft()
+            if not line.description.endswith(self.NOT_CHARGED_SUFFIX):
+                line.description = line.description[: 255 - len(self.NOT_CHARGED_SUFFIX)] + self.NOT_CHARGED_SUFFIX
+            line.unit_price = Decimal("0.00")
+            line.save(update_fields=["description", "unit_price"])
+        return line
 
 
 class InvoiceLineItem(TenantScopedModel):
@@ -380,6 +510,16 @@ class InvoiceLineItem(TenantScopedModel):
         # matter much in practice — a Part referenced by a real
         # invoice line item is exactly the kind of history Principle
         # 2 says must not silently vanish.
+    )
+    # 22 Oct 2026 (Phase 21, Task C2) — the COST of one unit of this part
+    # line (never shown to the customer). Copied when the line is created:
+    # from the WorkOrder's material lines at "Buat Invoice", or the part's
+    # cost price when added on a draft. "Dikembalikan ke stok" reverses at
+    # exactly this cost. Null for jasa lines and for part lines created
+    # before this field existed (those fall back to the WO cost).
+    unit_cost = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True, editable=False,
+        verbose_name="Harga Pokok (HPP)",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
