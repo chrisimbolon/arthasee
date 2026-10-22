@@ -317,6 +317,19 @@ class InvoiceStatusUpdateView(TenantScopedAPIView):
             )
 
         with transaction.atomic():
+            # 22 Oct 2026 (Phase 21, Task C1) -- lock this invoice's row and
+            # re-check its status before changing it. Invoice.add/update/
+            # remove_labor_line() take the same lock, so a jasa can never be
+            # added between the InvoiceIssued total being computed below and
+            # the status becoming ISSUED -- and two clicks can't both issue.
+            locked_status = (
+                Invoice.objects.select_for_update().values_list("status", flat=True).get(pk=invoice.pk)
+            )
+            if locked_status != old_status:
+                return Response(
+                    {"success": False, "message": "Status invoice baru saja berubah — muat ulang halaman ini."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             invoice.status = new_status
             invoice.save(update_fields=["status"])
 
@@ -442,3 +455,80 @@ class InvoicePdfView(TenantScopedAPIView):
         safe_number = "".join(c if c.isalnum() or c in " -_" else "_" for c in invoice.number)
         response["Content-Disposition"] = f'attachment; filename="Invoice_{safe_number}.pdf"'
         return response
+
+
+# ── 22 Oct 2026 (Phase 21, Task C1) — jasa lines on a DRAFT invoice ──
+# Made's note, 12 Sep: a draft invoice can still gain or lose jasa. No
+# ledger effect until issue (InvoiceIssued reads the lines then), so no
+# readiness gate here (Cheat Sheet section 13, decided explicitly). The
+# real rules live in Invoice.add/update/remove_labor_line() — these views
+# only translate. Part lines are Task C2.
+_NOT_DRAFT_MESSAGE = "Invoice sudah diterbitkan atau dibatalkan — jasa tidak bisa diubah lagi."
+
+
+def _labor_fields(data):
+    return {
+        "description": data.get("description"),
+        "quantity": data.get("quantity", 1),
+        "unit_price": data.get("unit_price"),
+    }
+
+
+class InvoiceLaborLineListView(TenantScopedAPIView):
+    """POST /api/invoices/<id>/line-items/  {"description", "quantity", "unit_price"}"""
+    model = Invoice
+
+    def post(self, request, pk):
+        invoice = self.get_object(pk)
+        if invoice.status != "DRAFT":
+            return Response({"success": False, "message": _NOT_DRAFT_MESSAGE}, status=status.HTTP_409_CONFLICT)
+        try:
+            invoice.add_labor_line(**_labor_fields(request.data))
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(pk=invoice.pk)
+        return Response({"success": True, "invoice": InvoiceSerializer(invoice).data}, status=status.HTTP_201_CREATED)
+
+
+class InvoiceLaborLineDetailView(TenantScopedAPIView):
+    """
+    PATCH  /api/invoices/line-items/<id>/  {"description", "quantity", "unit_price"}
+    DELETE /api/invoices/line-items/<id>/
+    Jasa lines on a DRAFT invoice only.
+    """
+    model = InvoiceLineItem
+
+    def _check(self, line):
+        if line.invoice.status != "DRAFT":
+            return Response({"success": False, "message": _NOT_DRAFT_MESSAGE}, status=status.HTTP_409_CONFLICT)
+        if line.kind != "labor":
+            return Response(
+                {"success": False, "message": "Baris part belum bisa diubah dari invoice — ubah lewat work order."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return None
+
+    def patch(self, request, pk):
+        line = self.get_object(pk)
+        blocked = self._check(line)
+        if blocked is not None:
+            return blocked
+        try:
+            line.invoice.update_labor_line(line, **_labor_fields(request.data))
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(pk=line.invoice_id)
+        return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
+
+    def delete(self, request, pk):
+        line = self.get_object(pk)
+        blocked = self._check(line)
+        if blocked is not None:
+            return blocked
+        invoice_id = line.invoice_id
+        try:
+            line.invoice.remove_labor_line(line)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(pk=invoice_id)
+        return Response({"success": True, "invoice": InvoiceSerializer(invoice).data})
