@@ -580,6 +580,8 @@ class InvoicePartLineActionView(TenantScopedAPIView):
     """
     POST /api/invoices/part-lines/<id>/return/       "Dikembalikan ke stok"
     POST /api/invoices/part-lines/<id>/not-charged/  "Tidak ditagih"
+    Optional body {"quantity": n} (23 Oct 2026) — only n of the line; omitted
+    = the whole line. Fluids can't be returned partly (the model refuses).
     """
     model = InvoiceLineItem
 
@@ -597,9 +599,9 @@ class InvoicePartLineActionView(TenantScopedAPIView):
                 blocked = readiness_block_response(invoice.organization)
                 if blocked is not None:
                     return blocked
-                invoice.return_part_line(line)
+                invoice.return_part_line(line, quantity=request.data.get("quantity"))
             else:
-                invoice.mark_part_not_charged(line)
+                invoice.mark_part_not_charged(line, quantity=request.data.get("quantity"))
         except ValueError as e:
             return Response({"success": False, "message": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         invoice = Invoice.objects.get(pk=invoice.pk)
