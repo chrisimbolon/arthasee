@@ -15,9 +15,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
+    // Phase 22 (24 Oct 2026): a super admin has no shop, and the tenant
+    // views would show every shop's rows mixed together — keep them on /platform.
+    else if (!loading && user?.role === "super_admin") router.replace("/platform");
   }, [loading, user, router]);
 
-  if (loading || !user) {
+  if (loading || !user || user.role === "super_admin") {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--steel)" }}>
         <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
