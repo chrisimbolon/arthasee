@@ -11,6 +11,8 @@ urlpatterns = [
 
     path("api/auth/",          include("apps.authentication.urls")),
     path("api/organizations/", include("apps.organizations.urls")),
+    # Phase 22 (24 Oct 2026) — super admin's read-only platform overview.
+    path("api/platform/",      include("apps.organizations.platform_urls")),
     path("api/",               include("apps.service.urls")),
     path("api/",               include("apps.inventory.urls")),
     path("api/",               include("apps.invoicing.urls")),
