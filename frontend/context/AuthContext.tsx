@@ -58,7 +58,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [me, orgResult] = await Promise.all([authApi.me(), organizationsApi.mine()]);
     setUser(me);
     setOrganization(orgResult?.organization ?? null);
-    router.push("/dashboard");
+    // Phase 22 (24 Oct 2026): a super admin has no shop — their home is /platform.
+    router.push(me.role === "super_admin" ? "/platform" : "/dashboard");
   };
 
   const register = async (payload: RegisterPayload) => {
