@@ -247,7 +247,12 @@ function DraftJasaEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
 //     "(tidak ditagih)" so the customer sees it was free. Nothing moves.
 // Both posting actions can be stopped by the readiness gate; the shared
 // notice explains why. Staff-only card: hidden when printing.
-function DraftPartEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: () => void }) {
+// 23 Oct 2026 — onPendingChange tells the page a "how many?" row is open, so
+// "Terbitkan Invoice" waits until it is confirmed or cancelled (found in testing:
+// the row was left open and the invoice issued without the return).
+function DraftPartEditor({ invoice, onUpdated, onPendingChange }: {
+  invoice: Invoice; onUpdated: () => void; onPendingChange?: (pending: boolean) => void;
+}) {
   const partItems = invoice.line_items.filter((li) => li.kind === "part");
   const [catalog, setCatalog] = useState<Part[]>([]);
   const [partId, setPartId] = useState("");
@@ -263,6 +268,8 @@ function DraftPartEditor({ invoice, onUpdated }: { invoice: Invoice; onUpdated: 
   useEffect(() => { partsApi.list().then(setCatalog).catch(() => setCatalog([])); }, []);
 
   const isFluid = (partId: string | null) => catalog.find((p) => p.id === partId)?.item_type === "FLUID";
+
+  useEffect(() => { onPendingChange?.(pick !== null); }, [pick, onPendingChange]);
 
   const selected = catalog.find((p) => p.id === partId) ?? null;
   const selectedCost = selected && Number(selected.cost_price) > 0 ? Number(selected.cost_price) : null;
@@ -415,6 +422,8 @@ function InvoiceDetailContent() {
   const searchParams = useSearchParams();
   const invoiceId = searchParams.get("id") ?? "";
   const [invoice, setInvoice] = useState<Invoice | null>(null);
+  // True while the parts card has an open "how many?" row (see DraftPartEditor).
+  const [partPending, setPartPending] = useState(false);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [orgName, setOrgName] = useState<string | null>(null);
   const [orgAddress, setOrgAddress] = useState<string | null>(null);
@@ -921,11 +930,19 @@ function InvoiceDetailContent() {
       )}
 
       {invoice.status === "DRAFT" && <DraftJasaEditor invoice={invoice} onUpdated={load} />}
-      {invoice.status === "DRAFT" && <DraftPartEditor invoice={invoice} onUpdated={load} />}
+      {invoice.status === "DRAFT" && <DraftPartEditor invoice={invoice} onUpdated={load} onPendingChange={setPartPending} />}
+      {invoice.status === "DRAFT" && partPending && (
+        <div className="no-print" style={{ maxWidth: 720, margin: "14px auto 0", textAlign: "center", fontSize: 12.5, color: "var(--danger)" }}>
+          Selesaikan atau batalkan dulu baris &quot;Berapa yang …?&quot; di kartu Ubah Part sebelum menerbitkan invoice.
+        </div>
+      )}
 
       <div className="no-print" style={{ maxWidth: 720, margin: "18px auto 0", display: "flex", gap: 10, justifyContent: "center" }}>
         {invoice.status === "DRAFT" && (
-          <button className="btn-rust" disabled={updating} onClick={() => changeStatus("ISSUED")}>Terbitkan Invoice</button>
+          <button className="btn-rust" disabled={updating || partPending} onClick={() => changeStatus("ISSUED")}
+            title={partPending ? "Selesaikan atau batalkan pengembalian / tidak ditagih part dulu" : undefined}>
+            Terbitkan Invoice
+          </button>
         )}
         {(invoice.status === "ISSUED" || invoice.status === "PARTIALLY_PAID") && !showPaymentForm && (
           <button className="btn-rust" disabled={updating} onClick={openPaymentForm}>Catat Pembayaran</button>
